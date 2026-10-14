@@ -209,6 +209,12 @@ class SglangConfig(BaseConfig):
     python: str | None = None
     """Python interpreter that runs the SGLang server. ``None`` uses the current one; point it at an SGLang venv's interpreter when SGLang cannot share prime-rl's environment."""
 
+    sessions: bool = False
+    """Hold each trace's KV in an SGLang streaming session (keyed by the ``X-Session-ID`` trace id). Append-only turns then send only their new tokens, and nothing the trace wrote is re-prefilled or evicted by the radix cache. Sessions close when the orchestrator finishes the trace, or after ``session_timeout`` idle seconds."""
+
+    session_timeout: float = Field(3600.0, gt=0)
+    """Idle seconds after which SGLang closes a session the orchestrator never finished."""
+
     @model_validator(mode="before")
     @classmethod
     def parse_extra_values(cls, data: dict) -> dict:

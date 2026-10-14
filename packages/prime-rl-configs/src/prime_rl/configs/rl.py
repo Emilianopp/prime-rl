@@ -753,6 +753,15 @@ class RLConfig(BaseConfig):
             port = self.inference.server.port
             client.base_url = f"http://{host}:{port}/v1"
         if (
+            self.inference.backend == "sglang"
+            and self.inference.router is None
+            and "admin_base_url" not in client.model_fields_set
+        ):
+            # No router: point admin traffic at the engine explicitly, which also
+            # enables the orchestrator's /finish_session calls that close SGLang sessions.
+            host = self.inference.server.host or "localhost"
+            client.admin_base_url = [f"http://{host}:{self.inference.server.port}/v1"]
+        if (
             self.deployment.type == "single_node"
             and self.inference.router is not None
             and "admin_base_url" not in client.model_fields_set
