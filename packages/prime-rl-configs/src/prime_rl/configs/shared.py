@@ -95,7 +95,12 @@ class RunConfig(BaseConfig):
     """Run directory name — the run writes all its artifacts to ``output_dir / dir``. Defaults to ``run.name``; set it only when the directory should differ from the display name."""
 
 
-class ResumeConfig(BaseConfig):
+class BaseResumeConfig(BaseConfig):
+    skip_checks: bool = False
+    """Reuse saved state even when resolved configs differ or snapshots are missing."""
+
+
+class ResumeConfig(BaseResumeConfig):
     """Resume the run from a checkpoint. A bare ``--resume`` (or empty ``[resume]`` block)
     resumes from the latest checkpoint."""
 
