@@ -32,6 +32,20 @@ VALID_VLLM_LORA_RANKS = (8, 16, 32, 64, 128, 256, 320, 512)
 QuantizationType = Literal["fp8_per_block", "mxfp8"]
 
 
+def _normalize_pass_through(cls: type[BaseConfig], data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    for key in [k for k in data if k not in cls.model_fields]:
+        value = data.pop(key)
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                pass
+        data[key.replace("-", "_")] = value
+    return data
+
+
 class VllmConfig(BaseConfig):
     """Arguments forwarded to the vLLM server, under vLLM's own argument names
     (https://docs.vllm.ai/en/latest/configuration/engine_args.html).
@@ -120,17 +134,7 @@ class VllmConfig(BaseConfig):
         and string values — which is how CLI overrides arrive — are JSON-parsed so
         ``--vllm.max-num-seqs 256`` lands as an int and ``--vllm.compilation-config
         '{"cudagraph_mode": "NONE"}'`` as a dict. Non-JSON strings stay strings."""
-        if not isinstance(data, dict):
-            return data
-        for key in [k for k in data if k not in cls.model_fields]:
-            value = data.pop(key)
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except json.JSONDecodeError:
-                    pass
-            data[key.replace("-", "_")] = value
-        return data
+        return _normalize_pass_through(cls, data)
 
     @model_validator(mode="after")
     def auto_resolve_parsers(self):
@@ -183,6 +187,30 @@ class VllmConfig(BaseConfig):
         if self.enable_lora:
             self.api_server_count = 1  # LoRA requires only one API server
         return self
+
+
+class SglangConfig(BaseConfig):
+    """Arguments forwarded to the SGLang server when ``inference.backend = "sglang"``,
+    under SGLang's own ``ServerArgs`` names (``[inference.sglang] page_size = 1`` or
+    ``--sglang.page-size 1``). Every field except ``python`` passes through verbatim.
+
+    Engine-agnostic settings are configured once, in ``[inference.vllm]``, and
+    translated: ``model`` -> ``model_path``, ``max_model_len`` -> ``context_length``,
+    ``tensor_parallel_size`` -> ``tp_size``, ``gpu_memory_utilization`` ->
+    ``mem_fraction_static``, ``enable_prefix_caching = false`` ->
+    ``disable_radix_cache``. A key set here wins over its translation.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    python: str | None = None
+    """Python interpreter that runs the SGLang server. ``None`` uses the current one; point it at an SGLang venv's interpreter when SGLang cannot share prime-rl's environment."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_extra_values(cls, data: dict) -> dict:
+        """Same normalization as ``VllmConfig``: kebab-case to snake_case, JSON-parsed strings."""
+        return _normalize_pass_through(cls, data)
 
 
 class WeightBroadcastConfig(BaseConfig):
@@ -421,6 +449,12 @@ class InferenceConfig(BaseConfig):
     vllm: VllmConfig = Field(default_factory=VllmConfig)
     """vLLM server arguments, under vLLM's own argument names. Unknown fields pass through verbatim."""
 
+    backend: Literal["vllm", "sglang"] = "vllm"
+    """Inference engine. ``sglang`` serves the same prime-rl endpoints (``/inference/v1/generate``, ``/pause``, ``/update_weights``, ``/resume``) from an SGLang engine, so the orchestrator and clients are unchanged. Model and parallelism still come from ``[inference.vllm]``; SGLang-only arguments go in ``[inference.sglang]``."""
+
+    sglang: SglangConfig = Field(default_factory=SglangConfig)
+    """SGLang server arguments, used when ``backend = "sglang"``."""
+
     log: LogConfig = LogConfig()
     """Logging configuration."""
 
@@ -484,6 +518,35 @@ class InferenceConfig(BaseConfig):
             raise ValueError("The llm-d router backend requires a multi-node or disaggregated SLURM deployment.")
         if self.router is None and self.deployment.type in ("multi_node", "disaggregated"):
             raise ValueError("Multi-node / disaggregated deployments require a router fronting the per-rank engines.")
+        return self
+
+    @model_validator(mode="after")
+    def validate_sglang_backend(self):
+        """The SGLang backend starts narrow: one engine, filesystem weight updates, and
+        none of the vLLM-only features. A router is turned off unless set explicitly."""
+        if self.backend != "sglang":
+            return self
+        if "router" not in self.model_fields_set:
+            self.router = None
+        unsupported = []
+        if self.router is not None:
+            unsupported.append("a router (set inference.router = 'None')")
+        if self.deployment.type != "single_node":
+            unsupported.append(f"deployment type {self.deployment.type!r}")
+        if self.weight_broadcast.type != "filesystem":
+            unsupported.append(f"weight broadcast {self.weight_broadcast.type!r} (use 'filesystem')")
+        if self.vllm.data_parallel_size != 1:
+            unsupported.append("inference.vllm.data_parallel_size > 1")
+        if self.vllm.enable_lora:
+            unsupported.append("LoRA")
+        if self.vllm.enable_return_routed_experts:
+            unsupported.append("routed-expert return")
+        if self.enable_return_sampling_mask:
+            unsupported.append("sampling masks (truncated train sampling: top_k / top_p / min_p)")
+        if self.kv_cache_offload is not None:
+            unsupported.append("KV cache offload")
+        if unsupported:
+            raise ValueError("inference.backend = 'sglang' does not support " + "; ".join(unsupported) + " yet.")
         return self
 
     @model_validator(mode="after")
