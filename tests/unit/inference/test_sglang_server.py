@@ -97,3 +97,18 @@ def test_response_rejects_logprob_count_mismatch():
     result["meta_info"]["output_token_logprobs"] = result["meta_info"]["output_token_logprobs"][:1]
     with pytest.raises(RuntimeError):
         build_generate_response(result, [1, 2, 3])
+
+
+def test_load_metrics_parse_as_the_controller_reads_them():
+    from types import SimpleNamespace
+
+    from prime_rl.inference.sglang.server import render_load_metrics
+    from prime_rl.orchestrator.inference_metrics import parse_prometheus_text
+
+    load = SimpleNamespace(dp_rank=0, token_usage=0.25, num_running_reqs=7, num_waiting_reqs=2, max_total_num_tokens=652322)
+    [(engine, snapshot)] = parse_prometheus_text(render_load_metrics([load])).items()
+    assert engine == "0"
+    assert snapshot.gauges["kv_cache_usage_perc"] == 0.25
+    assert snapshot.gauges["num_requests_running"] == 7
+    assert snapshot.gauges["num_requests_waiting"] == 2
+    assert snapshot.cache_config["kv_cache_size_tokens"] == "652322"

@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +183,28 @@ async def generate_sglang(
     return build_generate_response(ret, token_ids)
 
 
+def render_load_metrics(loads: list[Any]) -> str:
+    """SGLang per-scheduler load snapshots -> the ``vllm:*`` Prometheus gauges that
+    prime-rl's concurrency controller reads (KV usage and capacity, running and
+    waiting requests). Without them the controller never grows past one in-flight
+    episode."""
+    families = {
+        "vllm:kv_cache_usage_perc": lambda load: float(load.token_usage),
+        "vllm:num_requests_running": lambda load: float(load.num_running_reqs),
+        "vllm:num_requests_waiting": lambda load: float(load.num_waiting_reqs),
+    }
+    lines = []
+    for name, value in families.items():
+        lines.append(f"# TYPE {name} gauge")
+        lines += [f'{name}{{engine="{load.dp_rank}"}} {value(load)}' for load in loads]
+    lines.append("# TYPE vllm:cache_config_info gauge")
+    lines += [
+        f'vllm:cache_config_info{{engine="{load.dp_rank}",kv_cache_size_tokens="{int(load.max_total_num_tokens)}"}} 1.0'
+        for load in loads
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def _tokenizer_manager():
     from sglang.srt.entrypoints.http_server import _global_state
 
@@ -211,6 +233,13 @@ async def inference_generate(request: Request):
     except (GenerateRequestError, ValueError) as e:
         # The tokenizer manager raises ValueError for requests the scheduler rejects (400).
         return _error(str(e), 400)
+
+
+@router.get("/metrics")
+async def metrics(request: Request):
+    """Engine load in vLLM's metric names (SGLang's own ``--enable-metrics`` uses ``sglang:*``)."""
+    loads = await _tokenizer_manager().get_loads()
+    return PlainTextResponse(render_load_metrics(loads), media_type="text/plain; version=0.0.4")
 
 
 @router.post("/pause")
