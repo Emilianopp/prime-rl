@@ -5,10 +5,12 @@ pass means the backend swap is behavior-preserving: rewards rise to the same
 range and the trainer/inference mismatch KL stays in the vLLM band.
 Requires the KV-Streams SGLang fork in the environment, or set
 ``PRIME_SGLANG_PYTHON`` to an SGLang venv's interpreter (forwarded as
-``--inference.sglang.python``).
+``--inference.sglang.python``). ``PRIME_RL_TEST_EXTRA_ARGS`` appends further
+``rl`` arguments.
 """
 
 import os
+import shlex
 from pathlib import Path
 from typing import Callable
 
@@ -59,6 +61,8 @@ def rl_process(
     ]
     if sglang_python := os.environ.get("PRIME_SGLANG_PYTHON"):
         cmd += ["--inference.sglang.python", sglang_python]
+    # Cluster-specific overrides, e.g. a free ZMQ port where a node service holds 5555.
+    cmd += shlex.split(os.environ.get("PRIME_RL_TEST_EXTRA_ARGS", ""))
     return run_process(cmd, timeout=TIMEOUT)
 
 
