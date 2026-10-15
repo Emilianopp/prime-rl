@@ -21,6 +21,9 @@ def sglang_server_args(config: InferenceConfig) -> dict[str, Any]:
         "port": config.server.port,
         "tp_size": vllm.tensor_parallel_size,
         "log_level": config.log.level.lower(),
+        # Token-in/token-out: like the vLLM server's detokenize=False, but engine-wide
+        # in SGLang, so stop strings and min_tokens need skip_tokenizer_init = false.
+        "skip_tokenizer_init": True,
     }
     if vllm.max_model_len is not None:
         args["context_length"] = vllm.max_model_len

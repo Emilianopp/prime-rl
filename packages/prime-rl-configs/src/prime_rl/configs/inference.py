@@ -199,6 +199,9 @@ class SglangConfig(BaseConfig):
     ``tensor_parallel_size`` -> ``tp_size``, ``gpu_memory_utilization`` ->
     ``mem_fraction_static``, ``enable_prefix_caching = false`` ->
     ``disable_radix_cache``. A key set here wins over its translation.
+
+    The server runs with ``skip_tokenizer_init = true`` (no detokenization); set it
+    to ``false`` here if sampling uses stop strings or ``min_tokens``.
     """
 
     model_config = ConfigDict(extra="allow")
