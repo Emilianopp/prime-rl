@@ -1,0 +1,13 @@
+[project]
+name = "textworld-env"
+version = "0.1.0"
+description = "textworld-env — pre-generated TextWorld games, one episode per rollout, reward = score / max score."
+requires-python = ">=3.11"
+dependencies = ["verifiers", "textworld==1.7.0", "datasets"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["textworld_env"]

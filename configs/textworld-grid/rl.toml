@@ -1,0 +1,57 @@
+# TextWorld concurrency grid cell: one RL step of 512 TextWorld episodes
+# (128 games x 4) with Qwen3-4B-Instruct-2507, 2 trainer + 2 inference GPUs
+# (DP2), fixed concurrency. Recreates the kv-eviction full-context grid
+# (batch 512, group 4, 1024 tokens per turn, 200 game steps, 48k context).
+#
+# Per cell, override from the command line:
+#   --orchestrator.concurrency.{min,max,initial}-inflight  2 x per-rank concurrency
+#   --inference.backend sglang  [--inference.sglang.sessions true]
+#   --orchestrator.train.source.0.env.episode-log  per-episode JSONL
+# See scripts/textworld_grid/ for the runner and the summary.
+
+max_steps = 1
+seq_len = 49152
+
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 2
+
+[weight_broadcast]
+# The SGLang backend supports filesystem weight updates only; same on vLLM for parity.
+type = "filesystem"
+
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.01
+max_norm = 1.0
+
+[orchestrator]
+batch_size = 512
+
+[orchestrator.train]
+group_size = 4
+
+[orchestrator.concurrency]
+# c24: 24 in-flight episodes per inference rank.
+initial_inflight = 48
+min_inflight = 48
+max_inflight = 48
+
+[orchestrator.train.sampling]
+max_completion_tokens = 1024
+temperature = 1.0
+
+[[orchestrator.train.source]]
+name = "textworld"
+env.taskset.id = "textworld-env"
+env.taskset.dataset_path = "/network/scratch/e/emiliano.penaloza/kv-race/data/textworld_all4_uniform_total1000_train960_eval40_seed20260724"
+env.max_episode_steps = 200
+env.player.harness.id = "null"
+env.player.runtime.type = "subprocess"
+
+[inference.vllm]
+max_model_len = 49152
+gpu_memory_utilization = 0.82
