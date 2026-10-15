@@ -531,8 +531,9 @@ class InferenceConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_sglang_backend(self):
-        """The SGLang backend starts narrow: one engine, filesystem weight updates, and
-        none of the vLLM-only features. A router is turned off unless set explicitly."""
+        """The SGLang backend starts narrow: one server (data parallel inside it),
+        filesystem weight updates, and none of the vLLM-only features. A router is
+        turned off unless set explicitly."""
         if self.backend != "sglang":
             return self
         if "router" not in self.model_fields_set:
@@ -544,8 +545,6 @@ class InferenceConfig(BaseConfig):
             unsupported.append(f"deployment type {self.deployment.type!r}")
         if self.weight_broadcast.type != "filesystem":
             unsupported.append(f"weight broadcast {self.weight_broadcast.type!r} (use 'filesystem')")
-        if self.vllm.data_parallel_size != 1:
-            unsupported.append("inference.vllm.data_parallel_size > 1")
         if self.vllm.enable_lora:
             unsupported.append("LoRA")
         if self.vllm.enable_return_routed_experts:
