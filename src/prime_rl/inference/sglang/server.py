@@ -24,6 +24,7 @@ import gc
 import itertools
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +35,10 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# SGLang session and kv_eviction call ids allow only these characters
+# (``^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$``).
+_SESSION_UNSAFE = re.compile(r"[^A-Za-z0-9._:-]")
 
 # verifiers sends the trace id in this header (verifiers.v1.clients.client.SESSION_ID_HEADER).
 SESSION_ID_HEADER = "X-Session-ID"
@@ -307,7 +312,7 @@ class SessionTable:
                 else:
                     reopen = trace.engine_session is not None or attempt > 0
                     await self._close(trace)
-                    engine_session = f"{trace_id}#{next(self._incarnation)}"
+                    engine_session = f"{_SESSION_UNSAFE.sub('-', trace_id)[:200]}.{next(self._incarnation)}"
                     if not await self.engine.open_session(engine_session, self.timeout):
                         logger.warning("could not open an SGLang session for trace %s; running stateless", trace_id)
                         return await self.engine.generate(token_ids, sampling_params, **kwargs)
@@ -361,7 +366,7 @@ class SessionTable:
             return {
                 "version": 1,
                 "cache_id": cache_id,
-                "call_id": f"{cache_id}/0",
+                "call_id": f"{cache_id}.c0",
                 "call_index": 0,
                 "expected_state_id": None,
                 "protected_prefix_len": protected,
@@ -379,7 +384,7 @@ class SessionTable:
         return {
             "version": 1,
             "cache_id": cache_id,
-            "call_id": f"{cache_id}/{trace.call_index}",
+            "call_id": f"{cache_id}.c{trace.call_index}",
             "call_index": trace.call_index,
             "expected_state_id": trace.state_id,
             "protected_prefix_len": trace.protected,

@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 import pytest
 
@@ -76,9 +77,9 @@ def test_append_only_turns_send_only_the_new_tail():
 
     engine, r1, r2 = run(scenario())
     assert engine.calls == [
-        ("open", "t#0"),
-        ("generate", "t#0", [1, 2, 3]),
-        ("generate", "t#0", [7, 8]),
+        ("open", "t.0"),
+        ("generate", "t.0", [1, 2, 3]),
+        ("generate", "t.0", [7, 8]),
     ]
     # The response always carries the full prompt, as without a session.
     assert r2["prompt_token_ids"] == [1, 2, 3, 90, 91, 7, 8]
@@ -94,8 +95,8 @@ def test_rewritten_history_reopens_the_session_on_the_full_prompt():
         return engine
 
     engine = run(scenario())
-    assert engine.calls[-3:] == [("close", "t#0"), ("open", "t#1"), ("generate", "t#1", [1, 5, 6])]
-    assert engine.open == {"t#1"}
+    assert engine.calls[-3:] == [("close", "t.0"), ("open", "t.1"), ("generate", "t.1", [1, 5, 6])]
+    assert engine.open == {"t.1"}
 
 
 def test_concurrent_branch_runs_stateless():
@@ -113,7 +114,7 @@ def test_concurrent_branch_runs_stateless():
 
     engine = run(scenario())
     assert ("generate", None, [9, 9]) in engine.calls
-    assert ("generate", "t#0", [1, 2]) in engine.calls
+    assert ("generate", "t.0", [1, 2]) in engine.calls
 
 
 def test_abort_closes_the_session_and_raises():
@@ -128,7 +129,7 @@ def test_abort_closes_the_session_and_raises():
 
     engine = run(scenario())
     # After the abort the next call starts a fresh session on the full prompt.
-    assert engine.calls[-2:] == [("open", "t#1"), ("generate", "t#1", [1, 2, 3, 90, 91, 4])]
+    assert engine.calls[-2:] == [("open", "t.1"), ("generate", "t.1", [1, 2, 3, 90, 91, 4])]
 
 
 def test_finish_closes_the_trace_session():
@@ -142,7 +143,7 @@ def test_finish_closes_the_trace_session():
 
     engine = run(scenario())
     assert engine.open == set()
-    assert engine.calls[-1] == ("close", "t#0")
+    assert engine.calls[-1] == ("close", "t.0")
 
 
 def test_without_a_trace_id_generation_is_stateless():
@@ -221,7 +222,7 @@ def test_eviction_retires_the_oldest_turn_each_call():
     calls = engine.evictions
     assert [c["call_index"] for c in calls] == [0, 1, 2, 3]
     assert [c["expected_state_id"] for c in calls] == [None, "s1", "s2", "s3"]
-    assert all(c["protected_prefix_len"] == 3 and c["cache_id"] == "t#0" for c in calls)
+    assert all(c["protected_prefix_len"] == 3 and c["cache_id"] == "t.0" for c in calls)
     # Turns complete at calls 1, 2, 3; from the second one on, the oldest live
     # turn dies each call. Survivor coordinates: evicted turns are gone, so the
     # next retired turn always starts right after the protected prefix.
@@ -243,9 +244,24 @@ def test_aborted_eviction_call_is_retried_on_a_fresh_session():
     engine, table = run(scenario())
     # The aborted call on t#0 is retried once, as call 0 of a fresh session with
     # the full prompt; that abort is returned.
-    assert [(c["cache_id"], c["call_index"]) for c in engine.evictions] == [("t#0", 0), ("t#0", 1), ("t#1", 0)]
+    assert [(c["cache_id"], c["call_index"]) for c in engine.evictions] == [("t.0", 0), ("t.0", 1), ("t.1", 0)]
     assert engine.calls[-2:] == [
-        ("generate", "t#1", SYSTEM + USER + GEN + [90, E] + BRIDGE + USER + GEN),
-        ("close", "t#1"),
+        ("generate", "t.1", SYSTEM + USER + GEN + [90, E] + BRIDGE + USER + GEN),
+        ("close", "t.1"),
     ]
     assert table.stats["failed_calls"] == 2 and table.stats["reopened"] == 1
+
+
+def test_session_and_call_ids_match_sglang_id_pattern():
+    sglang_id = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        table = SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E))
+        prompt = SYSTEM + USER + GEN
+        await table.generate("trace/with#odd chars", prompt, {})
+        await table.generate("trace/with#odd chars", prompt + [90, E] + BRIDGE + USER + GEN, {})
+        return engine
+
+    for call in run(scenario()).evictions:
+        assert sglang_id.match(call["cache_id"]) and sglang_id.match(call["call_id"]), call
