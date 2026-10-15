@@ -23,6 +23,7 @@ def sglang_server_args(config: InferenceConfig) -> dict[str, Any]:
         "host": config.server.host or "0.0.0.0",
         "port": config.server.port,
         "tp_size": vllm.tensor_parallel_size,
+        "dp_size": vllm.data_parallel_size,
         "log_level": config.log.level.lower(),
         # Token-in/token-out: like the vLLM server's detokenize=False, but engine-wide
         # in SGLang, so stop strings and min_tokens need skip_tokenizer_init = false.

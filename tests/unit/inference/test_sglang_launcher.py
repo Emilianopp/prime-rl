@@ -46,7 +46,6 @@ def test_explicit_memory_fraction_is_carried_over():
         {"weight_broadcast": {"type": "nccl"}},
         {"vllm": {"enable_lora": True}},
         {"enable_return_sampling_mask": True},
-        {"vllm": {"data_parallel_size": 2}},
     ],
 )
 def test_unsupported_features_are_refused(overrides):
@@ -59,3 +58,8 @@ def test_sessions_enable_streaming_sessions_and_stay_out_of_server_args():
     args = sglang_server_args(config)
     assert args["enable_streaming_session"] is True
     assert "sessions" not in args and "session_timeout" not in args
+
+
+def test_data_parallel_size_maps_to_dp_size():
+    config = InferenceConfig(backend="sglang", vllm={"data_parallel_size": 2})
+    assert sglang_server_args(config)["dp_size"] == 2
