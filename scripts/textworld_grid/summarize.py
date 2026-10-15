@@ -37,7 +37,7 @@ def read_gauges(path: Path) -> dict[str, float]:
         if line.startswith("# time"):
             flush()
             continue
-        m = re.match(r"^(vllm:[a-z_]+)(\{[^}]*\})?\s+([0-9.eE+-]+)$", line)
+        m = re.match(r"^((?:vllm|kvs):[a-z_]+)(\{[^}]*\})?\s+([0-9.eE+-]+)$", line)
         if not m:
             continue
         name, labels, value = m.group(1), m.group(2) or "", float(m.group(3))

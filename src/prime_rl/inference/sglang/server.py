@@ -24,6 +24,7 @@ import gc
 import itertools
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +35,10 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# SGLang session and kv_eviction call ids allow only these characters
+# (``^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$``).
+_SESSION_UNSAFE = re.compile(r"[^A-Za-z0-9._:-]")
 
 # verifiers sends the trace id in this header (verifiers.v1.clients.client.SESSION_ID_HEADER).
 SESSION_ID_HEADER = "X-Session-ID"
@@ -176,6 +181,7 @@ class SglangEngine:
         cache_salt: str | None = None,
         priority: int | None = None,
         routed_dp_rank: int | None = None,
+        kv_eviction: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         from sglang.srt.managers.io_struct import GenerateReqInput
 
@@ -190,6 +196,7 @@ class SglangEngine:
             priority=priority,
             session_params={"id": session_id} if session_id is not None else None,
             routed_dp_rank=routed_dp_rank,
+            kv_eviction=kv_eviction,
         )
         # No client handle: prime-rl's dispatcher owns cancellation, not HTTP disconnects.
         return await self.tokenizer_manager.generate_request(obj, None).__anext__()
@@ -213,11 +220,54 @@ def _aborted(ret: dict[str, Any]) -> bool:
 
 
 @dataclass
+class TurnWindow:
+    """The kv-eviction turn schedule (``r{max_turns}-{stride}``), on token ids.
+
+    The first message (through its end marker) is protected. Every two later
+    message ends close one turn. Once ``max_turns`` turns are complete, the
+    ``stride`` oldest live turns die, and again every ``stride`` turns after
+    that, so the live window saws between ``max_turns - stride`` and
+    ``max_turns - 1`` completed turns plus the turn in progress.
+    """
+
+    max_turns: int
+    stride: int
+    message_end_id: int
+    """Token id that ends a chat message (``<|im_end|>`` for Qwen)."""
+
+    def __post_init__(self):
+        if self.max_turns < 1 or not 1 <= self.stride <= self.max_turns:
+            raise ValueError(f"need max_turns >= 1 and 1 <= stride <= max_turns, got {self.max_turns}, {self.stride}")
+
+    def live_turns(self, completed: int) -> int:
+        if completed < self.max_turns:
+            return completed
+        return completed - ((completed - self.max_turns) // self.stride + 1) * self.stride
+
+    def layout(self, token_ids: list[int]) -> tuple[int, int]:
+        """(protected prefix length, chronological tokens after it that are dead)."""
+        ends = [i + 1 for i, token in enumerate(token_ids) if token == self.message_end_id]
+        if not ends:
+            return 0, 0
+        protected, turn_ends = ends[0], ends[2::2]
+        dead_turns = len(turn_ends) - self.live_turns(len(turn_ends))
+        return protected, (turn_ends[dead_turns - 1] - protected if dead_turns else 0)
+
+
+@dataclass
 class _TraceSession:
     engine_session: str | None = None
-    # Prompt + completion of the last call: what the engine session holds.
+    # Prompt + completion of the last call, chronological: what the engine
+    # session holds, apart from the evicted tokens.
     resident: list[int] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # KV-Streams (eviction on): the session's call chain and how many
+    # chronological tokens right after the protected prefix are evicted.
+    finish_reason: Any = None  # of the last call, to explain a later reopen
+    call_index: int = 0
+    state_id: str | None = None
+    protected: int = 0
+    evicted: int = 0
 
 
 class SessionTable:
@@ -229,13 +279,20 @@ class SessionTable:
     history, e.g. a re-prefill compaction branch) reopens the session on the full
     prompt. A request arriving while its trace's session is busy (a concurrent
     branch) runs stateless. The response is identical either way.
+
+    With an ``eviction`` schedule (KV-Streams), each appended turn also evicts
+    the turns the schedule has retired from the session's KV, in place: the
+    survivors keep their positions and are never recomputed. The response still
+    carries the full chronological prompt; the model saw only the live turns.
     """
 
-    def __init__(self, engine: SglangEngine | None, timeout: float):
+    def __init__(self, engine: SglangEngine | None, timeout: float, eviction: TurnWindow | None = None):
         self.engine = engine
         self.timeout = timeout
+        self.eviction = eviction
         self._traces: dict[str, _TraceSession] = {}
         self._incarnation = itertools.count()
+        self.stats = {"opened": 0, "reopened": 0, "evicting_calls": 0, "evicted_tokens": 0, "failed_calls": 0}
 
     async def generate(
         self, trace_id: str, token_ids: list[int], sampling_params: dict[str, Any], **kwargs: Any
@@ -244,33 +301,116 @@ class SessionTable:
         if trace.lock.locked():
             return await self.engine.generate(token_ids, sampling_params, **kwargs)
         async with trace.lock:
-            resident = trace.resident
-            extends = (
-                trace.engine_session is not None
-                and len(token_ids) > len(resident)
-                and token_ids[: len(resident)] == resident
-            )
-            if extends:
-                tail = token_ids[len(resident) :]
-            else:
-                await self._close(trace)
-                engine_session = f"{trace_id}#{next(self._incarnation)}"
-                if not await self.engine.open_session(engine_session, self.timeout):
-                    logger.warning("could not open an SGLang session for trace %s; running stateless", trace_id)
-                    return await self.engine.generate(token_ids, sampling_params, **kwargs)
-                trace.engine_session = engine_session
-                tail = token_ids
-            try:
-                ret = await self.engine.generate(tail, sampling_params, session_id=trace.engine_session, **kwargs)
-            except BaseException:
-                await self._close(trace)
-                raise
-            if _aborted(ret):
-                # The engine session's contents are no longer known: start over next call.
-                await self._close(trace)
+            for attempt in range(2):
+                resident = trace.resident
+                extends = (
+                    trace.engine_session is not None
+                    and len(token_ids) > len(resident)
+                    and token_ids[: len(resident)] == resident
+                )
+                if extends:
+                    tail = token_ids[len(resident) :]
+                else:
+                    reopen = trace.engine_session is not None or attempt > 0
+                    if trace.engine_session is not None and attempt == 0:
+                        self._log_rewrite(trace_id, trace, token_ids)
+                    await self._close(trace)
+                    engine_session = f"{_SESSION_UNSAFE.sub('-', trace_id)[:200]}.{next(self._incarnation)}"
+                    if not await self.engine.open_session(engine_session, self.timeout):
+                        logger.warning("could not open an SGLang session for trace %s; running stateless", trace_id)
+                        return await self.engine.generate(token_ids, sampling_params, **kwargs)
+                    trace.engine_session = engine_session
+                    self.stats["reopened" if reopen else "opened"] += 1
+                    tail = token_ids
+                call_kwargs, evict_to = dict(kwargs), trace.evicted
+                if self.eviction is not None:
+                    call_kwargs["kv_eviction"], evict_to = self._eviction_call(trace, token_ids)
+                try:
+                    ret = await self.engine.generate(
+                        tail, sampling_params, session_id=trace.engine_session, **call_kwargs
+                    )
+                except BaseException:
+                    await self._close(trace)
+                    raise
+                if _aborted(ret):
+                    # The engine session's contents are no longer known: start over.
+                    # An eviction call is retried once on a fresh session.
+                    await self._close(trace)
+                    if self.eviction is not None:
+                        self.stats["failed_calls"] += 1
+                        message = (ret["meta_info"].get("finish_reason") or {}).get("message")
+                        logger.warning("KV-Streams call on trace %s aborted: %s", trace_id, message)
+                        if attempt == 0:
+                            continue
+                    return ret
+                trace.resident = list(token_ids) + list(ret.get("output_ids") or [])
+                trace.finish_reason = ret["meta_info"].get("finish_reason")
+                if self.eviction is not None:
+                    info = ret["meta_info"].get("kv_eviction") or {}
+                    trace.state_id = (info.get("cache_state") or {}).get("state_id")
+                    trace.call_index += 1
+                    if evict_to > trace.evicted:
+                        self.stats["evicting_calls"] += 1
+                        self.stats["evicted_tokens"] += evict_to - trace.evicted
+                    trace.evicted = evict_to
                 return ret
-            trace.resident = list(token_ids) + list(ret.get("output_ids") or [])
-            return ret
+
+    @staticmethod
+    def _log_rewrite(trace_id: str, trace: _TraceSession, token_ids: list[int]) -> None:
+        """Why a trace's prompt stopped extending its session: where it diverges."""
+        resident = trace.resident
+        at = next((i for i, (a, b) in enumerate(zip(resident, token_ids)) if a != b), min(len(resident), len(token_ids)))
+        logger.warning(
+            "session reopen: trace %s prompt %d tokens vs session %d, diverges at %d: session %s prompt %s "
+            "(last finish %s)",
+            trace_id,
+            len(token_ids),
+            len(resident),
+            at,
+            resident[max(0, at - 4) : at + 4],
+            token_ids[max(0, at - 4) : at + 4],
+            trace.finish_reason,
+        )
+
+    def _eviction_call(self, trace: _TraceSession, token_ids: list[int]) -> tuple[dict[str, Any], int]:
+        """This call's ``kv_eviction`` object and the evicted length it leaves.
+
+        Evicted turns are always the oldest live ones, right after the protected
+        prefix, so in the session's resident (survivor) coordinates the newly
+        retired turns are the one span starting at the protected length.
+        """
+        protected, dead = self.eviction.layout(token_ids)
+        cache_id = trace.engine_session
+        if trace.call_index == 0:
+            trace.protected, trace.evicted = protected, 0
+            # The first call claims the fresh session and cannot evict.
+            return {
+                "version": 1,
+                "cache_id": cache_id,
+                "call_id": f"{cache_id}.c0",
+                "call_index": 0,
+                "expected_state_id": None,
+                "protected_prefix_len": protected,
+                "evict_spans": [],
+            }, 0
+        spans = []
+        # The last sampled token has no KV yet, so only the resident sequence
+        # before it can be evicted; a turn that ends later waits for the next call.
+        physical = len(trace.resident) - trace.evicted - 1
+        new = dead - trace.evicted
+        if new > 0 and trace.protected + new <= physical:
+            spans.append([trace.protected, trace.protected + new])
+        else:
+            dead = trace.evicted
+        return {
+            "version": 1,
+            "cache_id": cache_id,
+            "call_id": f"{cache_id}.c{trace.call_index}",
+            "call_index": trace.call_index,
+            "expected_state_id": trace.state_id,
+            "protected_prefix_len": trace.protected,
+            "evict_spans": spans,
+        }, dead
 
     async def finish(self, trace_id: str) -> None:
         trace = self._traces.pop(trace_id, None)
@@ -283,6 +423,7 @@ class SessionTable:
             await self.engine.close_session(trace.engine_session)
         trace.engine_session = None
         trace.resident = []
+        trace.call_index, trace.state_id, trace.protected, trace.evicted = 0, None, 0, 0
 
 
 class TraceAffinity:
@@ -417,7 +558,11 @@ async def inference_generate(request: Request):
 async def metrics(request: Request):
     """Engine load in vLLM's metric names (SGLang's own ``--enable-metrics`` uses ``sglang:*``)."""
     loads = await _tokenizer_manager().get_loads()
-    return PlainTextResponse(render_load_metrics(loads), media_type="text/plain; version=0.0.4")
+    body = render_load_metrics(loads)
+    sessions = _STATE["sessions"]
+    if sessions is not None:
+        body += "".join(f"# TYPE kvs:{name}_total counter\nkvs:{name}_total {value}\n" for name, value in sessions.stats.items())
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
 
 @router.post("/pause")
@@ -491,7 +636,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--server-args-json",
         required=True,
-        help='JSON file: {"server_args": {SGLang ServerArgs fields}, "sessions": bool, "session_timeout": seconds}',
+        help='JSON file: {"server_args": {SGLang ServerArgs fields}, "sessions": bool, "session_timeout": seconds, '
+        '"eviction": {"max_turns", "stride", "message_end_id"} or null}',
     )
     args = parser.parse_args(argv)
     with open(args.server_args_json) as f:
@@ -502,7 +648,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if launch.get("sessions"):
         # The engine binds lazily: the tokenizer manager exists only once the server starts.
-        _STATE["sessions"] = SessionTable(engine=None, timeout=float(launch.get("session_timeout", 3600.0)))
+        eviction = TurnWindow(**launch["eviction"]) if launch.get("eviction") else None
+        _STATE["sessions"] = SessionTable(
+            engine=None, timeout=float(launch.get("session_timeout", 3600.0)), eviction=eviction
+        )
     dp_size = int(launch["server_args"].get("dp_size") or 1)
     if dp_size > 1:
         _STATE["affinity"] = TraceAffinity(dp_size)
