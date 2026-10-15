@@ -764,6 +764,14 @@ class RLConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
+    def validate_sglang_inference(self):
+        """Re-check the SGLang backend's limits after the rl auto-setup above may have
+        changed the inference config (sampling-mask capture, DP fill, weight broadcast)."""
+        if self.inference is not None:
+            self.inference.validate_sglang_backend()
+        return self
+
+    @model_validator(mode="after")
     def auto_setup_slurm_template(self):
         """Auto-setup the default single-node/multi-node SLURM template if no custom template is provided."""
         if self.slurm is not None and self.slurm.job_name is None:
