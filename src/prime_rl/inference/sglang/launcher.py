@@ -10,6 +10,9 @@ from prime_rl.configs.inference import InferenceConfig
 
 SERVER_SCRIPT = Path(__file__).with_name("server.py")
 
+# [inference.sglang] fields prime-rl reads itself; everything else is a ServerArgs field.
+PRIME_RL_FIELDS = {"python", "sessions", "session_timeout"}
+
 
 def sglang_server_args(config: InferenceConfig) -> dict[str, Any]:
     """Translate the engine-agnostic ``[inference.vllm]`` fields to SGLang ``ServerArgs``
@@ -35,7 +38,9 @@ def sglang_server_args(config: InferenceConfig) -> dict[str, Any]:
         args["disable_radix_cache"] = True
     if config.enable_fp32_lm_head:
         args["enable_fp32_lm_head"] = True
-    args.update(config.sglang.model_dump(exclude={"python"}))
+    if config.sglang.sessions:
+        args["enable_streaming_session"] = True
+    args.update(config.sglang.model_dump(exclude=PRIME_RL_FIELDS))
     return args
 
 
@@ -43,6 +48,11 @@ def server(config: InferenceConfig) -> None:
     """Replace this process with the SGLang server (so signals reach SGLang directly)."""
     config.output_dir.mkdir(parents=True, exist_ok=True)
     args_path = config.output_dir / "sglang_server_args.json"
-    args_path.write_text(json.dumps(sglang_server_args(config), indent=2))
+    launch = {
+        "server_args": sglang_server_args(config),
+        "sessions": config.sglang.sessions,
+        "session_timeout": config.sglang.session_timeout,
+    }
+    args_path.write_text(json.dumps(launch, indent=2))
     python = config.sglang.python or sys.executable
     os.execv(python, [python, str(SERVER_SCRIPT), "--server-args-json", str(args_path)])

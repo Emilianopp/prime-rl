@@ -52,3 +52,10 @@ def test_explicit_memory_fraction_is_carried_over():
 def test_unsupported_features_are_refused(overrides):
     with pytest.raises(ValidationError, match="does not support"):
         InferenceConfig(backend="sglang", **overrides)
+
+
+def test_sessions_enable_streaming_sessions_and_stay_out_of_server_args():
+    config = InferenceConfig(backend="sglang", sglang={"sessions": True, "session_timeout": 120})
+    args = sglang_server_args(config)
+    assert args["enable_streaming_session"] is True
+    assert "sessions" not in args and "session_timeout" not in args

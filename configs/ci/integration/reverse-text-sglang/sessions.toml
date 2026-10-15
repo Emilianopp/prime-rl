@@ -1,0 +1,3 @@
+# Overlay on start.toml: hold each trace's KV in an SGLang streaming session.
+[inference.sglang]
+sessions = true
