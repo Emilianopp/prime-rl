@@ -10,18 +10,23 @@
 #
 #   sbatch cell.sbatch ARM CPR [EPISODES] [MAX_EPISODE_STEPS]
 #
-# ARM: vllm | sglang | sglang-sessions.  CPR: in-flight episodes per inference
+# ARM: vllm | sglang | sglang-sessions | kve (KV-Streams turn-window eviction,
+# r${MAX_TURNS:-8}-${STRIDE:-1}).  CPR: in-flight episodes per inference
 # rank (x2 ranks).  The cell ends once EPISODES (default 512) episodes have
 # finished, or at the time limit; summary.json is written either way.
 #
-# Env: REPO (prime-rl checkout), SGLANG_VENV (the SGLang fork's venv),
-# GRID_OUT (results root). Mila: the DCGM exporter holds ZMQ port 5555.
+# Env: REPO (prime-rl checkout), VENV (its environment; another checkout's venv
+# runs this checkout's code via PYTHONPATH), SGLANG_VENV (the SGLang fork's
+# venv), GRID_OUT (results root). Mila: the DCGM exporter holds ZMQ port 5555.
 set -u
 ARM=$1 CPR=$2 EPISODES=${3:-512} STEPS=${4:-200}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
+VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
 GRID_OUT=${GRID_OUT:-$SCRATCH/kv-race/tw_grid}
+MAX_TURNS=${MAX_TURNS:-8} STRIDE=${STRIDE:-1}
 CELL=${ARM}_c${CPR}${CELL_SUFFIX:-}
+[ "$ARM" = kve ] && CELL=kve_c${CPR}_r${MAX_TURNS}-${STRIDE}${CELL_SUFFIX:-}
 OUT=$GRID_OUT/$CELL/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 INFLIGHT=$((2 * CPR))
@@ -29,19 +34,24 @@ BATCH=$EPISODES
 if [ "$BATCH" -lt 512 ]; then BATCH=$(( (EPISODES + 3) / 4 * 4 )); fi
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false
+export UV_PROJECT_ENVIRONMENT=$VENV
+if [ "$VENV" != "$REPO/.venv" ]; then
+  export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src${PYTHONPATH:+:$PYTHONPATH}
+fi
 cd "$REPO"
 echo "[$CELL] $(git log --oneline -1)  inflight=$INFLIGHT batch=$BATCH steps=$STEPS" | tee "$OUT/cell.txt"
 
 case $ARM in
   vllm) BACKEND=(); ENGINE_PORT=8100 ;;  # the engine, behind the router on 8000
-  sglang|sglang-sessions)
+  sglang|sglang-sessions|kve)
     # Node-local copy: concurrent cold imports from scratch have failed with ENOENT.
     rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
     SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
     export CUDA_HOME=$($SGL_PY -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13
     ENGINE_PORT=8000  # no router
     BACKEND=(--inference.backend sglang --inference.sglang.python "$SGL_PY")
-    [ "$ARM" = sglang-sessions ] && BACKEND+=(--inference.sglang.sessions true)
+    [ "$ARM" != sglang ] && BACKEND+=(--inference.sglang.sessions true)
+    [ "$ARM" = kve ] && BACKEND+=(--inference.sglang.eviction.max-turns "$MAX_TURNS" --inference.sglang.eviction.stride "$STRIDE")
     ;;
   *) echo "unknown arm $ARM"; exit 2 ;;
 esac
@@ -66,18 +76,18 @@ SMI_PID=$!
 while kill -0 $RL_PID 2>/dev/null; do
   m=$(curl -s -m 5 "http://localhost:$ENGINE_PORT/metrics") && [ -n "$m" ] && \
     printf '# time %s\n%s\n' "$(date +%s)" \
-      "$(grep -E '^vllm:(kv_cache_usage_perc|num_requests_running|num_requests_waiting|num_preemptions_total|prefix_cache_queries_total|prefix_cache_hits_total|prompt_tokens_total|generation_tokens_total|cache_config_info)' <<<"$m")" >> "$OUT/metrics.prom"
+      "$(grep -E '^(vllm:(kv_cache_usage_perc|num_requests_running|num_requests_waiting|num_preemptions_total|prefix_cache_queries_total|prefix_cache_hits_total|prompt_tokens_total|generation_tokens_total|cache_config_info)|kvs:)' <<<"$m")" >> "$OUT/metrics.prom"
   done_n=$(wc -l < "$OUT/episodes.jsonl" 2>/dev/null || echo 0)
   if [ "$done_n" -ge "$EPISODES" ]; then echo "[$CELL] $done_n episodes finished"; break; fi
   sleep 15
 done
 
 pkill -P $RL_PID 2>/dev/null; kill $RL_PID $SMI_PID 2>/dev/null
-pkill -u "$USER" -f "$REPO/.venv/" 2>/dev/null
+pkill -u "$USER" -f "$VENV/" 2>/dev/null
 pkill -u "$USER" -f "$SLURM_TMPDIR/sgl-venv/" 2>/dev/null
 sleep 10
-pkill -9 -u "$USER" -f "$REPO/.venv/" 2>/dev/null
+pkill -9 -u "$USER" -f "$VENV/" 2>/dev/null
 pkill -9 -u "$USER" -f "$SLURM_TMPDIR/sgl-venv/" 2>/dev/null
 
-"$REPO/.venv/bin/python" "$REPO/scripts/textworld_grid/summarize.py" "$OUT" --cell "$CELL" --cpr "$CPR" \
+"$VENV/bin/python" "$REPO/scripts/textworld_grid/summarize.py" "$OUT" --cell "$CELL" --cpr "$CPR" \
   --arm "$ARM" --episodes "$EPISODES" | tee "$OUT/summary.txt"
