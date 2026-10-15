@@ -40,6 +40,15 @@ initial_inflight = 48
 min_inflight = 48
 max_inflight = 48
 
+[orchestrator.renderer]
+# Bridge each turn onto the sampled tokens instead of re-rendering the history
+# from text. The qwen3 renderer defaults to enable_thinking (policy
+# "tool_cycle": re-render at every new user message, i.e. every TextWorld turn),
+# which re-tokenizes replies the model sampled with a non-canonical split.
+# Instruct-2507 does not think, so keeping everything is exact.
+name = "qwen3"  # what the model id auto-selects; set explicitly to configure it
+thinking_retention = "all"
+
 [orchestrator.train.sampling]
 max_completion_tokens = 1024
 temperature = 1.0
