@@ -28,6 +28,12 @@ def test_server_args_translate_engine_fields_and_apply_sglang_extras():
     assert "python" not in args
 
 
+def test_detokenization_is_off_unless_turned_back_on():
+    assert sglang_server_args(InferenceConfig(backend="sglang"))["skip_tokenizer_init"] is True
+    config = InferenceConfig(backend="sglang", sglang={"skip_tokenizer_init": False})
+    assert sglang_server_args(config)["skip_tokenizer_init"] is False
+
+
 def test_explicit_memory_fraction_is_carried_over():
     config = InferenceConfig(backend="sglang", vllm={"gpu_memory_utilization": 0.5})
     assert sglang_server_args(config)["mem_fraction_static"] == 0.5
