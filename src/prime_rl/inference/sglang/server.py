@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gc
 import json
 import logging
 from typing import Any
@@ -33,6 +34,9 @@ router = APIRouter()
 
 # Same clamp as prime-rl's vLLM server: renderers read it as "no sampling evidence".
 LOGPROB_SENTINEL = -9999.0
+
+# Same GC settings as prime-rl's vLLM API server (see ``_tune_gc``).
+API_SERVER_GC_THRESHOLDS = (50_000, 20, 100)
 
 # vLLM-style sampling keys, renamed to SGLang's.
 _RENAMED = {
@@ -293,6 +297,15 @@ async def finish_session(request: Request):
     return {"status": "ok"}
 
 
+def _tune_gc() -> None:
+    """Under RL load this process holds a few objects per generated token (SGLang's
+    logprob tuples), and default thresholds rerun full collections over them every
+    few seconds. Move everything alive after startup out of GC and collect less often."""
+    gc.collect()
+    gc.freeze()
+    gc.set_threshold(*API_SERVER_GC_THRESHOLDS)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="prime-rl endpoints on an SGLang engine")
     parser.add_argument("--server-args-json", required=True, help="JSON file of SGLang ServerArgs fields")
@@ -304,7 +317,7 @@ def main(argv: list[str] | None = None) -> None:
     from sglang.srt.server_args import ServerArgs
 
     app.include_router(router)
-    launch_server(ServerArgs(**server_args_dict))
+    launch_server(ServerArgs(**server_args_dict), launch_callback=_tune_gc)  # after warmup
 
 
 if __name__ == "__main__":
