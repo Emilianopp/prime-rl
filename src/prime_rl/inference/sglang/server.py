@@ -293,16 +293,6 @@ async def finish_session(request: Request):
     return {"status": "ok"}
 
 
-@router.post("/init_broadcaster")
-async def init_broadcaster(request: Request):
-    return _error("the SGLang backend supports only filesystem weight broadcast", 501)
-
-
-@router.post("/load_lora_adapter")
-async def load_lora_adapter(request: Request):
-    return _error("the SGLang backend does not support LoRA yet", 501)
-
-
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="prime-rl endpoints on an SGLang engine")
     parser.add_argument("--server-args-json", required=True, help="JSON file of SGLang ServerArgs fields")
