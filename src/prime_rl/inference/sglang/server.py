@@ -263,6 +263,7 @@ class _TraceSession:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # KV-Streams (eviction on): the session's call chain and how many
     # chronological tokens right after the protected prefix are evicted.
+    finish_reason: Any = None  # of the last call, to explain a later reopen
     call_index: int = 0
     state_id: str | None = None
     protected: int = 0
@@ -311,6 +312,8 @@ class SessionTable:
                     tail = token_ids[len(resident) :]
                 else:
                     reopen = trace.engine_session is not None or attempt > 0
+                    if trace.engine_session is not None and attempt == 0:
+                        self._log_rewrite(trace_id, trace, token_ids)
                     await self._close(trace)
                     engine_session = f"{_SESSION_UNSAFE.sub('-', trace_id)[:200]}.{next(self._incarnation)}"
                     if not await self.engine.open_session(engine_session, self.timeout):
@@ -341,6 +344,7 @@ class SessionTable:
                             continue
                     return ret
                 trace.resident = list(token_ids) + list(ret.get("output_ids") or [])
+                trace.finish_reason = ret["meta_info"].get("finish_reason")
                 if self.eviction is not None:
                     info = ret["meta_info"].get("kv_eviction") or {}
                     trace.state_id = (info.get("cache_state") or {}).get("state_id")
@@ -350,6 +354,23 @@ class SessionTable:
                         self.stats["evicted_tokens"] += evict_to - trace.evicted
                     trace.evicted = evict_to
                 return ret
+
+    @staticmethod
+    def _log_rewrite(trace_id: str, trace: _TraceSession, token_ids: list[int]) -> None:
+        """Why a trace's prompt stopped extending its session: where it diverges."""
+        resident = trace.resident
+        at = next((i for i, (a, b) in enumerate(zip(resident, token_ids)) if a != b), min(len(resident), len(token_ids)))
+        logger.warning(
+            "session reopen: trace %s prompt %d tokens vs session %d, diverges at %d: session %s prompt %s "
+            "(last finish %s)",
+            trace_id,
+            len(token_ids),
+            len(resident),
+            at,
+            resident[max(0, at - 4) : at + 4],
+            token_ids[max(0, at - 4) : at + 4],
+            trace.finish_reason,
+        )
 
     def _eviction_call(self, trace: _TraceSession, token_ids: list[int]) -> tuple[dict[str, Any], int]:
         """This call's ``kv_eviction`` object and the evicted length it leaves.
