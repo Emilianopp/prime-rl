@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from prime_rl.inference.sglang.server import GenerateRequestError, SessionTable, generate_sglang
+from prime_rl.inference.sglang.server import GenerateRequestError, SessionTable, TraceAffinity, generate_sglang
 
 
 class FakeEngine:
@@ -14,9 +14,13 @@ class FakeEngine:
         self.calls: list[tuple] = []
         self.open: set[str] = set()
         self.gate: asyncio.Event | None = None
+        self.ranks: list[int | None] = []
 
-    async def generate(self, input_ids, sampling_params, *, request=None, session_id=None, cache_salt=None, priority=None):
+    async def generate(
+        self, input_ids, sampling_params, *, request=None, session_id=None, cache_salt=None, priority=None, routed_dp_rank=None
+    ):
         self.calls.append(("generate", session_id, list(input_ids)))
+        self.ranks.append(routed_dp_rank)
         if self.gate is not None:
             await self.gate.wait()
         finish = {"type": "abort", "message": "boom"} if self.abort else {"type": "stop"}
@@ -131,3 +135,25 @@ def test_without_a_trace_id_generation_is_stateless():
         return engine
 
     assert run(scenario()).calls == [("generate", None, [1, 2, 3])]
+
+
+def test_traces_stick_to_the_least_loaded_dp_rank():
+    affinity = TraceAffinity(dp_size=2)
+    assert [affinity.rank(t) for t in ("a", "b", "a", "c")] == [0, 1, 0, 0]
+    affinity.release("a")
+    affinity.release("c")
+    assert affinity.rank("d") == 0  # rank 0 is empty again, rank 1 still holds "b"
+    assert affinity.rank(None) is None  # no trace id: SGLang balances
+
+
+def test_session_turns_carry_the_trace_rank():
+    async def scenario():
+        engine = FakeEngine()
+        table = SessionTable(engine, timeout=60)
+        affinity = TraceAffinity(dp_size=2)
+        await generate_sglang(engine, [1], {}, sessions=table, affinity=affinity, trace_id="a")
+        await generate_sglang(engine, [7], {}, sessions=table, affinity=affinity, trace_id="b")
+        await generate_sglang(engine, [1, 90, 91, 2], {}, sessions=table, affinity=affinity, trace_id="a")
+        return engine
+
+    assert run(scenario()).ranks == [0, 1, 0]
