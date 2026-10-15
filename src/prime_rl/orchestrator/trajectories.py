@@ -187,6 +187,7 @@ def trace_to_samples(trace: vf.Trace, *, env_name: str = "") -> list[TrainingSam
                 sampling_mask=_encode_sampling_mask(branch.sampling_mask, len(token_ids)),
                 trace_id=trace.id,
                 branch_index=branch.index,
+                kv_death=branch.kv_death,
             )
         )
     if not samples:
