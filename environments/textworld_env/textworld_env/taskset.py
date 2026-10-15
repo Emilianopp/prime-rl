@@ -17,6 +17,7 @@ import asyncio
 import json
 import re
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
@@ -120,11 +121,14 @@ class TextWorldEnvConfig(vf.EnvConfig):
     player: vf.AgentConfig = vf.AgentConfig(harness={"id": "null"})
     max_episode_steps: int = Field(200, ge=1)
     """Model turns (game actions) before the episode is cut off."""
+    episode_log: str | None = None
+    """Append one JSON line per finished episode (wall-clock start/end, reward, steps) to this file."""
 
 
 class TextWorldEnv(vf.Env[TextWorldEnvConfig]):
     async def run(self, task, agents):
         info = task.data.info
+        started = time.time()
         game = await asyncio.to_thread(_start_game, info["game_file"])
         score, won, steps, done = 0, False, 0, False
         action = "look"  # the previous action stands in for a reply without one
@@ -149,8 +153,14 @@ class TextWorldEnv(vf.Env[TextWorldEnvConfig]):
         finally:
             await asyncio.to_thread(game.close)
         trace = interaction.trace
-        trace.record_reward("game_score", float(score) / max(float(info["max_score"]), 1.0), 1.0)
-        trace.info["textworld"] = {"score": score, "max_score": info["max_score"], "won": won, "steps": steps, "done": done}
+        reward = float(score) / max(float(info["max_score"]), 1.0)
+        trace.record_reward("game_score", reward, 1.0)
+        outcome = {"score": score, "max_score": info["max_score"], "won": won, "steps": steps, "done": done}
+        trace.info["textworld"] = outcome
+        if self.config.episode_log:
+            line = {"start": started, "end": time.time(), "reward": reward, "task": info["task"], **outcome}
+            with open(self.config.episode_log, "a") as f:
+                f.write(json.dumps(line) + "\n")
 
 
 class TextWorldTaskset(vf.Taskset[TextWorldTask, TextWorldConfig]):
