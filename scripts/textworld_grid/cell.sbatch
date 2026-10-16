@@ -15,7 +15,7 @@
 # rank (x2 ranks).  The cell ends once EPISODES (default 512) episodes have
 # finished, or at the time limit; summary.json is written either way.
 #
-# Env: HARNESS (agent harness id: inline-chat = in-process chat, null = the
+# Env: EXTRA_ARGS (extra `rl` arguments, e.g. another model), HARNESS (agent harness id: inline-chat = in-process chat, null = the
 # chat program relaunched per turn), REPO (prime-rl checkout), VENV (its environment; another checkout's venv
 # runs this checkout's code via PYTHONPATH), SGLANG_VENV (the SGLang fork's
 # venv), GRID_OUT (results root). Mila: the DCGM exporter holds ZMQ port 5555.
@@ -41,7 +41,7 @@ if [ "$VENV" != "$REPO/.venv" ]; then
   export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/textworld_env:$REPO/deps/verifiers${PYTHONPATH:+:$PYTHONPATH}
 fi
 cd "$REPO"
-echo "[$CELL] $(git log --oneline -1)  inflight=$INFLIGHT batch=$BATCH steps=$STEPS harness=$HARNESS" | tee "$OUT/cell.txt"
+echo "[$CELL] $(git log --oneline -1)  inflight=$INFLIGHT batch=$BATCH steps=$STEPS harness=$HARNESS extra=${EXTRA_ARGS:-}" | tee "$OUT/cell.txt"
 
 case $ARM in
   vllm) BACKEND=(); ENGINE_PORT=8100 ;;  # the engine, behind the router on 8000
@@ -70,7 +70,7 @@ uv run rl @ "$OUT/rl.toml" --clean --output-dir "$OUT/run" \
   --orchestrator.concurrency.max-inflight "$INFLIGHT" \
   --monitors.wandb.project textworld-grid-kvs --monitors.wandb.name "$CELL" \
   --rollout-transport.type zmq --rollout-transport.port 5655 \
-  "${BACKEND[@]}" > "$OUT/rl.log" 2>&1 &
+  "${BACKEND[@]}" ${EXTRA_ARGS:-} > "$OUT/rl.log" 2>&1 &
 RL_PID=$!
 
 # Engine gauges and GPU utilization every 15 s until the cell is done.
