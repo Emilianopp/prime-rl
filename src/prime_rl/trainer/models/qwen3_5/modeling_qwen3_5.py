@@ -321,6 +321,12 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel):
 
         self.supports_packed_multimodal_training = self.is_vlm
         self.lm_head = VanillaOutputLinear(text_config.hidden_size, text_config.vocab_size)
+        if config.tie_word_embeddings:
+            # Small Qwen3.5 checkpoints (0.8B-4B) ship no lm_head: it is the input
+            # embedding. Share the parameter, as HF tying does for the other models;
+            # weight loading skips lm_head.weight for tied configs, so an untied head
+            # would keep its random init (and be broadcast to the inference engine).
+            self.lm_head.weight = self.get_input_embeddings().weight
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.get_input_embeddings()
