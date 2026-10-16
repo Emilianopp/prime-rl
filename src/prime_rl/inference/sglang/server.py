@@ -183,10 +183,12 @@ class SglangEngine:
         priority: int | None = None,
         routed_dp_rank: int | None = None,
         kv_eviction: dict[str, Any] | None = None,
+        rid: str | None = None,
     ) -> dict[str, Any]:
         from sglang.srt.managers.io_struct import GenerateReqInput
 
         obj = GenerateReqInput(
+            rid=rid,
             input_ids=list(input_ids),
             sampling_params=sampling_params,
             return_logprob=True,
@@ -215,6 +217,10 @@ class SglangEngine:
         from sglang.srt.managers.io_struct import CloseSessionReqInput
 
         await self.tokenizer_manager.close_session(CloseSessionReqInput(session_id=session_id))
+
+    def abort_request(self, rid: str) -> None:
+        """Abort a running or queued request; its caller gets an ``abort`` finish."""
+        self.tokenizer_manager.abort_request(rid)
 
 
 def _aborted(ret: dict[str, Any]) -> bool:
@@ -266,6 +272,8 @@ class _TraceSession:
     # KV-Streams (eviction on): the session's call chain and how many
     # chronological tokens right after the protected prefix are evicted.
     finish_reason: Any = None  # of the last call, to explain a later reopen
+    inflight_rid: str | None = None  # the session request in flight, for abort on finish
+    finished: bool = False
     call_index: int = 0
     state_id: str | None = None
     protected: int = 0
@@ -294,6 +302,7 @@ class SessionTable:
         self.eviction = eviction
         self._traces: dict[str, _TraceSession] = {}
         self._incarnation = itertools.count()
+        self._request = itertools.count()
         self.stats = {"opened": 0, "reopened": 0, "evicting_calls": 0, "evicted_tokens": 0, "failed_calls": 0}
 
     async def generate(
@@ -327,6 +336,11 @@ class SessionTable:
                 call_kwargs, evict_to = dict(kwargs), trace.evicted
                 if self.eviction is not None:
                     call_kwargs["kv_eviction"], evict_to = self._eviction_call(trace, token_ids)
+                    # SGLang requires a kv_eviction request's rid to be its call id.
+                    call_kwargs["rid"] = call_kwargs["kv_eviction"]["call_id"]
+                else:
+                    call_kwargs["rid"] = f"{trace.engine_session}.r{next(self._request)}"
+                trace.inflight_rid = call_kwargs["rid"]
                 try:
                     ret = await self.engine.generate(
                         tail, sampling_params, session_id=trace.engine_session, **call_kwargs
@@ -334,6 +348,11 @@ class SessionTable:
                 except BaseException:
                     await self._close(trace)
                     raise
+                finally:
+                    trace.inflight_rid = None
+                if trace.finished:
+                    # Aborted by finish(): the trace is gone, so never reopen it.
+                    return ret
                 if _aborted(ret):
                     # The engine session's contents are no longer known: start over.
                     # An eviction call is retried once on a fresh session.
@@ -415,15 +434,23 @@ class SessionTable:
         }, dead
 
     async def finish(self, trace_id: str) -> None:
+        """Release a finished or cancelled trace: abort its in-flight request, then
+        close its session. SGLang defers a close until the session's in-flight
+        request ends, and a request queued on a full engine may never end; a
+        cancelled episode's partial trace is discarded, so aborting loses nothing."""
         trace = self._traces.pop(trace_id, None)
-        if trace is not None:
-            await self._close(trace)
+        if trace is None:
+            return
+        trace.finished = True
+        if trace.inflight_rid is not None:
+            self.engine.abort_request(trace.inflight_rid)
+        await self._close(trace)
 
     async def _close(self, trace: _TraceSession) -> None:
-        if trace.engine_session is not None:
+        engine_session, trace.engine_session = trace.engine_session, None
+        if engine_session is not None:
             # SGLang defers the close until an in-flight request on it finishes.
-            await self.engine.close_session(trace.engine_session)
-        trace.engine_session = None
+            await self.engine.close_session(engine_session)
         trace.resident = []
         trace.call_index, trace.state_id, trace.protected, trace.evicted = 0, None, 0, 0
 
