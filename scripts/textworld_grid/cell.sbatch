@@ -15,7 +15,7 @@
 # rank (x2 ranks).  The cell ends once EPISODES (default 512) episodes have
 # finished, or at the time limit; summary.json is written either way.
 #
-# Env: HARNESS (agent harness id: textworld-env = in-process chat, null = the
+# Env: HARNESS (agent harness id: inline-chat = in-process chat, null = the
 # chat program relaunched per turn), REPO (prime-rl checkout), VENV (its environment; another checkout's venv
 # runs this checkout's code via PYTHONPATH), SGLANG_VENV (the SGLang fork's
 # venv), GRID_OUT (results root). Mila: the DCGM exporter holds ZMQ port 5555.
@@ -25,10 +25,10 @@ REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
 GRID_OUT=${GRID_OUT:-$SCRATCH/kv-race/tw_grid}
-MAX_TURNS=${MAX_TURNS:-8} STRIDE=${STRIDE:-1} HARNESS=${HARNESS:-textworld-env}
+MAX_TURNS=${MAX_TURNS:-8} STRIDE=${STRIDE:-1} HARNESS=${HARNESS:-inline-chat}
 CELL=${ARM}_c${CPR}${CELL_SUFFIX:-}
 [ "$ARM" = kve ] && CELL=kve_c${CPR}_r${MAX_TURNS}-${STRIDE}${CELL_SUFFIX:-}
-[ "$HARNESS" != textworld-env ] && CELL=${CELL}_h${HARNESS}
+[ "$HARNESS" != inline-chat ] && CELL=${CELL}_h${HARNESS}
 OUT=$GRID_OUT/$CELL/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 INFLIGHT=$((2 * CPR))
@@ -38,7 +38,7 @@ if [ "$BATCH" -lt 512 ]; then BATCH=$(( (EPISODES + 3) / 4 * 4 )); fi
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false
 export UV_PROJECT_ENVIRONMENT=$VENV
 if [ "$VENV" != "$REPO/.venv" ]; then
-  export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/textworld_env${PYTHONPATH:+:$PYTHONPATH}
+  export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/textworld_env:$REPO/deps/verifiers${PYTHONPATH:+:$PYTHONPATH}
 fi
 cd "$REPO"
 echo "[$CELL] $(git log --oneline -1)  inflight=$INFLIGHT batch=$BATCH steps=$STEPS harness=$HARNESS" | tee "$OUT/cell.txt"
