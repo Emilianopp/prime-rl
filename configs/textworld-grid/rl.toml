@@ -58,7 +58,9 @@ name = "textworld"
 env.taskset.id = "textworld-env"
 env.taskset.dataset_path = "/network/scratch/e/emiliano.penaloza/kv-race/data/textworld_all4_uniform_total1000_train960_eval40_seed20260724"
 env.max_episode_steps = 200
-env.player.harness.id = "null"
+# The env package's in-process chat harness: one model call per turn from the env
+# server, instead of the null harness's chat program relaunched every turn.
+env.player.harness.id = "textworld-env"
 env.player.runtime.type = "subprocess"
 
 [inference.vllm]
