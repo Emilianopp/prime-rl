@@ -152,6 +152,7 @@ def build_generate_response(ret: dict[str, Any], prompt_token_ids: list[int]) ->
                 "token_ids": completion_ids,
                 "completion_logprobs": encode_array(logprobs),
                 "finish_reason": finish.get("type"),
+                **({"eviction": ret["eviction"]} if ret.get("eviction") else {}),
             }
         ],
         "usage": {
@@ -303,7 +304,14 @@ class SessionTable:
         self._traces: dict[str, _TraceSession] = {}
         self._incarnation = itertools.count()
         self._request = itertools.count()
-        self.stats = {"opened": 0, "reopened": 0, "evicting_calls": 0, "evicted_tokens": 0, "failed_calls": 0}
+        self.stats = {
+            "opened": 0,
+            "reopened": 0,
+            "evicting_calls": 0,
+            "evicted_tokens": 0,
+            "failed_calls": 0,
+            "resurrected": 0,
+        }
 
     async def generate(
         self, trace_id: str, token_ids: list[int], sampling_params: dict[str, Any], **kwargs: Any
@@ -322,6 +330,7 @@ class SessionTable:
                 if extends:
                     tail = token_ids[len(resident) :]
                 else:
+                    self._note_resurrection(trace_id, trace)
                     reopen = trace.engine_session is not None or attempt > 0
                     if trace.engine_session is not None and attempt == 0:
                         self._log_rewrite(trace_id, trace, token_ids)
@@ -362,6 +371,7 @@ class SessionTable:
                 if _aborted(ret):
                     # The engine session's contents are no longer known: start over.
                     # An eviction call is retried once on a fresh session.
+                    self._note_resurrection(trace_id, trace)
                     await self._close(trace)
                     if self.eviction is not None:
                         self.stats["failed_calls"] += 1
@@ -379,8 +389,25 @@ class SessionTable:
                     if evict_to > trace.evicted:
                         self.stats["evicting_calls"] += 1
                         self.stats["evicted_tokens"] += evict_to - trace.evicted
+                        # For the trainer, in chronological positions: the evicted
+                        # tokens are unseen from the previous call's last sampled
+                        # token on, the first KV computed after this eviction.
+                        ret["eviction"] = {
+                            "spans": [[trace.protected + trace.evicted, trace.protected + evict_to]],
+                            "at": len(resident) - 1,
+                        }
                     trace.evicted = evict_to
                 return ret
+
+    def _note_resurrection(self, trace_id: str, trace: _TraceSession) -> None:
+        """A fresh session holds the whole prompt again, evicted turns included, so
+        this trace's earlier evictions no longer describe what later calls attend
+        to and its training mask will be off. Expected to be rare; counted."""
+        if trace.evicted:
+            self.stats["resurrected"] += 1
+            logger.warning(
+                "trace %s reopened after evicting %d tokens: they are attended again", trace_id, trace.evicted
+            )
 
     @staticmethod
     def _log_rewrite(trace_id: str, trace: _TraceSession, token_ids: list[int]) -> None:
