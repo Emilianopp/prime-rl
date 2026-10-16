@@ -15,7 +15,8 @@
 # rank (x2 ranks).  The cell ends once EPISODES (default 512) episodes have
 # finished, or at the time limit; summary.json is written either way.
 #
-# Env: EXTRA_ARGS (extra `rl` arguments, e.g. another model), HARNESS (agent harness id: inline-chat = in-process chat, null = the
+# Env: CONTROLLER=1 (let prime-rl's concurrency controller trim below the
+# target: the target is then the starting cap and the ceiling), EXTRA_ARGS (extra `rl` arguments, e.g. another model), HARNESS (agent harness id: inline-chat = in-process chat, null = the
 # chat program relaunched per turn), REPO (prime-rl checkout), VENV (its environment; another checkout's venv
 # runs this checkout's code via PYTHONPATH), SGLANG_VENV (the SGLang fork's
 # venv), GRID_OUT (results root). Mila: the DCGM exporter holds ZMQ port 5555.
@@ -29,9 +30,12 @@ MAX_TURNS=${MAX_TURNS:-8} STRIDE=${STRIDE:-1} HARNESS=${HARNESS:-inline-chat}
 CELL=${ARM}_c${CPR}${CELL_SUFFIX:-}
 [ "$ARM" = kve ] && CELL=kve_c${CPR}_r${MAX_TURNS}-${STRIDE}${CELL_SUFFIX:-}
 [ "$HARNESS" != inline-chat ] && CELL=${CELL}_h${HARNESS}
+[ "${CONTROLLER:-0}" = 1 ] && CELL=${CELL}_ctl
 OUT=$GRID_OUT/$CELL/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 INFLIGHT=$((2 * CPR))
+MIN_INFLIGHT=$INFLIGHT
+[ "${CONTROLLER:-0}" = 1 ] && MIN_INFLIGHT=4
 BATCH=$EPISODES
 if [ "$BATCH" -lt 512 ]; then BATCH=$(( (EPISODES + 3) / 4 * 4 )); fi
 
@@ -41,7 +45,7 @@ if [ "$VENV" != "$REPO/.venv" ]; then
   export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/textworld_env:$REPO/deps/verifiers${PYTHONPATH:+:$PYTHONPATH}
 fi
 cd "$REPO"
-echo "[$CELL] $(git log --oneline -1)  inflight=$INFLIGHT batch=$BATCH steps=$STEPS harness=$HARNESS extra=${EXTRA_ARGS:-}" | tee "$OUT/cell.txt"
+echo "[$CELL] $(git log --oneline -1)  inflight=$INFLIGHT min_inflight=$MIN_INFLIGHT batch=$BATCH steps=$STEPS harness=$HARNESS extra=${EXTRA_ARGS:-}" | tee "$OUT/cell.txt"
 
 case $ARM in
   vllm) BACKEND=(); ENGINE_PORT=8100 ;;  # the engine, behind the router on 8000
@@ -66,7 +70,7 @@ sed -e "s|^env.max_episode_steps = .*|env.max_episode_steps = $STEPS\nenv.episod
 uv run rl @ "$OUT/rl.toml" --clean --output-dir "$OUT/run" \
   --orchestrator.batch-size "$BATCH" \
   --orchestrator.concurrency.initial-inflight "$INFLIGHT" \
-  --orchestrator.concurrency.min-inflight "$INFLIGHT" \
+  --orchestrator.concurrency.min-inflight "$MIN_INFLIGHT" \
   --orchestrator.concurrency.max-inflight "$INFLIGHT" \
   --monitors.wandb.project textworld-grid-kvs --monitors.wandb.name "$CELL" \
   --rollout-transport.type zmq --rollout-transport.port 5655 \
