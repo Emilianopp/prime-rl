@@ -684,6 +684,12 @@ def train(config: TrainerConfig):
         step_message = f"Step {progress.step} | {format_time(step_time):>7} | Loss {tensor_stats['loss/mean']:.4f} | Entropy {tensor_stats['entropy/all/mean']:.4f}"
         if "mismatch_kl/all/mean" in tensor_stats:
             step_message += f" | Mismatch KL {tensor_stats['mismatch_kl/all/mean']:.4f}"
+        if "mismatch_kl/evicted_context/mean" in tensor_stats:
+            step_message += (
+                f" (evicted context {tensor_stats['mismatch_kl/evicted_context/mean']:.4f},"
+                f" full context {tensor_stats.get('mismatch_kl/full_context/mean', float('nan')):.4f},"
+                f" {tensor_stats.get('kv_death/evicted_context_fraction/mean', float('nan')):.0%} of tokens)"
+            )
         if grad_norm is not None:
             step_message += f" | Grad. Norm {grad_norm:.4f}"
         step_message += f" | LR {current_lr:.2e} | Throughput {throughput:.0f} tokens/s | MFU {mfu:.1f}% | Peak Mem. {peak_memory:.1f} GiB"

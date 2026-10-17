@@ -16,8 +16,10 @@ import torch
 from torch import Tensor
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
-# Flex attention is only efficient compiled; eager flex materializes the score matrix.
+# Flex attention is only efficient compiled; eager flex materializes the score matrix,
+# and an uncompiled create_block_mask materializes the full [tokens, tokens] mask.
 _compiled_flex_attention = torch.compile(flex_attention, dynamic=True)
+_compiled_create_block_mask = torch.compile(create_block_mask, dynamic=True)
 
 
 def _sequence_ids_and_positions(seq_lens: Tensor, total: int) -> tuple[Tensor, Tensor]:
@@ -48,7 +50,8 @@ def build_kv_death_block_mask(kv_death: Tensor, seq_lens: Tensor) -> BlockMask:
     """The flex attention block mask of a packed micro batch (see ``kv_death_mask_mod``)."""
     total = kv_death.numel()
     mask_mod = kv_death_mask_mod(kv_death, seq_lens)
-    return create_block_mask(mask_mod, None, None, total, total, device=seq_lens.device, _compile=seq_lens.is_cuda)
+    build = _compiled_create_block_mask if seq_lens.is_cuda else create_block_mask
+    return build(mask_mod, None, None, total, total, device=seq_lens.device)
 
 
 def evicted_context(kv_death: Tensor, seq_lens: Tensor) -> Tensor:
