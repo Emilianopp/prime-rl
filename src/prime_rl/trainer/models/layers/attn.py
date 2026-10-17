@@ -486,6 +486,15 @@ class FlashAttention(nn.Module):
         sliding_window = getattr(self, "sliding_window", None)
         if block_mask is not None:
             if sliding_window is not None:
+                # The kv_death mask encodes sequence boundaries, causality and evictions,
+                # but not a window: flash gets the window from `window_size`, which the
+                # flex path never sees, so a windowed layer would silently attend to its
+                # whole context. Models like Gemma interleave sliding-window (local) and
+                # global layers, so supporting KV-Streams there needs a second BlockMask
+                # for the local layers whose mask_mod also requires
+                # `q_idx - kv_idx < sliding_window`, chosen per layer (global layers keep
+                # this mask). The engine side must match too: SGLang keeps sliding-window
+                # KV in its own pool, which the KV-Streams fork does not evict.
                 raise NotImplementedError("kv_death masks are not supported with sliding-window attention")
             return masked_attention(q, k, v, block_mask, self.scaling)
         kwargs: dict = {"causal": True}
