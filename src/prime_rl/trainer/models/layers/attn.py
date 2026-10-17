@@ -35,6 +35,8 @@ except ImportError:
     _flash_attn_bwd = _flash_attn_fwd = None  # type: ignore
 
 
+from prime_rl.trainer.models.layers.kv_death import masked_attention  # noqa: E402
+
 # Each FlashAttention version's flash_attn_varlen_func is a Python autograd.Function that Dynamo
 # cannot trace (FA2 and FA3 also reject the same cu_seqlens tensor passed as both cu_seqlens_q and
 # cu_seqlens_k). Inside a checkpointed block that graph break drops the whole block to eager, so
@@ -474,10 +476,19 @@ class FlashAttention(nn.Module):
             return self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
         return self.qkv_proj(hidden_states).split(self.qkv_sizes, dim=-1)
 
-    def _compute_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cu_seqlens, max_seqlen):
-        """Run the flash attention kernel. q/k/v are [total_tokens, heads, dim]."""
-        kwargs: dict = {"causal": True}
+    def _compute_attention(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cu_seqlens, max_seqlen, block_mask=None
+    ):
+        """Run the flash attention kernel. q/k/v are [total_tokens, heads, dim].
+
+        With a ``block_mask`` (a KV-Streams eviction mask, see ``kv_death``) run flex
+        attention instead: the mask already encodes sequence boundaries and causality."""
         sliding_window = getattr(self, "sliding_window", None)
+        if block_mask is not None:
+            if sliding_window is not None:
+                raise NotImplementedError("kv_death masks are not supported with sliding-window attention")
+            return masked_attention(q, k, v, block_mask, self.scaling)
+        kwargs: dict = {"causal": True}
         if sliding_window is not None:
             kwargs["window_size"] = (sliding_window - 1, 0)
         if self._flash_attn_version == 4:
