@@ -346,3 +346,20 @@ def test_reopening_an_evicting_trace_is_counted():
         return table
 
     assert run(scenario()).stats["resurrected"] == 1
+
+
+def test_with_overlap_scheduling_evictions_start_after_the_last_sampled_token():
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        window = TurnWindow(max_turns=2, stride=1, message_end_id=E)
+        table = SessionTable(engine, timeout=60, eviction=window, overlap_schedule=True)
+        prompt, choices = SYSTEM + USER + GEN, []
+        for _ in range(3):
+            response = await generate_sglang(engine, prompt, {}, sessions=table, trace_id="t")
+            choices.append(response["choices"][0])
+            prompt = prompt + [90, E] + BRIDGE + USER + GEN
+        return choices
+
+    # Resident 14 tokens: overlap scheduling already computed the last sampled token's
+    # KV (position 13) with turn 1 visible, so turn 1 is unseen from position 14 on.
+    assert run(scenario())[-1].get("eviction") == {"spans": [[3, 8]], "at": 14}
