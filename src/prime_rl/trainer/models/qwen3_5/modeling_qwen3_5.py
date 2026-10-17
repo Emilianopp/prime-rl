@@ -94,6 +94,7 @@ class Qwen3_5DecoderLayer(nn.Module):
         cu_seqlens: torch.LongTensor,
         max_seqlen: int,
         routed_experts: torch.LongTensor | None = None,
+        block_mask=None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -103,11 +104,14 @@ class Qwen3_5DecoderLayer(nn.Module):
                 cu_seqlens,
             )
         else:
+            # Only full attention takes a KV-Streams eviction mask: linear attention
+            # keeps its recurrent state over the whole stream, as the engine does.
             hidden_states, _ = self.self_attn(
                 hidden_states,
                 position_embeddings,
                 cu_seqlens,
                 max_seqlen,
+                block_mask=block_mask,
             )
         hidden_states = residual + hidden_states
 
@@ -172,6 +176,7 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
         *,
         seq_lens: torch.LongTensor,
         seq_lens_are_pre_shard: bool = False,
+        block_mask=None,
     ) -> BaseModelOutput:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -194,6 +199,7 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
                 cu_seqlens,
                 max_seqlen,
                 routed_experts=layer_routed_experts,
+                block_mask=block_mask,
             )
         return BaseModelOutput(last_hidden_state=self.norm(hidden_states))
 
@@ -276,6 +282,7 @@ class Qwen3_5VLMModel(nn.Module):
         *,
         seq_lens: torch.LongTensor,
         seq_lens_are_pre_shard: bool = False,
+        block_mask=None,
     ) -> BaseModelOutput:
         inputs_embeds, position_ids = self.prepare_inputs(
             input_ids,
@@ -305,6 +312,7 @@ class Qwen3_5VLMModel(nn.Module):
             routed_experts=routed_experts,
             seq_lens=seq_lens,
             seq_lens_are_pre_shard=seq_lens_are_pre_shard,
+            block_mask=block_mask,
         )
 
 
@@ -349,6 +357,7 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel):
         *,
         seq_lens: torch.LongTensor,
         seq_lens_are_pre_shard: bool = False,
+        block_mask=None,
     ) -> PrimeLmOutput:
         if self.is_vlm:
             outputs = self.model(
@@ -360,6 +369,7 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel):
                 routed_experts=routed_experts,
                 seq_lens=seq_lens,
                 seq_lens_are_pre_shard=seq_lens_are_pre_shard,
+                block_mask=block_mask,
             )
         else:
             outputs = self.model(
@@ -369,6 +379,7 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel):
                 routed_experts=routed_experts,
                 seq_lens=seq_lens,
                 seq_lens_are_pre_shard=seq_lens_are_pre_shard,
+                block_mask=block_mask,
             )
 
         return self.lm_head(

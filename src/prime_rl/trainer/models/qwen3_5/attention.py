@@ -43,6 +43,7 @@ class Qwen3_5Attention(FlashAttention):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         cu_seqlens: torch.LongTensor,
         max_seqlen: int,
+        block_mask=None,
     ) -> tuple[torch.Tensor, None]:
         batch_size, sequence_length, _ = hidden_states.shape
 
@@ -77,6 +78,7 @@ class Qwen3_5Attention(FlashAttention):
             value_states[0],
             cu_seqlens,
             max_seqlen,
+            block_mask=block_mask,
         ).reshape(batch_size, sequence_length, -1)
         if output_gate is not None:
             attention_output = attention_output * output_gate.sigmoid()
