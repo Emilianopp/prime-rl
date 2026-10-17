@@ -295,10 +295,20 @@ class SessionTable:
     carries the full chronological prompt; the model saw only the live turns.
     """
 
-    def __init__(self, engine: SglangEngine | None, timeout: float, eviction: TurnWindow | None = None):
+    def __init__(
+        self,
+        engine: SglangEngine | None,
+        timeout: float,
+        eviction: TurnWindow | None = None,
+        overlap_schedule: bool = False,
+    ):
         self.engine = engine
         self.timeout = timeout
         self.eviction = eviction
+        # With overlap scheduling SGLang computes a call's last sampled token's KV before
+        # the next call (while the evicted tokens are still resident); without it, that
+        # token's KV is computed by the next call, after the eviction.
+        self.overlap_schedule = overlap_schedule
         self._traces: dict[str, _TraceSession] = {}
         self._incarnation = itertools.count()
         self._request = itertools.count()
@@ -381,12 +391,13 @@ class SessionTable:
                     if evict_to > trace.evicted:
                         self.stats["evicting_calls"] += 1
                         self.stats["evicted_tokens"] += evict_to - trace.evicted
-                        # For the trainer, in chronological positions: the evicted
-                        # tokens are unseen from the previous call's last sampled
-                        # token on, the first KV computed after this eviction.
+                        # For the trainer, in chronological positions: the evicted tokens
+                        # are unseen from the first token whose KV is computed after this
+                        # eviction - the previous call's last sampled token, or (with
+                        # overlap scheduling, which computes that one early) the new tail.
                         ret["eviction"] = {
                             "spans": [[trace.protected + trace.evicted, trace.protected + evict_to]],
-                            "at": len(resident) - 1,
+                            "at": len(resident) - (0 if self.overlap_schedule else 1),
                         }
                     trace.evicted = evict_to
                 return ret
@@ -704,7 +715,10 @@ def main(argv: list[str] | None = None) -> None:
         # The engine binds lazily: the tokenizer manager exists only once the server starts.
         eviction = TurnWindow(**launch["eviction"]) if launch.get("eviction") else None
         _STATE["sessions"] = SessionTable(
-            engine=None, timeout=float(launch.get("session_timeout", 3600.0)), eviction=eviction
+            engine=None,
+            timeout=float(launch.get("session_timeout", 3600.0)),
+            eviction=eviction,
+            overlap_schedule=not launch["server_args"].get("disable_overlap_schedule", False),
         )
     dp_size = int(launch["server_args"].get("dp_size") or 1)
     if dp_size > 1:

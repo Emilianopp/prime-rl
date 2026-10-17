@@ -49,6 +49,10 @@ class TensorMicroBatch(TypedDict):
     # maximum mask size. A row containing only -1 has no mask.
     sampling_mask: Int[Tensor, "batch seq mask"] | None
 
+    # KV-Streams eviction: per token, the position (within its sequence) from which
+    # no later token attends to it; -1 = never evicted. None = full context.
+    kv_death: Int[Tensor, "batch seq"] | None
+
     # Multimodal inputs. The data loader sets mm_refs (undecoded image references), and prepare_micro_batch
     # replaces them with mm_kwargs (CPU tensors for the vision encoder) and mm_forward_policy.
     mm_refs: MMRefs | None
@@ -227,9 +231,6 @@ class DataLoader:
 
     def _micro_batch_to_tensor(self, micro_batch: MicroBatch) -> TensorMicroBatch:
         """Convert a MicroBatch (msgspec struct with lists) to a TensorMicroBatch (dict with tensors)."""
-        if micro_batch.kv_death is not None:
-            # Dense attention over an evicted stream would train on context the rollout never saw.
-            raise NotImplementedError("kv_death (KV-Streams eviction) needs the trainer's flex attention path")
         routed_experts = None
         packed_routed_experts = micro_batch.routed_experts
         if packed_routed_experts is not None:
@@ -283,6 +284,9 @@ class DataLoader:
             else None,
             ref_kl_weights=torch.tensor(micro_batch.ref_kl_weights, dtype=torch.float).unsqueeze(0)
             if micro_batch.ref_kl_weights is not None
+            else None,
+            kv_death=torch.tensor(micro_batch.kv_death, dtype=torch.int32).unsqueeze(0)
+            if micro_batch.kv_death is not None
             else None,
         )
 
