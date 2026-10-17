@@ -72,3 +72,4 @@ echo "== trainer steps"; grep -E "Step [0-9]+ \|" "$L/trainer.log" | strip | cut
 echo "== orchestrator steps"; grep -E "^.*Step [0-9]+ \|" "$L/orchestrator.log" | strip | cut -c1-200
 kill $POLL 2>/dev/null; echo "== kvs counters"; cat "$OUT/kvs.prom" 2>/dev/null
 pkill -u "$USER" -f "$VENV/" 2>/dev/null; pkill -u "$USER" -f "$SLURM_TMPDIR/sgl-venv/" 2>/dev/null
+exit 0  # the run's outcome is in steps.txt; pkill's no-match status must not fail the job
