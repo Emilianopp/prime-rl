@@ -16,14 +16,19 @@
 #      kve-dense  same rollouts, trainer ignores kv_death (negative control)
 #      full       full-context rollouts (plain SGLang), the mismatch floor
 #
-# Env: REPO (prime-rl checkout; its deps/ submodules must be checked out), VENV,
-# SGLANG_VENV, OUT_ROOT.
+# Env: BATCH (episodes per step, default 128), MAMBA (DeltaNet state slots per
+# engine, >= 3 x CPR; default 700), REPO (prime-rl checkout; its deps/ submodules
+# must be checked out), VENV, SGLANG_VENV, OUT_ROOT.
+#
+# Recommended KV-Streams setting (Qwen3.5-4B, 2x A100-80GB inference): the
+# concurrency controller on with a c256 ceiling, which it trims to what the KV
+# pool holds:  CPR=256 BATCH=512 MAMBA=840.
 set -u
-ARM=$1 STEPS=${2:-4} CPR=${3:-48}
+ARM=$1 STEPS=${2:-4} CPR=${3:-48} BATCH=${BATCH:-128} MAMBA=${MAMBA:-700}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/kve_train}/${ARM}_c${CPR}/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/kve_train}/${ARM}_c${CPR}_b${BATCH}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 INFLIGHT=$((2 * CPR))
 
@@ -32,14 +37,14 @@ export UV_PROJECT_ENVIRONMENT=$VENV
 # This checkout's code and pinned verifiers/renderers, over the venv's editable installs.
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/textworld_env:$REPO/deps/verifiers:$REPO/deps/renderers${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[$ARM c$CPR] $(git log --oneline -1) steps=$STEPS" | tee "$OUT/cell.txt"
+echo "[$ARM c$CPR] $(git log --oneline -1) steps=$STEPS batch=$BATCH mamba=$MAMBA" | tee "$OUT/cell.txt"
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
 export CUDA_HOME=$($SGL_PY -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13
 
 MODEL=(--model.name Qwen/Qwen3.5-4B --orchestrator.renderer.name qwen3.5 --orchestrator.renderer.enable-thinking false
-       --inference.vllm.gpu-memory-utilization 0.9 --inference.sglang.max-mamba-cache-size 700)
+       --inference.vllm.gpu-memory-utilization 0.9 --inference.sglang.max-mamba-cache-size "$MAMBA")
 BACKEND=(--inference.backend sglang --inference.sglang.python "$SGL_PY")
 case $ARM in
   kve|kve-dense)
@@ -57,7 +62,7 @@ sed "s|^env.max_episode_steps = .*|env.max_episode_steps = 200\nenv.episode_log 
 ( while sleep 30; do curl -s -m 5 http://localhost:8000/metrics | grep "^kvs:" > "$OUT/kvs.prom.tmp" && mv "$OUT/kvs.prom.tmp" "$OUT/kvs.prom"; done ) &
 POLL=$!
 uv run rl @ "$OUT/rl.toml" --clean --output-dir "$OUT/run" \
-  --max-steps "$STEPS" --orchestrator.batch-size 128 \
+  --max-steps "$STEPS" --orchestrator.batch-size "$BATCH" \
   --orchestrator.concurrency.initial-inflight "$INFLIGHT" \
   --orchestrator.concurrency.min-inflight 4 \
   --orchestrator.concurrency.max-inflight "$INFLIGHT" \
