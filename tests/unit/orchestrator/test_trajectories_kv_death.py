@@ -1,6 +1,5 @@
 """A KV-Streams trace's per-token evictions reach its training sample as kv_death."""
 
-import pytest
 import verifiers.v1 as vf
 from verifiers.v1 import graph
 from verifiers.v1.types import TurnTokens
@@ -58,10 +57,10 @@ def test_full_context_trace_has_no_kv_death():
     assert sample.kv_death is None
 
 
-def test_trainer_refuses_kv_death_until_flex_attention():
+def test_trainer_receives_kv_death_as_a_tensor():
     (sample,) = trace_to_samples(_trace(evict=True), env_name="kv")
     sample.temperatures = [1.0] * len(sample.token_ids)
     sample.advantages = [0.0] * len(sample.token_ids)
     micro_batch = prepare_sample(sample, seq_len=64)
-    with pytest.raises(NotImplementedError, match="flex attention"):
-        DataLoader._micro_batch_to_tensor(None, micro_batch)
+    tensors = DataLoader._micro_batch_to_tensor(None, micro_batch)
+    assert tensors["kv_death"].tolist() == [[-1, -1, 5, 5, 5, -1, -1, -1]]
