@@ -66,6 +66,34 @@ def evicted_context(kv_death: Tensor, seq_lens: Tensor) -> Tensor:
     return positions >= first_death[seq_ids]
 
 
+# Flex's default tiles are a poor fit for some (GPU, head_dim) pairs, and inside
+# prime-rl's compiled transformer blocks a mode="max-autotune" on the flex call is
+# ignored (the outer compile's settings win), so tuned tiles are passed explicitly.
+# Keys: (compute capability major, head_dim). Measured with max-autotune at
+# Qwen3.5-4B shapes (16 q / 4 kv heads, ~33k packed tokens, bf16) on A100: forward +
+# backward 733 ms with default tiles, 53 ms with these, flash varlen 42 ms.
+_KERNEL_OPTIONS: dict[tuple[int, int], dict] = {
+    (8, 256): {
+        "fwd_BLOCK_M": 128,
+        "fwd_BLOCK_N": 128,
+        "fwd_num_stages": 2,
+        "fwd_num_warps": 8,
+        "bwd_BLOCK_M1": 32,
+        "bwd_BLOCK_N1": 32,
+        "bwd_BLOCK_M2": 32,
+        "bwd_BLOCK_N2": 32,
+        "bwd_num_stages": 1,
+        "bwd_num_warps": 4,
+    },
+}
+
+
+def _kernel_options(q: Tensor) -> dict | None:
+    if not q.is_cuda:
+        return None
+    return _KERNEL_OPTIONS.get((torch.cuda.get_device_capability(q.device)[0], q.shape[-1]))
+
+
 def masked_attention(q: Tensor, k: Tensor, v: Tensor, block_mask: BlockMask, scale: float) -> Tensor:
     """Flex attention over packed [tokens, heads, dim] q/k/v (k/v may have fewer heads: GQA)."""
     out = _compiled_flex_attention(
@@ -75,5 +103,6 @@ def masked_attention(q: Tensor, k: Tensor, v: Tensor, block_mask: BlockMask, sca
         block_mask=block_mask,
         scale=scale,
         enable_gqa=q.shape[1] != k.shape[1],
+        kernel_options=_kernel_options(q),
     )
     return out.squeeze(0).transpose(0, 1)
