@@ -309,3 +309,40 @@ def test_finish_without_a_request_in_flight_only_closes():
     engine = run(scenario())
     assert not [c for c in engine.calls if c[0] == "abort"]
     assert engine.calls[-1] == ("close", "t.0") and engine.rids == ["t.0.r0"]
+
+
+def test_evicting_calls_report_chronological_spans_and_the_first_unseeing_position():
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        table = SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E))
+        prompt, choices = SYSTEM + USER + GEN, []
+        for _ in range(4):
+            response = await generate_sglang(engine, prompt, {}, sessions=table, trace_id="t")
+            assert response["prompt_token_ids"] == prompt  # always the full chronological prompt
+            choices.append(response["choices"][0])
+            prompt = prompt + [90, E] + BRIDGE + USER + GEN
+        return choices
+
+    choices = run(scenario())
+    # Turn 1 is chronological [3, 8) (user, generation prompt, reply), turn 2 [8, 14).
+    # Each dies from the previous call's last sampled token on: resident 14 -> 13, 20 -> 19.
+    assert [c.get("eviction") for c in choices] == [
+        None,
+        None,
+        {"spans": [[3, 8]], "at": 13},
+        {"spans": [[8, 14]], "at": 19},
+    ]
+
+
+def test_reopening_an_evicting_trace_is_counted():
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        table = SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E))
+        prompt = SYSTEM + USER + GEN
+        for _ in range(3):
+            await table.generate("t", prompt, {})
+            prompt = prompt + [90, E] + BRIDGE + USER + GEN
+        await table.generate("t", SYSTEM + [3, 3, E] + GEN, {})  # rewritten history
+        return table
+
+    assert run(scenario()).stats["resurrected"] == 1

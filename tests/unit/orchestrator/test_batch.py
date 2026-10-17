@@ -541,3 +541,43 @@ def test_prepare_sample_none_routed_experts():
 
     micro_batch = prepare_sample(sample, seq_len=8)
     assert micro_batch.routed_experts is None
+
+
+def _kv_sample(length: int, kv_death: list[int] | None) -> TrainingSample:
+    sample = make_sized_training_example(length)
+    sample.kv_death = kv_death
+    return sample
+
+
+def test_full_context_batches_carry_no_kv_death(make_training_example):
+    batches_per_gpu = prepare_batch(
+        rollouts=[make_training_example(), make_training_example()],
+        seq_len=16,
+        pad_to_multiple_of=8,
+        num_train_workers=1,
+        bin_cost=build_bin_cost(None),
+    )
+    assert all(batch.kv_death is None for batch in _flatten_batches(batches_per_gpu))
+
+
+def test_prepare_batch_packs_kv_death_with_full_context_samples_and_padding():
+    """kv_death stays aligned with input_ids: -1 for a packed full-context sample and for
+    padding, while the evicting sample keeps its own (per-sample) positions."""
+    evicting = _kv_sample(6, [-1, 4, 4, -1, -1, -1])
+    full_context = _kv_sample(4, None)
+    batches_per_gpu = prepare_batch(
+        rollouts=[evicting, full_context],
+        seq_len=16,
+        pad_to_multiple_of=16,
+        num_train_workers=1,
+        bin_cost=build_bin_cost(None),
+    )
+    (batch,) = _flatten_batches(batches_per_gpu)
+    assert batch.sequence_lengths[:1] == [6]  # FFD puts the longer sample first
+    assert batch.kv_death == [-1, 4, 4, -1, -1, -1] + [-1] * 4 + [-1] * 6
+    assert len(batch.kv_death) == len(batch.input_ids)
+
+
+def test_prepare_sample_truncates_kv_death():
+    micro_batch = prepare_sample(_kv_sample(10, [-1, 3, 3] + [-1] * 7), seq_len=4)
+    assert micro_batch.kv_death == [-1, 3, 3, -1]

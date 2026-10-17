@@ -227,6 +227,9 @@ class DataLoader:
 
     def _micro_batch_to_tensor(self, micro_batch: MicroBatch) -> TensorMicroBatch:
         """Convert a MicroBatch (msgspec struct with lists) to a TensorMicroBatch (dict with tensors)."""
+        if micro_batch.kv_death is not None:
+            # Dense attention over an evicted stream would train on context the rollout never saw.
+            raise NotImplementedError("kv_death (KV-Streams eviction) needs the trainer's flex attention path")
         routed_experts = None
         packed_routed_experts = micro_batch.routed_experts
         if packed_routed_experts is not None:

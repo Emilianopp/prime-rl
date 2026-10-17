@@ -3,7 +3,7 @@
 	url = git@github.com:Emilianopp/verifiers.git
 [submodule "renderers"]
 	path = deps/renderers
-	url = git@github.com:PrimeIntellect-ai/renderers.git
+	url = git@github.com:Emilianopp/renderers.git
 [submodule "prime-envs"]
 	path = deps/prime-envs
 	url = git@github.com:PrimeIntellect-ai/prime-envs.git
