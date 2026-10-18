@@ -352,6 +352,21 @@ def _step(env: crafter.Env, action: str) -> tuple[float, bool, dict[str, Any]]:
     return float(reward), bool(done), info
 
 
+def _step_info(env: crafter.Env, info: Any, reward: float) -> dict[str, Any]:
+    """The player's state after a step: the step's public info where it has it, as
+    plain ints (Crafter returns numpy values, e.g. `player_pos` is an array)."""
+    current = _player_info(env, reward)
+    if isinstance(info, dict):
+        for key in ("inventory", "achievements", "player_pos"):
+            if key in info:
+                current[key] = info[key]
+    current["inventory"] = {str(k): int(v) for k, v in (current.get("inventory") or {}).items()}
+    current["achievements"] = {str(k): int(v) for k, v in (current.get("achievements") or {}).items()}
+    pos = current.get("player_pos")
+    current["player_pos"] = [int(x) for x in (pos if pos is not None else (0, 0))]
+    return current
+
+
 class CrafterEnv(vf.Env[CrafterEnvConfig]):
     async def run(self, task, agents):
         seed = int(task.data.info["seed"])
@@ -389,13 +404,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         reward, done, info = 0.0, False, {}
                         invalid_action = raw_action or action
                     total_reward += reward
-                    current = _player_info(env, reward)
-                    for key in ("inventory", "achievements", "player_pos"):
-                        if isinstance(info, dict) and key in info:
-                            current[key] = info[key]
-                    current["inventory"] = {str(k): int(v) for k, v in (current.get("inventory") or {}).items()}
-                    current["achievements"] = {str(k): int(v) for k, v in (current.get("achievements") or {}).items()}
-                    current["player_pos"] = [int(x) for x in (current.get("player_pos") or [0, 0])]
+                    current = _step_info(env, info, reward)
                     if done:
                         break
                     observation = _format_observation(
