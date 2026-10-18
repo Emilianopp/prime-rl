@@ -12,21 +12,23 @@
 #   sbatch kve_eval.sbatch
 #
 # Env: KEEP (eviction max_turns, default 50), N (episodes, default 256), CONC
-# (in-flight episodes, default 128), REPO (prime-rl checkout; deps/ submodules
+# (in-flight episodes, default 128), RESPAWN (unset: death ends the episode;
+# AT:INVENTORY:PENALTY, e.g. spawn:drop_all:0.05, respawns, see the env's
+# on_death / respawn_at / death_inventory / death_penalty), REPO (prime-rl checkout; deps/ submodules
 # checked out), VENV, SGLANG_VENV, OUT_ROOT.
 set -u
-KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128}
+KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/r${KEEP}-1_n${N}_c${CONC}/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/crafter_env:$REPO/deps/verifiers:$REPO/deps/renderers${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[crafter eval r$KEEP-1 n$N c$CONC] $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[crafter eval r$KEEP-1 n$N c$CONC respawn=${RESPAWN:-off}] $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
@@ -43,7 +45,12 @@ echo "inference up $(date +%T)"
 
 ( while sleep 30; do curl -s -m 5 http://localhost:8000/metrics | grep "^kvs:" > "$OUT/kvs.prom.tmp" && mv "$OUT/kvs.prom.tmp" "$OUT/kvs.prom"; done ) &
 POLL=$!
-sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"|" configs/crafter/eval-kve.toml > "$OUT/eval.toml"
+DEATH=""
+if [ -n "$RESPAWN" ]; then
+  IFS=: read -r AT INV PEN <<< "$RESPAWN"
+  DEATH="\nenv.on_death = \"respawn\"\nenv.respawn_at = \"$AT\"\nenv.death_inventory = \"$INV\"\nenv.death_penalty = ${PEN:-0}"
+fi
+sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"$DEATH|" configs/crafter/eval-kve.toml > "$OUT/eval.toml"
 uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false \
   --select.limit "$N" --concurrency.min-inflight "$CONC" --concurrency.max-inflight "$CONC" > "$OUT/eval.log" 2>&1
 echo "eval exit $? $(date +%T)"

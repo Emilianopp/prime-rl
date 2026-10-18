@@ -40,6 +40,24 @@ def main(path: str) -> None:
     print(f"game steps: {quantiles([e['steps'] for e in episodes])}")
     print(f"trace tokens: {quantiles([e.get('trace_tokens', 0) for e in episodes])}")
     print("ended:", dict(Counter(e.get("ended_by", "?") for e in episodes).most_common()))
+    died = [e for e in episodes if e.get("ended_by") == "died"]
+    if died:
+        causes = Counter()
+        for e in died:
+            starved = [k for k in ("food", "drink", "energy") if e.get("inventory", {}).get(k, 1) == 0]
+            causes[" + ".join(starved) if starved else "damage"] += 1
+        print(f"died: {len(died)}, at step {quantiles([e['steps'] for e in died])}; causes (vital at 0, else damage):", dict(causes.most_common()))
+    deaths = [len(e.get("deaths", [])) for e in episodes]
+    if any(deaths):
+        print(f"deaths per episode: mean {statistics.mean(deaths):.2f}, {quantiles(deaths)}")
+        first = [e["deaths"][0]["step"] for e in episodes if e.get("deaths")]
+        print(f"first death step: {quantiles(first)}")
+        causes = Counter()
+        for e in episodes:
+            for d in e.get("deaths", []):
+                starved = [k for k in ("food", "drink", "energy") if d["vitals"].get(k, 1) == 0]
+                causes[" + ".join(starved) if starved else "damage"] += 1
+        print("death causes (vital at 0, else damage):", dict(causes.most_common()))
     print(f"invalid actions per step: {sum(e['invalid_actions'] for e in episodes) / max(1, sum(e['steps'] for e in episodes)):.3f}")
     print("\nachievement            success   first unlock step (p50 / p90)")
     for a in sorted(ACHIEVEMENTS, key=lambda a: -rates[a]):
