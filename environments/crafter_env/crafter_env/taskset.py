@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 from collections.abc import Iterator
 from typing import Any, Literal
 
@@ -380,6 +381,9 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=self.config.view_radius
             )
         total_reward, invalid, steps, done = 0.0, 0, 0, False
+        actions: Counter[str] = Counter()
+        unlocked_at: dict[str, int] = {}  # achievement -> game step it was first unlocked
+        end = "terminated"  # the run stopped answering (a turn or token limit)
         raw_action: str | None = None  # the last action the model wrote, as in v0's parse_answer
         current = _player_info(env)
         try:
@@ -388,6 +392,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 while not segment.terminated:
                     steps += 1
                     if steps >= max_steps:
+                        end = "max_episode_steps"
                         break  # as in v0: the capped turn's action is not played
                     found = _ACTION.findall(segment.last_reply)
                     if found:
@@ -404,8 +409,13 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         reward, done, info = 0.0, False, {}
                         invalid_action = raw_action or action
                     total_reward += reward
+                    actions[action] += 1
                     current = _step_info(env, info, reward)
+                    for name, count in current["achievements"].items():
+                        if count > 0 and name not in unlocked_at:
+                            unlocked_at[name] = steps
                     if done:
+                        end = "died" if current["inventory"].get("health", 0) <= 0 else "world_length"
                         break
                     observation = _format_observation(
                         env=env,
@@ -437,7 +447,14 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "survived": survived,
             }
         )
-        trace.info["crafter"] = {"achievements": unlocked, "steps": steps, "done": done, "seed": seed}
+        trace.info["crafter"] = {
+            "achievements": unlocked,
+            "unlocked_at": unlocked_at,
+            "steps": steps,
+            "done": done,
+            "end": end,
+            "seed": seed,
+        }
         if self.config.episode_log:
             line = {
                 "start": started,
@@ -448,6 +465,12 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "steps": steps,
                 "done": done,
                 "survived": survived,
+                "end": end,
+                "seed": seed,
+                "unlocked_at": unlocked_at,
+                "actions": dict(actions),
+                "inventory": current.get("inventory") or {},
+                "trace_tokens": trace.num_total_tokens,
                 "task": "crafter",
             }
             with open(self.config.episode_log, "a") as f:
