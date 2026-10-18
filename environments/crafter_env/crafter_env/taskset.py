@@ -359,12 +359,17 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
         started = time.time()
         env = crafter.Env(seed=seed, length=max_steps)
         await asyncio.to_thread(env.reset)
+        opening = None
+        if task.data.prompt is None:
+            opening = _format_observation(
+                env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=self.config.view_radius
+            )
         total_reward, invalid, steps, done = 0.0, 0, 0, False
         raw_action: str | None = None  # the last action the model wrote, as in v0's parse_answer
         current = _player_info(env)
         try:
             async with agents.player.interaction(task) as interaction:
-                segment = await interaction.turn()
+                segment = await interaction.turn(opening)
                 while not segment.terminated:
                     steps += 1
                     if steps >= max_steps:
@@ -447,11 +452,15 @@ class CrafterTaskset(vf.Taskset[CrafterTask, CrafterConfig]):
         system = REASONING_SYSTEM_PROMPT if cfg.enable_reasoning else SYSTEM_PROMPT
         for i in range(cfg.num_examples):
             seed = base + i
-            observation = _initial_observation(seed, cfg.max_episode_steps, cfg.view_radius)
             if cfg.include_initial_obs_in_system:
+                # The system prompt carries the opening observation, so this renders a
+                # world per task up front (about a second each).
+                observation = _initial_observation(seed, cfg.max_episode_steps, cfg.view_radius)
                 system_prompt, prompt = f"{system}\n\nINITIAL OBSERVATION:\n{observation}", "What action do you take?"
             else:
-                system_prompt, prompt = system, observation
+                # Prompt-less: the env opens the episode with the observation of the
+                # world it builds (as v0's setup_state did), so loading stays instant.
+                system_prompt, prompt = system, None
             yield CrafterTask(
                 CrafterData(
                     name=f"crafter#{cfg.split}{i}",
