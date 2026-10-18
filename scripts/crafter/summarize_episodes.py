@@ -58,6 +58,13 @@ def main(path: str) -> None:
                 starved = [k for k in ("food", "drink", "energy") if d["vitals"].get(k, 1) == 0]
                 causes[" + ".join(starved) if starved else "damage"] += 1
         print("death causes (vital at 0, else damage):", dict(causes.most_common()))
+    books = [e["notebook"] for e in episodes if e.get("notebook")]
+    if books:
+        print(f"notebook: memory writes per episode {statistics.mean(b['writes'] for b in books):.1f}, "
+              f"scratchpad updates {statistics.mean(b['scratchpad_updates'] for b in books):.1f}, "
+              f"episodes that wrote anything {sum(1 for b in books if b['writes'] or b['scratchpad_updates'])}/{len(books)}")
+        for b in books[:3]:
+            print("  e.g. memories:", b["memories"][:5], "| scratchpad:", b["scratchpad"][:160])
     print(f"invalid actions per step: {sum(e['invalid_actions'] for e in episodes) / max(1, sum(e['steps'] for e in episodes)):.3f}")
     print("\nachievement            success   first unlock step (p50 / p90)")
     for a in sorted(ACHIEVEMENTS, key=lambda a: -rates[a]):
