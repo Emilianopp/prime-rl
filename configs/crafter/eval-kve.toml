@@ -1,0 +1,40 @@
+# Inference-only Crafter baseline under KV-Streams: no trainer, the policy as it
+# is. Episodes run until the player dies, the world ends (10,000 steps) or the
+# trace reaches 256k tokens. Serve configs/crafter/inference-kve.toml first.
+#
+#   uv run eval @ configs/crafter/eval-kve.toml
+
+model = "Qwen/Qwen3.5-4B"
+group_size = 1
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+# Any admin URL enables releasing each episode's session when it finishes.
+admin_base_url = ["http://localhost:8000/v1"]
+
+[renderer]  # token-in/out with the trace id as session id, as in training
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[concurrency]
+min_inflight = 128
+max_inflight = 128
+
+[select]
+limit = 256
+
+[sampling]
+max_completion_tokens = 1024
+temperature = 1.0
+
+[[source]]
+name = "crafter"
+env.taskset.id = "crafter-env"
+env.max_episode_steps = 10000  # Crafter's own world length
+env.player.max_total_tokens = 256000  # trace tokens, under max_model_len
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16

@@ -62,7 +62,13 @@ class InferenceClient:
             renderer_config=renderer_config,
             renderer_model_name=renderer_model_name,
         )
-        self.eval_client = setup_client(client_config, client_type=eval_client_type)
+        is_renderer_eval = eval_client_type == "renderer"
+        self.eval_client = setup_client(
+            client_config,
+            client_type=eval_client_type,
+            renderer_config=renderer_config if is_renderer_eval else None,
+            renderer_model_name=model_name if is_renderer_eval else None,
+        )
         self._scorer = PrefillScorer()
         # Managed routed deployments set admin_base_url so engine admin traffic
         # bypasses the client-facing router. External and frozen clients do not.

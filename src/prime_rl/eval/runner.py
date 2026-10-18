@@ -84,7 +84,12 @@ class EvalRunner:
         self.run_name = os.environ.get("PRL_RUN_NAME")
 
         get_logger().info(f"Initializing inference pool (base_url={config.client.base_url}, model={config.model})")
-        self.clients = InferenceClient(config.client, model_name=config.model)
+        if config.renderer is not None:
+            self.clients = InferenceClient(
+                config.client, model_name=config.model, eval_client_type="renderer", renderer_config=config.renderer
+            )
+        else:
+            self.clients = InferenceClient(config.client, model_name=config.model)
         self.admin_plane = AdminPlane(config.client)
 
         get_logger().info("Loading eval environment(s)")
