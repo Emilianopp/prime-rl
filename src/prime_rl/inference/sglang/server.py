@@ -131,8 +131,13 @@ def pack_logprobs(output_token_logprobs: list) -> np.ndarray:
     return np.maximum(values, LOGPROB_SENTINEL)
 
 
-def build_generate_response(ret: dict[str, Any], prompt_token_ids: list[int]) -> dict[str, Any]:
-    """An SGLang ``/generate`` result -> prime-rl's ``/inference/v1/generate`` response."""
+def build_generate_response(
+    ret: dict[str, Any], prompt_token_ids: list[int] | None, prompt_len: int | None = None
+) -> dict[str, Any]:
+    """An SGLang ``/generate`` result -> prime-rl's ``/inference/v1/generate`` response.
+
+    ``prompt_token_ids=None`` (a session delta request, whose client holds the prompt)
+    leaves them out of the response; ``prompt_len`` is then the prompt's length."""
     meta = ret["meta_info"]
     finish = meta.get("finish_reason") or {}
     completion_ids = list(ret.get("output_ids") or [])
@@ -141,11 +146,13 @@ def build_generate_response(ret: dict[str, Any], prompt_token_ids: list[int]) ->
         raise RuntimeError(
             f"SGLang returned {len(logprobs)} logprobs for {len(completion_ids)} completion tokens"
         )
-    prompt_tokens = int(meta.get("prompt_tokens", len(prompt_token_ids)))
+    if prompt_len is None:
+        prompt_len = len(prompt_token_ids or ())
+    prompt_tokens = int(meta.get("prompt_tokens", prompt_len))
     completion_tokens = int(meta.get("completion_tokens", len(completion_ids)))
     return {
         "request_id": meta.get("id", ""),
-        "prompt_token_ids": list(prompt_token_ids),
+        **({"prompt_token_ids": list(prompt_token_ids)} if prompt_token_ids is not None else {}),
         "choices": [
             {
                 "index": 0,
@@ -253,9 +260,17 @@ class TurnWindow:
             return completed
         return completed - ((completed - self.max_turns) // self.stride + 1) * self.stride
 
+    def message_ends(self, token_ids: list[int], offset: int = 0) -> list[int]:
+        """Positions just after each message end marker in ``token_ids``, which start at ``offset``."""
+        end = self.message_end_id
+        return [offset + i + 1 for i, token in enumerate(token_ids) if token == end]
+
     def layout(self, token_ids: list[int]) -> tuple[int, int]:
         """(protected prefix length, chronological tokens after it that are dead)."""
-        ends = [i + 1 for i, token in enumerate(token_ids) if token == self.message_end_id]
+        return self.layout_ends(self.message_ends(token_ids))
+
+    def layout_ends(self, ends: list[int]) -> tuple[int, int]:
+        """``layout`` from the prompt's message end positions."""
         if not ends:
             return 0, 0
         protected, turn_ends = ends[0], ends[2::2]
@@ -279,6 +294,19 @@ class _TraceSession:
     state_id: str | None = None
     protected: int = 0
     evicted: int = 0
+    # Positions just after each message end in ``resident`` (eviction on), kept
+    # incrementally so a turn scans only its new tokens.
+    ends: list[int] = field(default_factory=list)
+
+
+class SessionDesyncError(Exception):
+    """A delta request (``prefix_len``) that does not match its session: the client
+    resends the full prompt. ``unavailable``: this server keeps no sessions at all,
+    so the client stops sending deltas to it."""
+
+    def __init__(self, message: str, unavailable: bool = False):
+        super().__init__(message)
+        self.unavailable = unavailable
 
 
 class SessionTable:
@@ -295,6 +323,12 @@ class SessionTable:
     the turns the schedule has retired from the session's KV, in place: the
     survivors keep their positions and are never recomputed. The response still
     carries the full chronological prompt; the model saw only the live turns.
+
+    A client that tracks its session can send just the new tokens with
+    ``prefix_len`` = the session's resident length (``generate(..., prefix_len=)``):
+    then nothing per call scales with the trace's length - no full prompt to
+    receive, compare or echo back. A ``prefix_len`` the session does not hold
+    raises ``SessionDesyncError`` (HTTP 409) and the client resends in full.
     """
 
     def __init__(
@@ -324,22 +358,41 @@ class SessionTable:
         }
 
     async def generate(
-        self, trace_id: str, token_ids: list[int], sampling_params: dict[str, Any], **kwargs: Any
+        self,
+        trace_id: str,
+        token_ids: list[int],
+        sampling_params: dict[str, Any],
+        prefix_len: int = 0,
+        **kwargs: Any,
     ) -> dict[str, Any]:
+        """Generate on the trace's session. ``token_ids`` is the full prompt, or with
+        ``prefix_len > 0`` only what follows the session's ``prefix_len`` resident tokens."""
         trace = self._traces.setdefault(trace_id, _TraceSession())
         if trace.lock.locked():
+            if prefix_len:
+                raise SessionDesyncError(f"trace {trace_id} has a call in flight")
             return await self.engine.generate(token_ids, sampling_params, **kwargs)
         async with trace.lock:
+            if prefix_len and (trace.engine_session is None or len(trace.resident) != prefix_len or not token_ids):
+                raise SessionDesyncError(
+                    f"trace {trace_id}: delta on {prefix_len} tokens, session holds {len(trace.resident)}"
+                )
             for attempt in range(2):
                 resident = trace.resident
-                extends = (
-                    trace.engine_session is not None
-                    and len(token_ids) > len(resident)
-                    and token_ids[: len(resident)] == resident
-                )
-                if extends:
-                    tail = token_ids[len(resident) :]
+                held = len(resident)
+                if prefix_len and trace.engine_session is not None:
+                    extends, tail = True, token_ids
                 else:
+                    if prefix_len:  # a delta whose session was closed by a failed attempt
+                        token_ids, prefix_len = prior + token_ids, 0
+                    extends = (
+                        trace.engine_session is not None
+                        and len(token_ids) > held
+                        and token_ids[:held] == resident
+                    )
+                    tail = token_ids[held:] if extends else token_ids
+                prior = resident  # _close() swaps in a fresh list: this one stays intact
+                if not extends:
                     self._note_resurrection(trace_id, trace)
                     reopen = trace.engine_session is not None or attempt > 0
                     if trace.engine_session is not None and attempt == 0:
@@ -356,10 +409,12 @@ class SessionTable:
                         # close: close it here and generate nothing.
                         await self._close(trace)
                         raise GenerateRequestError(f"trace {trace_id} finished while its session opened")
-                    tail = token_ids
+                    held = 0
+                prompt_ends: list[int] = []
                 call_kwargs, evict_to = dict(kwargs), trace.evicted
                 if self.eviction is not None:
-                    call_kwargs["kv_eviction"], evict_to = self._eviction_call(trace, token_ids)
+                    prompt_ends = (trace.ends if extends else []) + self.eviction.message_ends(tail, held)
+                    call_kwargs["kv_eviction"], evict_to = self._eviction_call(trace, prompt_ends)
                     # SGLang requires a kv_eviction request's rid to be its call id.
                     call_kwargs["rid"] = call_kwargs["kv_eviction"]["call_id"]
                 else:
@@ -390,9 +445,16 @@ class SessionTable:
                         if attempt == 0:
                             continue
                     return ret
-                trace.resident = list(token_ids) + list(ret.get("output_ids") or [])
+                output = list(ret.get("output_ids") or [])
+                if extends:
+                    trace.resident.extend(tail)  # in place: no per-turn copy of the trace
+                else:
+                    trace.resident = list(tail)
+                prompt_len = len(trace.resident)
+                trace.resident.extend(output)
                 trace.finish_reason = ret["meta_info"].get("finish_reason")
                 if self.eviction is not None:
+                    trace.ends = prompt_ends + self.eviction.message_ends(output, prompt_len)
                     info = ret["meta_info"].get("kv_eviction") or {}
                     trace.state_id = (info.get("cache_state") or {}).get("state_id")
                     trace.call_index += 1
@@ -405,9 +467,10 @@ class SessionTable:
                         # overlap scheduling, which computes that one early) the new tail.
                         ret["eviction"] = {
                             "spans": [[trace.protected + trace.evicted, trace.protected + evict_to]],
-                            "at": len(resident) - (0 if self.overlap_schedule else 1),
+                            "at": held - (0 if self.overlap_schedule else 1),
                         }
                     trace.evicted = evict_to
+                ret["prompt_len"] = prompt_len
                 return ret
 
     def _note_resurrection(self, trace_id: str, trace: _TraceSession) -> None:
@@ -437,14 +500,14 @@ class SessionTable:
             trace.finish_reason,
         )
 
-    def _eviction_call(self, trace: _TraceSession, token_ids: list[int]) -> tuple[dict[str, Any], int]:
+    def _eviction_call(self, trace: _TraceSession, prompt_ends: list[int]) -> tuple[dict[str, Any], int]:
         """This call's ``kv_eviction`` object and the evicted length it leaves.
 
         Evicted turns are always the oldest live ones, right after the protected
         prefix, so in the session's resident (survivor) coordinates the newly
         retired turns are the one span starting at the protected length.
         """
-        protected, dead = self.eviction.layout(token_ids)
+        protected, dead = self.eviction.layout_ends(prompt_ends)
         cache_id = trace.engine_session
         if trace.call_index == 0:
             trace.protected, trace.evicted = protected, 0
@@ -495,7 +558,7 @@ class SessionTable:
         if engine_session is not None:
             # SGLang defers the close until an in-flight request on it finishes.
             await self.engine.close_session(engine_session)
-        trace.resident = []
+        trace.resident, trace.ends = [], []
         trace.call_index, trace.state_id, trace.protected, trace.evicted = 0, None, 0, 0
 
 
@@ -538,24 +601,31 @@ async def generate_sglang(
     trace_id: str | None = None,
     cache_salt: str | None = None,
     priority: int | None = None,
+    prefix_len: int = 0,
 ) -> dict[str, Any]:
     """Token-in / token-out generation on SGLang; the single SGLang call site.
 
-    Always returns prime-rl's generate response: the full prompt token ids, the
-    completion token ids, and one sampled-token logprob per completion token -
-    the same with or without a session.
+    Returns prime-rl's generate response: the full prompt token ids, the completion
+    token ids, and one sampled-token logprob per completion token - the same with
+    or without a session. A session delta request (``prefix_len > 0``: ``token_ids``
+    is only what follows the session's resident tokens) gets no prompt token ids
+    back; its client already holds them.
     """
     params = translate_sampling_params(sampling_params)
     kwargs = {"cache_salt": cache_salt, "priority": priority, "request": request}
     if affinity is not None:
         kwargs["routed_dp_rank"] = affinity.rank(trace_id)
+    if prefix_len and (sessions is None or trace_id is None):
+        raise SessionDesyncError("a delta request (prefix_len) needs a session", unavailable=True)
     if sessions is not None and trace_id is not None:
-        ret = await sessions.generate(trace_id, list(token_ids), params, **kwargs)
+        ret = await sessions.generate(trace_id, list(token_ids), params, prefix_len=prefix_len, **kwargs)
     else:
         ret = await engine.generate(token_ids, params, **kwargs)
     if _aborted(ret):
         finish = ret["meta_info"].get("finish_reason") or {}
         raise GenerateRequestError(finish.get("message") or "request aborted by the SGLang scheduler")
+    if prefix_len:
+        return build_generate_response(ret, None, prompt_len=ret.get("prompt_len"))
     return build_generate_response(ret, token_ids)
 
 
@@ -622,8 +692,23 @@ async def inference_generate(request: Request):
             trace_id=request.headers.get(SESSION_ID_HEADER),
             cache_salt=body.get("cache_salt"),
             priority=body.get("priority"),
+            prefix_len=int(body.get("prefix_len") or 0),
             request=request,
         )
+    except SessionDesyncError as e:
+        # The client resends in full right away; tell OpenAI-style clients not to retry.
+        response = JSONResponse(
+            {
+                "error": {
+                    "message": str(e),
+                    "code": 409,
+                    "type": "session_unavailable" if e.unavailable else "session_desync",
+                }
+            },
+            status_code=409,
+            headers={"x-should-retry": "false"},
+        )
+        return response
     except (GenerateRequestError, ValueError) as e:
         # The tokenizer manager raises ValueError for requests the scheduler rejects (400).
         return _error(str(e), 400)
