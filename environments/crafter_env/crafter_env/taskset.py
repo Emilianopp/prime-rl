@@ -452,7 +452,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
             "unlocked_at": unlocked_at,
             "steps": steps,
             "done": done,
-            "end": end,
+            "ended_by": end,
             "seed": seed,
         }
         if self.config.episode_log:
@@ -465,7 +465,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "steps": steps,
                 "done": done,
                 "survived": survived,
-                "end": end,
+                "ended_by": end,
                 "seed": seed,
                 "unlocked_at": unlocked_at,
                 "actions": dict(actions),

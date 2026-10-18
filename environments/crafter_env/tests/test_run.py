@@ -48,7 +48,8 @@ def test_run_plays_an_episode(tmp_path):
     assert trace.metrics["invalid_actions"] >= 2
     assert trace.info["crafter"]["seed"] == 42
     line = json.loads(log.read_text())
+    assert line["end"] >= line["start"]  # wall clock
     assert line["steps"] == trace.info["crafter"]["steps"] > 1
-    assert line["end"] in {"max_episode_steps", "died", "world_length"}
-    assert sum(line["actions"].values()) == line["steps"] - (line["end"] == "max_episode_steps")
+    assert line["ended_by"] in {"max_episode_steps", "died", "world_length"}
+    assert sum(line["actions"].values()) == line["steps"] - (line["ended_by"] == "max_episode_steps")
     assert set(line["unlocked_at"]) == set(trace.info["crafter"]["achievements"])
