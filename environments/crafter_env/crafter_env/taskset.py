@@ -28,6 +28,8 @@ from pydantic import Field
 
 import verifiers.v1 as vf
 
+from crafter_env import notebook as nb
+
 logger = logging.getLogger(__name__)
 
 ACTION_NAMES: tuple[str, ...] = tuple(constants.actions)
@@ -331,6 +333,12 @@ class CrafterConfig(vf.TasksetConfig):
     """Put the opening observation in the system prompt (the user turn is then "What action do you take?")."""
     enable_reasoning: bool = False
     """Use the prompt that asks for 2-4 sentences of reasoning before the action."""
+    notebook: bool = False
+    """Give the model notebook tools (memories + scratchpad, crafter_env.notebook),
+    explained in the system prompt and shown at the top of every observation."""
+    notebook_slots: int = Field(10, ge=1)
+    memory_chars: int = Field(120, ge=1)
+    scratchpad_chars: int = Field(400, ge=1)
 
 
 class CrafterEnvConfig(vf.EnvConfig):
@@ -426,11 +434,14 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
         started = time.time()
         env = crafter.Env(seed=seed, length=max_steps)
         await asyncio.to_thread(env.reset)
+        book = nb.Notebook(**task.data.info["notebook"]) if task.data.info.get("notebook") else None
         opening = None
         if task.data.prompt is None:
             opening = _format_observation(
                 env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=self.config.view_radius
             )
+            if book is not None:
+                opening = f"{book.render()}\n\n{opening}"
         total_reward, invalid, steps, done = 0.0, 0, 0, False
         actions: Counter[str] = Counter()
         unlocked_at: dict[str, int] = {}  # achievement -> game step it was first unlocked
@@ -449,6 +460,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                     if steps >= max_steps:
                         end = "max_episode_steps"
                         break  # as in v0: the capped turn's action is not played
+                    notes = book.apply(segment.last_reply) if book is not None else []
                     found = _ACTION.findall(segment.last_reply)
                     if found:
                         raw_action = found[0]
@@ -502,6 +514,8 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                     )
                     if respawned is not None:
                         observation, respawned = f"{respawned}\n\n{observation}", None
+                    if book is not None:
+                        observation = "\n".join([book.render(), *notes, "", observation])
                     segment = await interaction.turn(observation)
         finally:
             close = getattr(env, "close", None)
@@ -522,6 +536,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "invalid_actions": float(invalid),
                 "survived": survived,
                 "deaths": float(len(deaths)),
+                **({"memory_writes": float(book.writes), "scratchpad_updates": float(book.scratchpad_updates)} if book else {}),
             }
         )
         trace.info["crafter"] = {
@@ -532,6 +547,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
             "ended_by": end,
             "seed": seed,
             "deaths": deaths,
+            "notebook": book.summary() if book is not None else None,
         }
         if self.config.episode_log:
             line = {
@@ -545,6 +561,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "survived": survived,
                 "ended_by": end,
                 "deaths": deaths,
+                "notebook": book.summary() if book is not None else None,
                 "seed": seed,
                 "unlocked_at": unlocked_at,
                 "actions": dict(actions),
@@ -561,6 +578,10 @@ class CrafterTaskset(vf.Taskset[CrafterTask, CrafterConfig]):
         cfg = self.config
         base = cfg.seed + (1_000_000 if cfg.split == "eval" else 0)
         system = REASONING_SYSTEM_PROMPT if cfg.enable_reasoning else SYSTEM_PROMPT
+        notebook = None
+        if cfg.notebook:
+            notebook = {"slots": cfg.notebook_slots, "memory_chars": cfg.memory_chars, "scratchpad_chars": cfg.scratchpad_chars}
+            system = f"{system}\n\n{nb.instructions(**notebook)}"
         for i in range(cfg.num_examples):
             seed = base + i
             if cfg.include_initial_obs_in_system:
@@ -577,7 +598,7 @@ class CrafterTaskset(vf.Taskset[CrafterTask, CrafterConfig]):
                     name=f"crafter#{cfg.split}{i}",
                     prompt=prompt,
                     system_prompt=system_prompt,
-                    info={"seed": seed, "episode_idx": i, "split": cfg.split},
+                    info={"seed": seed, "episode_idx": i, "split": cfg.split, "notebook": notebook},
                 ),
                 cfg.task,
             )
