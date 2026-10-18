@@ -340,6 +340,57 @@ class CrafterEnvConfig(vf.EnvConfig):
     view_radius: int = Field(4, ge=1)
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, reward, achievements) to this file."""
+    on_death: Literal["end", "respawn"] = "end"
+    """`end`: death ends the episode, as in the Crafter benchmark. `respawn`: the player
+    comes back with full vitals in the same world and the same trace, its achievements
+    still unlocked; the episode runs until the world's length, `max_episode_steps` or a
+    turn/token limit of the player."""
+    respawn_at: Literal["spawn", "last_sleep", "death_site"] = "spawn"
+    """Where a respawn puts the player (the nearest free walkable cell): the world's
+    spawn point, where it last fell asleep (Minecraft's bed; the spawn point until it
+    has slept) or where it died."""
+    death_inventory: Literal["drop_all", "drop_materials", "keep"] = "drop_all"
+    """What a death takes: every item (Minecraft, minus the pickup: Crafter has no item
+    drops), the materials but not the tools, or nothing."""
+    death_penalty: float = Field(0.0, ge=0.0)
+    """Subtracted from the episode reward per death."""
+
+
+_VITALS = ("health", "food", "drink", "energy")
+_MATERIALS = ("sapling", "wood", "stone", "coal", "iron", "diamond")
+
+
+def _free_cell_near(world: Any, target: tuple[int, int], radius: int = 16) -> tuple[int, int] | None:
+    """The walkable, unoccupied cell nearest `target` (rings of growing radius)."""
+    x0, y0 = target
+    for r in range(radius + 1):
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                if max(abs(dx), abs(dy)) != r:
+                    continue
+                material, obj = world[(x0 + dx, y0 + dy)]
+                if material in constants.walkable and obj is None:
+                    return (x0 + dx, y0 + dy)
+    return None
+
+
+def _respawn(env: crafter.Env, at: tuple[int, int], death_inventory: str) -> tuple[int, int]:
+    """Bring the dead player back: full vitals, the survival counters cleared, the
+    inventory rule applied, moved to the free cell nearest `at`. Achievements stay."""
+    player = env._player
+    for item in _VITALS:
+        player.inventory[item] = constants.items[item]["max"]
+    for item in player.inventory:
+        if item not in _VITALS and (death_inventory == "drop_all" or (death_inventory == "drop_materials" and item in _MATERIALS)):
+            player.inventory[item] = 0
+    player._hunger = player._thirst = player._fatigue = player._recover = 0
+    player.sleeping = False
+    if tuple(int(x) for x in player.pos) != at:
+        cell = _free_cell_near(env._world, at)
+        if cell is not None:
+            env._world.move(player, cell)
+    env._last_health = player.health  # the refill is no health reward
+    return tuple(int(x) for x in player.pos)
 
 
 def _initial_observation(seed: int, max_steps: int, view_radius: int) -> str:
@@ -384,6 +435,10 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
         actions: Counter[str] = Counter()
         unlocked_at: dict[str, int] = {}  # achievement -> game step it was first unlocked
         end = "terminated"  # the run stopped answering (a turn or token limit)
+        spawn = tuple(int(x) for x in env._player.pos)
+        last_sleep = spawn
+        deaths: list[dict[str, Any]] = []  # one entry per death: step, vitals, where it came back
+        respawned: str | None = None  # told to the model in the next observation
         raw_action: str | None = None  # the last action the model wrote, as in v0's parse_answer
         current = _player_info(env)
         try:
@@ -414,8 +469,27 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                     for name, count in current["achievements"].items():
                         if count > 0 and name not in unlocked_at:
                             unlocked_at[name] = steps
-                    if done:
-                        end = "died" if current["inventory"].get("health", 0) <= 0 else "world_length"
+                    if env._player.sleeping:
+                        last_sleep = tuple(int(x) for x in env._player.pos)
+                    died = current["inventory"].get("health", 0) <= 0
+                    world_over = env._step >= env._length
+                    if died and not world_over and self.config.on_death == "respawn":
+                        vitals = {k: int(current["inventory"].get(k, 0)) for k in _VITALS}
+                        at = {"spawn": spawn, "last_sleep": last_sleep}.get(
+                            self.config.respawn_at, tuple(int(x) for x in env._player.pos)
+                        )
+                        pos = _respawn(env, at, self.config.death_inventory)
+                        deaths.append({"step": steps, "vitals": vitals, "pos": list(current["player_pos"]), "respawn": list(pos)})
+                        current = _step_info(env, {}, 0.0)
+                        lost = {"drop_all": "lost your inventory", "drop_materials": "lost your materials (tools kept)", "keep": "kept your inventory"}
+                        respawned = (
+                            f"You died (death {len(deaths)}, at {tuple(deaths[-1]['pos'])}). You respawned at {pos} "
+                            f"with full health, food, drink and energy, and {lost[self.config.death_inventory]}. "
+                            "Unlocked achievements stay unlocked."
+                        )
+                        done = False
+                    elif done:
+                        end = "died" if died else "world_length"
                         break
                     observation = _format_observation(
                         env=env,
@@ -426,6 +500,8 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         last_action=action,
                         invalid_action=invalid_action,
                     )
+                    if respawned is not None:
+                        observation, respawned = f"{respawned}\n\n{observation}", None
                     segment = await interaction.turn(observation)
         finally:
             close = getattr(env, "close", None)
@@ -436,7 +512,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                     pass
         trace = interaction.trace
         unlocked = sorted(name for name, count in (current.get("achievements") or {}).items() if int(count) > 0)
-        reward = len(unlocked) / max(len(ACHIEVEMENTS), 1)
+        reward = len(unlocked) / max(len(ACHIEVEMENTS), 1) - self.config.death_penalty * len(deaths)
         trace.record_reward("achievements", reward, 1.0)
         survived = 1.0 if int((current.get("inventory") or {}).get("health", 0)) > 0 else 0.0
         trace.record_metrics(
@@ -445,6 +521,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "total_env_reward": total_reward,
                 "invalid_actions": float(invalid),
                 "survived": survived,
+                "deaths": float(len(deaths)),
             }
         )
         trace.info["crafter"] = {
@@ -454,6 +531,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
             "done": done,
             "ended_by": end,
             "seed": seed,
+            "deaths": deaths,
         }
         if self.config.episode_log:
             line = {
@@ -466,6 +544,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "done": done,
                 "survived": survived,
                 "ended_by": end,
+                "deaths": deaths,
                 "seed": seed,
                 "unlocked_at": unlocked_at,
                 "actions": dict(actions),

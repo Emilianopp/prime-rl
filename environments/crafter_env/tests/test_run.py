@@ -53,3 +53,53 @@ def test_run_plays_an_episode(tmp_path):
     assert line["ended_by"] in {"max_episode_steps", "died", "world_length"}
     assert sum(line["actions"].values()) == line["steps"] - (line["ended_by"] == "max_episode_steps")
     assert set(line["unlocked_at"]) == set(trace.info["crafter"]["achievements"])
+
+
+def play(config, monkeypatch=None, kill_at=None):
+    """One episode of `config` against the scripted player; `kill_at` zeroes the
+    player's health right after that game step."""
+    import crafter_env.taskset as ts
+
+    if kill_at is not None:
+        step, calls = ts._step, []
+
+        def lethal_step(env, action):
+            reward, done, info = step(env, action)
+            calls.append(action)
+            if len(calls) == kill_at:
+                env._player.health = 0
+                return reward, True, {**info, "inventory": env._player.inventory.copy()}
+            return reward, done, info
+
+        monkeypatch.setattr(ts, "_step", lethal_step)
+    task = next(iter(CrafterTaskset(CrafterConfig(num_examples=1)).load()))
+    interaction = ScriptedInteraction()
+
+    @asynccontextmanager
+    async def open_interaction(_task):
+        yield interaction
+
+    agents = SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))
+    asyncio.run(CrafterEnv.run(SimpleNamespace(config=config), task, agents))
+    return interaction
+
+
+def test_death_ends_the_episode_by_default(monkeypatch):
+    interaction = play(CrafterEnvConfig(max_episode_steps=12), monkeypatch, kill_at=3)
+    info = interaction.trace.info["crafter"]
+    assert info["ended_by"] == "died" and info["steps"] == 3 and info["deaths"] == []
+
+
+def test_respawn_keeps_playing_the_same_world(monkeypatch):
+    config = CrafterEnvConfig(max_episode_steps=12, on_death="respawn", death_inventory="drop_all", death_penalty=0.05)
+    interaction = play(config, monkeypatch, kill_at=3)
+    info, trace = interaction.trace.info["crafter"], interaction.trace
+    assert info["ended_by"] == "max_episode_steps" and info["steps"] == 12
+    (death,) = info["deaths"]
+    assert death["step"] == 3 and death["vitals"]["health"] == 0
+    assert max(abs(a - b) for a, b in zip(death["respawn"], (32, 32))) <= 16  # near the spawn point
+    told = [m for m in interaction.received if m and m.startswith("You died")]
+    assert len(told) == 1 and "lost your inventory" in told[0]
+    assert "health=9, food=9, drink=9, energy=9" in told[0]
+    assert trace.metrics["deaths"] == 1.0
+    assert trace.rewards["achievements"] == len(info["achievements"]) / 22 - 0.05
