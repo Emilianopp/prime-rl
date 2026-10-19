@@ -121,6 +121,18 @@ def _admit_tools(system: str, tools: str) -> str:
     return system
 
 
+def _closing(tools: str | None, reasoning: bool) -> str:
+    """The observation's last line: what to reply with, consistent with the system prompt."""
+    if not reasoning:
+        return _CLOSINGS[tools]
+    line = "Reason in 2-4 sentences, then give the action on the last line as <action>action_name</action>."
+    if tools == "notebook":
+        line += " Write to your notebook if you learned something worth keeping."
+    elif tools == "workspace":
+        line += " Use your workspace tools if they help."
+    return line
+
+
 _CLOSINGS = {
     None: "Choose the next action. Reply only as <action>action_name</action>.",
     "notebook": (
@@ -361,6 +373,7 @@ def _format_observation(
     extras: bool = False,
     health_lost: int = 0,
     repeated_action: str | None = None,
+    reasoning: bool = False,
 ) -> str:
     inventory = info.get("inventory") or {}
     achievements = info.get("achievements") or {}
@@ -414,7 +427,7 @@ def _format_observation(
             _format_local_map(info, view_radius),
             f"Legend: {_MAP_LEGEND}",
             "",
-            _CLOSINGS[tools],
+            _closing(tools, reasoning),
         ]
     )
     return "\n".join(lines)
@@ -582,11 +595,14 @@ def _ledger_death(env: crafter.Env, step: int, current: dict[str, Any]) -> str:
     return f"step {step} at ({px}, {py}): died ({vitals}; zombies adjacent: {zombies})"
 
 
-def _initial_observation(seed: int, max_steps: int, view_radius: int, tools: str | None = None) -> str:
+def _initial_observation(
+    seed: int, max_steps: int, view_radius: int, tools: str | None = None, reasoning: bool = False
+) -> str:
     env = crafter.Env(seed=seed, length=max_steps)
     env.reset()
     return _format_observation(
-        env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=view_radius, tools=tools
+        env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=view_radius, tools=tools,
+        reasoning=reasoning,
     )
 
 
@@ -620,6 +636,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
         book = nb.Notebook(**task.data.info["notebook"]) if task.data.info.get("notebook") else None
         space = ws.Workspace(**task.data.info["workspace"]) if task.data.info.get("workspace") else None
         tools = "notebook" if book is not None else "workspace" if space is not None else None
+        reasoning = bool(task.data.info.get("reasoning"))
         seen: set[tuple[str, int, int]] = set()  # ledger sightings: (kind, 5x5 block)
         if space is not None:
             for line in _ledger_sightings(env, 0, seen, self.config.view_radius):
@@ -634,6 +651,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 view_radius=self.config.view_radius,
                 tools=tools,
                 extras=self.config.observation_extras,
+                reasoning=reasoning,
             )
             if space is not None:
                 opening = f"{space.index()}\n\n{opening}"
@@ -730,6 +748,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         invalid_action=invalid_action,
                         tools=tools,
                         extras=self.config.observation_extras,
+                        reasoning=reasoning,
                         repeated_action=repeated,
                         health_lost=max(0, health_before - int(current["inventory"].get("health", 0))) if respawned is None else 0,
                     )
@@ -832,7 +851,7 @@ class CrafterTaskset(vf.Taskset[CrafterTask, CrafterConfig]):
             if cfg.include_initial_obs_in_system:
                 # The system prompt carries the opening observation, so this renders a
                 # world per task up front (about a second each).
-                observation = _initial_observation(seed, cfg.max_episode_steps, cfg.view_radius, tools)
+                observation = _initial_observation(seed, cfg.max_episode_steps, cfg.view_radius, tools, cfg.enable_reasoning)
                 system_prompt, prompt = f"{system}\n\nINITIAL OBSERVATION:\n{observation}", "What action do you take?"
             else:
                 # Prompt-less: the env opens the episode with the observation of the
@@ -849,6 +868,7 @@ class CrafterTaskset(vf.Taskset[CrafterTask, CrafterConfig]):
                         "split": cfg.split,
                         "notebook": notebook,
                         "workspace": workspace,
+                        "reasoning": cfg.enable_reasoning,
                     },
                 ),
                 cfg.task,

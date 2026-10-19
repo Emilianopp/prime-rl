@@ -55,7 +55,7 @@ def test_run_plays_an_episode(tmp_path):
     assert set(line["unlocked_at"]) == set(trace.info["crafter"]["achievements"])
 
 
-def play(config, monkeypatch=None, kill_at=None):
+def play(config, monkeypatch=None, kill_at=None, reasoning=False):
     """One episode of `config` against the scripted player; `kill_at` zeroes the
     player's health right after that game step."""
     import crafter_env.taskset as ts
@@ -72,7 +72,7 @@ def play(config, monkeypatch=None, kill_at=None):
             return reward, done, info
 
         monkeypatch.setattr(ts, "_step", lethal_step)
-    task = next(iter(CrafterTaskset(CrafterConfig(num_examples=1)).load()))
+    task = next(iter(CrafterTaskset(CrafterConfig(num_examples=1, enable_reasoning=reasoning)).load()))
     interaction = ScriptedInteraction()
 
     @asynccontextmanager
@@ -113,3 +113,11 @@ def test_a_reply_without_an_action_tag_repeats_the_last_action_and_says_so(monke
     assert len(told) == 2  # turns 2 and 5 of the cycle
     assert "your previous action (do) was repeated" in told[0]
     assert interaction.trace.metrics["malformed_replies"] == 2.0
+
+
+
+def test_reasoning_prompt_and_observations_agree():
+    task = next(iter(CrafterTaskset(CrafterConfig(num_examples=1, enable_reasoning=True)).load()))
+    assert "reason before you act" in task.data.system_prompt
+    interaction = play(CrafterEnvConfig(max_episode_steps=4), reasoning=True)
+    assert all("Reason in 2-4 sentences" in m and "Reply only as" not in m for m in interaction.received)
