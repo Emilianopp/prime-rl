@@ -149,10 +149,22 @@ def main():
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--shards", type=int, default=1)
     ap.add_argument("--max-tokens", type=int, default=40000, help="skip calls with longer contexts (dense masks)")
+    ap.add_argument("--weights", help="HF safetensors dir to load over the base model (e.g. an SFT export)")
     args = ap.parse_args()
     device = "cuda"
     model = AutoModelForImageTextToText.from_pretrained("Qwen/Qwen3.5-4B", dtype=torch.bfloat16, attn_implementation="sdpa").to(device).eval()
     AutoTokenizer.from_pretrained("Qwen/Qwen3.5-4B")  # fail early if the tokenizer is missing
+    if args.weights:
+        from safetensors.torch import load_file
+        import glob
+
+        state = {}
+        for path in sorted(glob.glob(f"{args.weights}/*.safetensors")):
+            state.update(load_file(path))
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        loaded = len(state) - len(unexpected)
+        print(f"loaded {loaded} tensors from {args.weights}; {len(unexpected)} unexpected, {len(missing)} not in the checkpoint", file=sys.stderr)
+        assert loaded > 0 and not unexpected, unexpected[:5]
     first = True
     for i, episode in enumerate(load(args.traces, args.episodes)):
         if i % args.shards != args.shard:
