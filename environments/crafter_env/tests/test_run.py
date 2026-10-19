@@ -103,3 +103,13 @@ def test_respawn_keeps_playing_the_same_world(monkeypatch):
     assert "health=9, food=9, drink=9, energy=9" in told[0]
     assert trace.metrics["deaths"] == 1.0
     assert trace.rewards["achievements"] == len(info["achievements"]) / 22 - 0.05
+
+
+
+def test_a_reply_without_an_action_tag_repeats_the_last_action_and_says_so(monkeypatch):
+    monkeypatch.setattr(__import__(__name__), "REPLIES", ["<action>do</action>", "<", "<action>noop</action>"])
+    interaction = play(CrafterEnvConfig(max_episode_steps=6))
+    told = [m for m in interaction.received if m and "had no <action> tag" in m]
+    assert len(told) == 2  # turns 2 and 5 of the cycle
+    assert "your previous action (do) was repeated" in told[0]
+    assert interaction.trace.metrics["malformed_replies"] == 2.0

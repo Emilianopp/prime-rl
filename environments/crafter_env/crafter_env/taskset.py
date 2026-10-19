@@ -360,6 +360,7 @@ def _format_observation(
     tools: str | None = None,
     extras: bool = False,
     health_lost: int = 0,
+    repeated_action: str | None = None,
 ) -> str:
     inventory = info.get("inventory") or {}
     achievements = info.get("achievements") or {}
@@ -394,6 +395,11 @@ def _format_observation(
             lines.append(f"You lost {health_lost} health since your last action.")
     if last_action is not None:
         lines.append(f"Last action: {last_action}")
+    if repeated_action is not None:
+        lines.append(
+            f"Your last reply had no <action> tag, so your previous action ({repeated_action}) was "
+            "repeated. Reply with <action>action_name</action>."
+        )
     if invalid_action is not None:
         lines.append(
             "Invalid action received: "
@@ -634,6 +640,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
             if book is not None:
                 opening = f"{book.render()}\n\n{opening}"
         total_reward, invalid, steps, done = 0.0, 0, 0, False
+        malformed = 0  # replies without an <action> tag
         actions: Counter[str] = Counter()
         unlocked_at: dict[str, int] = {}  # achievement -> game step it was first unlocked
         end = "terminated"  # the run stopped answering (a turn or token limit)
@@ -656,8 +663,15 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                     before = dict(current["achievements"])
                     health_before = int(current["inventory"].get("health", 0))
                     found = _ACTION.findall(segment.last_reply)
+                    repeated = None
                     if found:
                         raw_action = found[0]
+                    else:
+                        # No action tag: the last action written stands in (v0's rule), and
+                        # the model is told - silently repeating it made "<" look like a
+                        # working reply, which the model then copied turn after turn.
+                        malformed += 1
+                        repeated = _normalize_action(raw_action)
                     action = _normalize_action(raw_action)
                     invalid_action = None
                     if action is None:
@@ -716,6 +730,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         invalid_action=invalid_action,
                         tools=tools,
                         extras=self.config.observation_extras,
+                        repeated_action=repeated,
                         health_lost=max(0, health_before - int(current["inventory"].get("health", 0))) if respawned is None else 0,
                     )
                     if respawned is not None:
@@ -742,6 +757,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "achievements_unlocked": float(len(unlocked)),
                 "total_env_reward": total_reward,
                 "invalid_actions": float(invalid),
+                "malformed_replies": float(malformed),
                 "survived": survived,
                 "deaths": float(len(deaths)),
                 **({"memory_writes": float(book.writes), "scratchpad_updates": float(book.scratchpad_updates)} if book else {}),
@@ -770,6 +786,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "reward": reward,
                 "achievements": len(unlocked),
                 "invalid_actions": invalid,
+                "malformed_replies": malformed,
                 "steps": steps,
                 "done": done,
                 "survived": survived,
