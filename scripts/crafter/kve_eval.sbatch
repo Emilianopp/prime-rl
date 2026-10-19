@@ -29,10 +29,12 @@
 # through /update_weights before the eval), SKIP (skip the first SKIP tasks: disjoint
 # task ranges across jobs), CONC_MIN (let the concurrency controller trim down to
 # this under KV pressure instead of pinning CONC: full-context sessions otherwise
-# fill the KV cache and deadlock; trimmed episodes are dropped), REPO (prime-rl checkout; deps/ submodules
+# fill the KV cache and deadlock; trimmed episodes are dropped), MAX_TOKENS (end
+# episodes at this many trace tokens instead of 256000), MAMBA_SLOTS (DeltaNet state
+# slots per engine, default 400: ~3 per in-flight episode is enough), REPO (prime-rl checkout; deps/ submodules
 # checked out), VENV, SGLANG_VENV, OUT_ROOT.
 set -u
-KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-} MIN_TOKENS=${MIN_TOKENS:-} FP32_STATE=${FP32_STATE:-} WEIGHTS=${WEIGHTS:-} SKIP=${SKIP:-0} CONC_MIN=${CONC_MIN:-}
+KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-} MIN_TOKENS=${MIN_TOKENS:-} FP32_STATE=${FP32_STATE:-} WEIGHTS=${WEIGHTS:-} SKIP=${SKIP:-0} CONC_MIN=${CONC_MIN:-} MAX_TOKENS=${MAX_TOKENS:-} MAMBA_SLOTS=${MAMBA_SLOTS:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
@@ -58,6 +60,7 @@ else
   EVICT=(--sglang.eviction.max-turns "$KEEP")
 fi
 [ -n "$FP32_STATE" ] && sed -i '/^mamba_ssm_dtype/d' "$OUT/inference.toml"
+[ -n "$MAMBA_SLOTS" ] && sed -i "s/^max_mamba_cache_size = .*/max_mamba_cache_size = $MAMBA_SLOTS/" "$OUT/inference.toml"
 uv run inference @ "$OUT/inference.toml" --sglang.python "$SGL_PY" "${EVICT[@]}" > "$OUT/inference.log" 2>&1 &
 INFER=$!
 # The front end can outlive crashed engine processes, so also give up after 20 minutes.
@@ -95,6 +98,7 @@ case $WORKSPACE in
   *) echo "unknown WORKSPACE $WORKSPACE"; exit 2 ;;
 esac
 sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"$DEATH|" configs/crafter/eval-kve.toml > "$OUT/eval.toml"
+[ -n "$MAX_TOKENS" ] && sed -i "s/^env.player.max_total_tokens = .*/env.player.max_total_tokens = $MAX_TOKENS/" "$OUT/eval.toml"
 [ -n "$MIN_TOKENS" ] && sed -i "s|^\[sampling\]$|[sampling]\nmin_tokens = $MIN_TOKENS|" "$OUT/eval.toml"
 uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false \
   --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "${CONC_MIN:-$CONC}" --concurrency.max-inflight "$CONC" > "$OUT/eval.log" 2>&1
