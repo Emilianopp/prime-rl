@@ -65,6 +65,18 @@ def main(path: str) -> None:
               f"episodes that wrote anything {sum(1 for b in books if b['writes'] or b['scratchpad_updates'])}/{len(books)}")
         for b in books[:3]:
             print("  e.g. memories:", b["memories"][:5], "| scratchpad:", b["scratchpad"][:160])
+    spaces = [e["workspace"] for e in episodes if e.get("workspace")]
+    if spaces:
+        tools = Counter()
+        for w in spaces:
+            tools.update(w["counts"])
+        used = sum(1 for w in spaces if any(w["counts"].get(k) for k in ("search", "read", "write", "append")))
+        print(f"workspace: tool calls per episode {', '.join(f'{k} {v / len(spaces):.1f}' for k, v in tools.most_common())}; "
+              f"episodes that used it {used}/{len(spaces)}; ledger entries {statistics.mean(w['ledger_entries'] for w in spaces):.0f}")
+        queries = Counter(s["query"].lower() for w in spaces for s in w["searches"])
+        hit = [s["hits"] > 0 for w in spaces for s in w["searches"]]
+        if hit:
+            print(f"  searches with hits {100 * sum(hit) / len(hit):.0f}%; top queries: {queries.most_common(8)}")
     print(f"invalid actions per step: {sum(e['invalid_actions'] for e in episodes) / max(1, sum(e['steps'] for e in episodes)):.3f}")
     print("\nachievement            success   first unlock step (p50 / p90)")
     for a in sorted(ACHIEVEMENTS, key=lambda a: -rates[a]):
