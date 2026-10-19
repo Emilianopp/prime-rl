@@ -36,6 +36,12 @@ def tool_calls(e: dict) -> float:
     return 0.0
 
 
+def malformed(episodes: list[dict]) -> str:
+    if not all("malformed_replies" in e for e in episodes):
+        return "n/a"
+    return f"{100 * sum(e['malformed_replies'] for e in episodes) / sum(e['steps'] for e in episodes):.1f}"
+
+
 def main(args: list[str]) -> None:
     arms = {name: load(path) for name, path in (a.split("=", 1) for a in args)}
     seeds = sorted(set.intersection(*(set(v) for v in arms.values())))
@@ -45,14 +51,15 @@ def main(args: list[str]) -> None:
     # also compare what every arm had unlocked by the same game step.
     k = min(sorted(e["steps"] for e in eps)[len(eps) // 10] for eps in rows.values())
     print(f"(ach@{k}: achievements unlocked by game step {k}, the shortest arm's 10th-percentile length)\n")
-    print(f"{'arm':14s} {'achievements':>12s} {f'ach@{k}':>11s} {'score%':>7s} {'deaths':>11s} {'steps':>7s} {'tools/ep':>9s} {'used':>6s}")
+    print(f"{'arm':14s} {'achievements':>12s} {f'ach@{k}':>11s} {'score%':>7s} {'deaths':>11s} {'steps':>7s} {'tools/ep':>9s} {'used':>6s} {'malformed%':>11s}")
     for name, eps in rows.items():
         deaths = [len(e.get("deaths", [])) for e in eps]
         used = sum(tool_calls(e) > 0 for e in eps)
         print(
             f"{name:14s} {mean_se([e['achievements'] for e in eps]):>12s} "
             f"{mean_se([sum(t <= k for t in e.get('unlocked_at', {}).values()) for e in eps]):>11s} {score(eps):7.2f} {mean_se(deaths):>11s} "
-            f"{statistics.mean(e['steps'] for e in eps):7.0f} {statistics.mean(tool_calls(e) for e in eps):9.1f} {used:>3d}/{len(eps)}"
+            f"{statistics.mean(e['steps'] for e in eps):7.0f} {statistics.mean(tool_calls(e) for e in eps):9.1f} {used:>3d}/{len(eps)} "
+            f"{malformed(eps):>11s}"
         )
     print(f"\n{'achievement':20s}" + "".join(f"{n[:10]:>11s}" for n in rows))
     for a in ACHIEVEMENTS:
