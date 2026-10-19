@@ -24,7 +24,9 @@ def test_remember_forget_and_scratchpad():
 
 def test_notebook_is_explained_and_shown_every_turn():
     task = next(iter(CrafterTaskset(CrafterConfig(num_examples=1, notebook=True)).load()))
-    assert "<remember>fact</remember>" in task.data.system_prompt
+    prompt = task.data.system_prompt
+    assert "<remember>note</remember>" in prompt and "plus any notebook tools" in prompt
+    assert "exactly one action in XML:" not in prompt  # the old format forbade the tools
     replies = iter(
         ["<remember>spawn has water to the east</remember><action>do</action>"]
         + ["<scratchpad>find trees</scratchpad><action>move_left</action>"]
@@ -52,8 +54,20 @@ def test_notebook_is_explained_and_shown_every_turn():
     agents = SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))
     asyncio.run(CrafterEnv.run(SimpleNamespace(config=CrafterEnvConfig(max_episode_steps=6)), task, agents))
     assert received[0].startswith("Memories (0/10):\n  (none)\nScratchpad: (empty)")
+    assert all("Reply only as" not in m and "write to your notebook" in m for m in received)
     assert "Saved memory 1." in received[1] and "1. spawn has water to the east" in received[1]
     assert "Scratchpad updated." in received[2] and "Scratchpad: find trees" in received[2]
     assert all("1. spawn has water to the east" in m for m in received[1:])  # every later turn
     assert trace.info["crafter"]["notebook"]["memories"] == ["spawn has water to the east"]
     assert trace.metrics["memory_writes"] == 1.0
+
+
+def test_reasoning_prompt_admits_the_notebook_too():
+    task = next(iter(CrafterTaskset(CrafterConfig(num_examples=1, notebook=True, enable_reasoning=True)).load()))
+    assert "notebook tools, if any, go before it" in task.data.system_prompt
+
+
+def test_without_the_notebook_the_prompt_is_unchanged():
+    task = next(iter(CrafterTaskset(CrafterConfig(num_examples=1)).load()))
+    assert "Reply with exactly one action in XML:" in task.data.system_prompt
+    assert "Notebook" not in task.data.system_prompt

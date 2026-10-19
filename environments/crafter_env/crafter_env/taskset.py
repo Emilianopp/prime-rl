@@ -99,6 +99,21 @@ current goal, and decide the single best next action. Then, on the final line,
 output that action and nothing else, in this exact format:
 <action>action_name</action>"""
 
+# With the notebook on, the reply-format lines must allow its tools next to the action:
+# "exactly one action" / "reply only as <action>" otherwise tell the model not to use them.
+_NOTEBOOK_REPLY_FORMAT = {
+    "Reply with exactly one action in XML:": "Reply with exactly one action in XML (plus any notebook tools, below):",
+    "Output the XML action.": "Output the XML action, and any notebook tools.",
+    "output that action and nothing else, in this exact format:": (
+        "output that action in this exact format (notebook tools, if any, go before it):"
+    ),
+}
+_CLOSING = "Choose the next action. Reply only as <action>action_name</action>."
+_NOTEBOOK_CLOSING = (
+    "Choose the next action as <action>action_name</action>, and write to your notebook "
+    "if you learned something worth keeping."
+)
+
 _ACTION_ALIASES: dict[str, str] = {
     "wait": "noop",
     "no_op": "noop",
@@ -265,6 +280,7 @@ def _format_observation(
     last_action: str | None = None,
     invalid_action: str | None = None,
     done: bool = False,
+    notebook: bool = False,
 ) -> str:
     inventory = info.get("inventory") or {}
     achievements = info.get("achievements") or {}
@@ -303,7 +319,7 @@ def _format_observation(
             _format_local_map(info, view_radius),
             f"Legend: {_MAP_LEGEND}",
             "",
-            "Choose the next action. Reply only as <action>action_name</action>.",
+            _NOTEBOOK_CLOSING if notebook else _CLOSING,
         ]
     )
     return "\n".join(lines)
@@ -401,10 +417,12 @@ def _respawn(env: crafter.Env, at: tuple[int, int], death_inventory: str) -> tup
     return tuple(int(x) for x in player.pos)
 
 
-def _initial_observation(seed: int, max_steps: int, view_radius: int) -> str:
+def _initial_observation(seed: int, max_steps: int, view_radius: int, notebook: bool = False) -> str:
     env = crafter.Env(seed=seed, length=max_steps)
     env.reset()
-    return _format_observation(env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=view_radius)
+    return _format_observation(
+        env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=view_radius, notebook=notebook
+    )
 
 
 def _step(env: crafter.Env, action: str) -> tuple[float, bool, dict[str, Any]]:
@@ -438,7 +456,12 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
         opening = None
         if task.data.prompt is None:
             opening = _format_observation(
-                env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=self.config.view_radius
+                env=env,
+                info=_player_info(env),
+                step=0,
+                max_steps=max_steps,
+                view_radius=self.config.view_radius,
+                notebook=book is not None,
             )
             if book is not None:
                 opening = f"{book.render()}\n\n{opening}"
@@ -511,6 +534,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         view_radius=self.config.view_radius,
                         last_action=action,
                         invalid_action=invalid_action,
+                        notebook=book is not None,
                     )
                     if respawned is not None:
                         observation, respawned = f"{respawned}\n\n{observation}", None
@@ -581,13 +605,18 @@ class CrafterTaskset(vf.Taskset[CrafterTask, CrafterConfig]):
         notebook = None
         if cfg.notebook:
             notebook = {"slots": cfg.notebook_slots, "memory_chars": cfg.memory_chars, "scratchpad_chars": cfg.scratchpad_chars}
+            replaced = 0
+            for old, new in _NOTEBOOK_REPLY_FORMAT.items():
+                replaced += old in system
+                system = system.replace(old, new)
+            assert replaced, "the system prompt's reply format must admit the notebook tools"
             system = f"{system}\n\n{nb.instructions(**notebook)}"
         for i in range(cfg.num_examples):
             seed = base + i
             if cfg.include_initial_obs_in_system:
                 # The system prompt carries the opening observation, so this renders a
                 # world per task up front (about a second each).
-                observation = _initial_observation(seed, cfg.max_episode_steps, cfg.view_radius)
+                observation = _initial_observation(seed, cfg.max_episode_steps, cfg.view_radius, cfg.notebook)
                 system_prompt, prompt = f"{system}\n\nINITIAL OBSERVATION:\n{observation}", "What action do you take?"
             else:
                 # Prompt-less: the env opens the episode with the observation of the

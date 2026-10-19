@@ -22,12 +22,15 @@ def instructions(slots: int, memory_chars: int, scratchpad_chars: int) -> str:
     return f"""\
 Notebook tools (optional; write them in the same reply as your action, they
 cost no game step):
-- <remember>fact</remember> saves a note of at most {memory_chars} characters to
-  your memories, e.g. where you placed a table or found water. You keep at most
-  {slots}; when full, the oldest is dropped.
+- <remember>note</remember> saves a note of at most {memory_chars} characters to
+  your memories, e.g. <remember>table at (30, 28)</remember> or
+  <remember>water 5 steps east of spawn</remember>. Write one when you place a
+  table or furnace, find water, stone, coal, iron or diamond, or learn what
+  killed you. You keep at most {slots}; when full, the oldest is dropped.
 - <forget>N</forget> deletes memory number N.
 - <scratchpad>text</scratchpad> replaces your scratchpad (at most
-  {scratchpad_chars} characters): your current goal and plan.
+  {scratchpad_chars} characters): your current goal and plan, e.g.
+  <scratchpad>goal: wood pickaxe. need 1 more wood, then place table</scratchpad>.
 Your memories and scratchpad are shown at the top of every observation. Older
 turns may drop out of your context, so write down anything you will need later."""
 
