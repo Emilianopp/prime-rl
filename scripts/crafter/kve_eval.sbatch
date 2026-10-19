@@ -27,10 +27,12 @@
 # DeltaNet state in fp32, as training does; default bf16 for capacity), WEIGHTS (an
 # HF safetensors dir, e.g. an SFT run's weights/step_N: loaded into the server
 # through /update_weights before the eval), SKIP (skip the first SKIP tasks: disjoint
-# task ranges across jobs), REPO (prime-rl checkout; deps/ submodules
+# task ranges across jobs), CONC_MIN (let the concurrency controller trim down to
+# this under KV pressure instead of pinning CONC: full-context sessions otherwise
+# fill the KV cache and deadlock; trimmed episodes are dropped), REPO (prime-rl checkout; deps/ submodules
 # checked out), VENV, SGLANG_VENV, OUT_ROOT.
 set -u
-KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-} MIN_TOKENS=${MIN_TOKENS:-} FP32_STATE=${FP32_STATE:-} WEIGHTS=${WEIGHTS:-} SKIP=${SKIP:-0}
+KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-} MIN_TOKENS=${MIN_TOKENS:-} FP32_STATE=${FP32_STATE:-} WEIGHTS=${WEIGHTS:-} SKIP=${SKIP:-0} CONC_MIN=${CONC_MIN:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
@@ -95,7 +97,7 @@ esac
 sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"$DEATH|" configs/crafter/eval-kve.toml > "$OUT/eval.toml"
 [ -n "$MIN_TOKENS" ] && sed -i "s|^\[sampling\]$|[sampling]\nmin_tokens = $MIN_TOKENS|" "$OUT/eval.toml"
 uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false \
-  --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "$CONC" --concurrency.max-inflight "$CONC" > "$OUT/eval.log" 2>&1
+  --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "${CONC_MIN:-$CONC}" --concurrency.max-inflight "$CONC" > "$OUT/eval.log" 2>&1
 echo "eval exit $? $(date +%T)"
 
 kill $POLL 2>/dev/null; echo "== kvs counters"; cat "$OUT/kvs.prom" 2>/dev/null
