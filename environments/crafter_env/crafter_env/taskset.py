@@ -382,6 +382,7 @@ def _format_observation(
     done: bool = False,
     tools: str | None = None,
     extras: bool = False,
+    affordances: bool = True,
     health_lost: int = 0,
     repeated_action: str | None = None,
     reasoning: bool = False,
@@ -410,12 +411,10 @@ def _format_observation(
     ]
     if extras:
         creatures, resources = _nearby(env, view_radius)
-        available = _available(env)
-        lines += [
-            f"Creatures in view: {creatures}",
-            f"Nearest: {resources}",
-            f"Can place/make now: {', '.join(available) if available else 'nothing'}",
-        ]
+        lines += [f"Creatures in view: {creatures}", f"Nearest: {resources}"]
+        if affordances:
+            available = _available(env)
+            lines.append(f"Can place/make now: {', '.join(available) if available else 'nothing'}")
         if health_lost > 0:
             lines.append(f"You lost {health_lost} health since your last action.")
     if last_action is not None:
@@ -516,6 +515,9 @@ class CrafterEnvConfig(vf.EnvConfig):
     """Add to each observation the creatures in view and the nearest of each resource
     (with offsets), the place/make actions available right now, what collecting the
     tile ahead still needs, and how much health the last step cost."""
+    extras_affordances: bool = True
+    """With observation_extras: include the "Can place/make now" line (off: perception
+    only - creatures, nearest resources, the tile ahead's requirement, damage)."""
     death_penalty: float = Field(0.0, ge=0.0)
     """Subtracted from the episode reward per death."""
 
@@ -671,6 +673,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 view_radius=self.config.view_radius,
                 tools=tools,
                 extras=self.config.observation_extras,
+                affordances=self.config.extras_affordances,
                 reasoning=reasoning,
                 relaxed=relaxed,
             )
@@ -769,6 +772,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         invalid_action=invalid_action,
                         tools=tools,
                         extras=self.config.observation_extras,
+                        affordances=self.config.extras_affordances,
                         reasoning=reasoning,
                         relaxed=relaxed,
                         repeated_action=repeated if self.config.announce_malformed else None,

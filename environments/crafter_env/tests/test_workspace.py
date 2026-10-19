@@ -133,3 +133,12 @@ def test_extras_report_health_loss_and_affordances():
     assert "place_table" in _available(env) and "You lost 2 health since your last action." in obs
     plain = _format_observation(env=env, info=_player_info(env), step=1, max_steps=100, view_radius=4)
     assert "Creatures in view" not in plain and "lost" not in plain
+
+
+
+def test_extras_without_affordances(monkeypatch):
+    _, received, _ = _play(
+        CrafterConfig(num_examples=1), ["<action>do</action>"] * 2, monkeypatch, max_episode_steps=3,
+        observation_extras=True, extras_affordances=False,
+    )
+    assert "Nearest: tree " in received[0] and "Can place/make now" not in received[0]
