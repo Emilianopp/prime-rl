@@ -18,7 +18,7 @@
 # model gets the notebook tools, memories + scratchpad), WORKSPACE (both, ledger
 # or files: the queryable workspace, with the env-written ledger, the model's
 # files or both), EXTRAS (1: observation extras - creatures, nearest resources,
-# available crafting, damage), REASONING (1: 2-4 sentences of reasoning before
+# available crafting, damage; EXTRAS=perception: without available crafting), REASONING (1: 2-4 sentences of reasoning before
 # each action), RELAXED (1: the memory arms' reply format without their tools),
 # SILENT_MALFORMED (1: repeat the last action silently on a reply without an
 # action tag, as before the notice), MIN_TOKENS (sample at least this many tokens
@@ -29,7 +29,7 @@ KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${N
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}${NOTEBOOK:+_notebook}${WORKSPACE:+_workspace-$WORKSPACE}${EXTRAS:+_extras}${REASONING:+_reasoning}${RELAXED:+_relaxed}${SILENT_MALFORMED:+_silent}${MIN_TOKENS:+_min$MIN_TOKENS}/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}${NOTEBOOK:+_notebook}${WORKSPACE:+_workspace-$WORKSPACE}${EXTRAS:+_extras}${EXTRAS:+${EXTRAS#1}}${REASONING:+_reasoning}${RELAXED:+_relaxed}${SILENT_MALFORMED:+_silent}${MIN_TOKENS:+_min$MIN_TOKENS}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY
@@ -60,6 +60,7 @@ if [ -n "$RESPAWN" ]; then
 fi
 [ -n "$NOTEBOOK" ] && DEATH="$DEATH\nenv.taskset.notebook = true"
 [ -n "$EXTRAS" ] && DEATH="$DEATH\nenv.observation_extras = true"
+[ "$EXTRAS" = perception ] && DEATH="$DEATH\nenv.extras_affordances = false"
 [ -n "$REASONING" ] && DEATH="$DEATH\nenv.taskset.enable_reasoning = true"
 [ -n "$RELAXED" ] && DEATH="$DEATH\nenv.taskset.relaxed_reply_format = true"
 [ -n "$SILENT_MALFORMED" ] && DEATH="$DEATH\nenv.announce_malformed = false"
