@@ -19,21 +19,23 @@
 # or files: the queryable workspace, with the env-written ledger, the model's
 # files or both), EXTRAS (1: observation extras - creatures, nearest resources,
 # available crafting, damage), REASONING (1: 2-4 sentences of reasoning before
-# each action), REPO (prime-rl checkout; deps/ submodules
+# each action), RELAXED (1: the memory arms' reply format without their tools),
+# SILENT_MALFORMED (1: repeat the last action silently on a reply without an
+# action tag, as before the notice), REPO (prime-rl checkout; deps/ submodules
 # checked out), VENV, SGLANG_VENV, OUT_ROOT.
 set -u
-KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-}
+KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}${NOTEBOOK:+_notebook}${WORKSPACE:+_workspace-$WORKSPACE}${EXTRAS:+_extras}${REASONING:+_reasoning}/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}${NOTEBOOK:+_notebook}${WORKSPACE:+_workspace-$WORKSPACE}${EXTRAS:+_extras}${REASONING:+_reasoning}${RELAXED:+_relaxed}${SILENT_MALFORMED:+_silent}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/crafter_env:$REPO/deps/verifiers:$REPO/deps/renderers${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[crafter eval r$KEEP-1 n$N c$CONC respawn=${RESPAWN:-off} notebook=${NOTEBOOK:-off} workspace=${WORKSPACE:-off} extras=${EXTRAS:-off} reasoning=${REASONING:-off}] $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[crafter eval r$KEEP-1 n$N c$CONC respawn=${RESPAWN:-off} notebook=${NOTEBOOK:-off} workspace=${WORKSPACE:-off} extras=${EXTRAS:-off} reasoning=${REASONING:-off} relaxed=${RELAXED:-off} silent_malformed=${SILENT_MALFORMED:-off}] $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
@@ -58,6 +60,8 @@ fi
 [ -n "$NOTEBOOK" ] && DEATH="$DEATH\nenv.taskset.notebook = true"
 [ -n "$EXTRAS" ] && DEATH="$DEATH\nenv.observation_extras = true"
 [ -n "$REASONING" ] && DEATH="$DEATH\nenv.taskset.enable_reasoning = true"
+[ -n "$RELAXED" ] && DEATH="$DEATH\nenv.taskset.relaxed_reply_format = true"
+[ -n "$SILENT_MALFORMED" ] && DEATH="$DEATH\nenv.announce_malformed = false"
 case $WORKSPACE in
   "") ;;
   both) DEATH="$DEATH\nenv.taskset.workspace = true" ;;
