@@ -29,6 +29,7 @@ from pydantic import Field
 import verifiers.v1 as vf
 
 from crafter_env import notebook as nb
+from crafter_env import workspace as ws
 
 logger = logging.getLogger(__name__)
 
@@ -99,20 +100,38 @@ current goal, and decide the single best next action. Then, on the final line,
 output that action and nothing else, in this exact format:
 <action>action_name</action>"""
 
-# With the notebook on, the reply-format lines must allow its tools next to the action:
+# With memory tools on, the reply-format lines must allow them next to the action:
 # "exactly one action" / "reply only as <action>" otherwise tell the model not to use them.
-_NOTEBOOK_REPLY_FORMAT = {
-    "Reply with exactly one action in XML:": "Reply with exactly one action in XML (plus any notebook tools, below):",
-    "Output the XML action.": "Output the XML action, and any notebook tools.",
-    "output that action and nothing else, in this exact format:": (
-        "output that action in this exact format (notebook tools, if any, go before it):"
+def _tools_reply_format(tools: str) -> dict[str, str]:
+    return {
+        "Reply with exactly one action in XML:": f"Reply with exactly one action in XML (plus any {tools} tools, below):",
+        "Output the XML action.": f"Output the XML action, and any {tools} tools.",
+        "output that action and nothing else, in this exact format:": (
+            f"output that action in this exact format ({tools} tools, if any, go before it):"
+        ),
+    }
+
+
+def _admit_tools(system: str, tools: str) -> str:
+    replaced = 0
+    for old, new in _tools_reply_format(tools).items():
+        replaced += old in system
+        system = system.replace(old, new)
+    assert replaced, f"the system prompt's reply format must admit the {tools} tools"
+    return system
+
+
+_CLOSINGS = {
+    None: "Choose the next action. Reply only as <action>action_name</action>.",
+    "notebook": (
+        "Choose the next action as <action>action_name</action>, and write to your notebook "
+        "if you learned something worth keeping."
+    ),
+    "workspace": (
+        "Choose the next action as <action>action_name</action>, and use your workspace "
+        "tools if they help."
     ),
 }
-_CLOSING = "Choose the next action. Reply only as <action>action_name</action>."
-_NOTEBOOK_CLOSING = (
-    "Choose the next action as <action>action_name</action>, and write to your notebook "
-    "if you learned something worth keeping."
-)
 
 _ACTION_ALIASES: dict[str, str] = {
     "wait": "noop",
@@ -280,7 +299,7 @@ def _format_observation(
     last_action: str | None = None,
     invalid_action: str | None = None,
     done: bool = False,
-    notebook: bool = False,
+    tools: str | None = None,
 ) -> str:
     inventory = info.get("inventory") or {}
     achievements = info.get("achievements") or {}
@@ -319,7 +338,7 @@ def _format_observation(
             _format_local_map(info, view_radius),
             f"Legend: {_MAP_LEGEND}",
             "",
-            _NOTEBOOK_CLOSING if notebook else _CLOSING,
+            _CLOSINGS[tools],
         ]
     )
     return "\n".join(lines)
@@ -352,6 +371,15 @@ class CrafterConfig(vf.TasksetConfig):
     notebook: bool = False
     """Give the model notebook tools (memories + scratchpad, crafter_env.notebook),
     explained in the system prompt and shown at the top of every observation."""
+    workspace: bool = False
+    """Give the model a queryable workspace (crafter_env.workspace): markdown files it
+    writes and a ledger the env writes for it, one search tool over both. Excludes
+    `notebook`."""
+    workspace_files: bool = True
+    """The model-written files (off: ledger only)."""
+    workspace_ledger: bool = True
+    """The env-written ledger (off: files only)."""
+    workspace_file_chars: int = Field(2000, ge=100)
     notebook_slots: int = Field(10, ge=1)
     memory_chars: int = Field(120, ge=1)
     scratchpad_chars: int = Field(400, ge=1)
@@ -417,11 +445,68 @@ def _respawn(env: crafter.Env, at: tuple[int, int], death_inventory: str) -> tup
     return tuple(int(x) for x in player.pos)
 
 
-def _initial_observation(seed: int, max_steps: int, view_radius: int, notebook: bool = False) -> str:
+# The ledger: what the env writes into a workspace for the model, one line per event.
+_SIGHTED = {1: "water", 3: "stone", 6: "tree", 7: "lava", 8: "coal", 9: "iron", 10: "diamond", 11: "table", 12: "furnace", 14: "cow"}
+_PLACED = {"place_table": "table", "place_furnace": "furnace", "place_stone": "stone", "place_plant": "sapling"}
+
+
+def _ledger_sightings(env: crafter.Env, step: int, seen: set, radius: int) -> list[str]:
+    """First sightings in view, one per kind and 5x5 block (the cell nearest the player)."""
+    semantic = _player_info(env).get("semantic")
+    if semantic is None:
+        return []
+    px, py = (int(v) for v in env._player.pos)
+    width, height = semantic.shape
+    nearest: dict[tuple[str, int, int], tuple[int, int, int]] = {}
+    for x in range(max(0, px - radius), min(width, px + radius + 1)):
+        for y in range(max(0, py - radius), min(height, py + radius + 1)):
+            kind = _SIGHTED.get(int(semantic[x, y]))
+            if kind is None or (key := (kind, x // 5, y // 5)) in seen:
+                continue
+            d = max(abs(x - px), abs(y - py))
+            if key not in nearest or d < nearest[key][0]:
+                nearest[key] = (d, x, y)
+    seen.update(nearest)
+    return [f"step {step}: saw {kind} at ({x}, {y})" for (kind, _, _), (_, x, y) in sorted(nearest.items(), key=lambda kv: kv[1])]
+
+
+def _ledger_events(env: crafter.Env, step: int, before: dict[str, int], after: dict[str, int]) -> list[str]:
+    """What the last step achieved (collected, made, placed, ate, defeated, woke up)."""
+    px, py = (int(v) for v in env._player.pos)
+    lines = []
+    for name in sorted(after):
+        if int(after[name]) <= int(before.get(name, 0)):
+            continue
+        first = " (first time)" if int(before.get(name, 0)) == 0 else ""
+        if name in _PLACED:
+            tx, ty = (int(v) for v in env._player.pos + env._player.facing)
+            lines.append(f"step {step}: placed {_PLACED[name]} at ({tx}, {ty}){first}")
+        else:
+            lines.append(f"step {step} at ({px}, {py}): {name.replace('_', ' ')}{first}")
+    return lines
+
+
+def _ledger_death(env: crafter.Env, step: int, current: dict[str, Any]) -> str:
+    inventory = current.get("inventory") or {}
+    px, py = (int(v) for v in env._player.pos)
+    semantic = _player_info(env).get("semantic")
+    zombies = 0
+    if semantic is not None:
+        width, height = semantic.shape
+        zombies = sum(
+            int(semantic[x, y]) == 15
+            for x in range(max(0, px - 1), min(width, px + 2))
+            for y in range(max(0, py - 1), min(height, py + 2))
+        )
+    vitals = ", ".join(f"{k} {int(inventory.get(k, 0))}" for k in ("food", "drink", "energy"))
+    return f"step {step} at ({px}, {py}): died ({vitals}; zombies adjacent: {zombies})"
+
+
+def _initial_observation(seed: int, max_steps: int, view_radius: int, tools: str | None = None) -> str:
     env = crafter.Env(seed=seed, length=max_steps)
     env.reset()
     return _format_observation(
-        env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=view_radius, notebook=notebook
+        env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=view_radius, tools=tools
     )
 
 
@@ -453,6 +538,12 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
         env = crafter.Env(seed=seed, length=max_steps)
         await asyncio.to_thread(env.reset)
         book = nb.Notebook(**task.data.info["notebook"]) if task.data.info.get("notebook") else None
+        space = ws.Workspace(**task.data.info["workspace"]) if task.data.info.get("workspace") else None
+        tools = "notebook" if book is not None else "workspace" if space is not None else None
+        seen: set[tuple[str, int, int]] = set()  # ledger sightings: (kind, 5x5 block)
+        if space is not None:
+            for line in _ledger_sightings(env, 0, seen, self.config.view_radius):
+                space.log(line)
         opening = None
         if task.data.prompt is None:
             opening = _format_observation(
@@ -461,8 +552,10 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 step=0,
                 max_steps=max_steps,
                 view_radius=self.config.view_radius,
-                notebook=book is not None,
+                tools=tools,
             )
+            if space is not None:
+                opening = f"{space.index()}\n\n{opening}"
             if book is not None:
                 opening = f"{book.render()}\n\n{opening}"
         total_reward, invalid, steps, done = 0.0, 0, 0, False
@@ -484,6 +577,8 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         end = "max_episode_steps"
                         break  # as in v0: the capped turn's action is not played
                     notes = book.apply(segment.last_reply) if book is not None else []
+                    results = space.apply(segment.last_reply, steps) if space is not None else []
+                    before = dict(current["achievements"])
                     found = _ACTION.findall(segment.last_reply)
                     if found:
                         raw_action = found[0]
@@ -501,6 +596,11 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                     total_reward += reward
                     actions[action] += 1
                     current = _step_info(env, info, reward)
+                    if space is not None:
+                        for line in _ledger_events(env, steps, before, current["achievements"]):
+                            space.log(line)
+                        for line in _ledger_sightings(env, steps, seen, self.config.view_radius):
+                            space.log(line)
                     for name, count in current["achievements"].items():
                         if count > 0 and name not in unlocked_at:
                             unlocked_at[name] = steps
@@ -508,12 +608,16 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         last_sleep = tuple(int(x) for x in env._player.pos)
                     died = current["inventory"].get("health", 0) <= 0
                     world_over = env._step >= env._length
+                    if died and space is not None:
+                        space.log(_ledger_death(env, steps, current))
                     if died and not world_over and self.config.on_death == "respawn":
                         vitals = {k: int(current["inventory"].get(k, 0)) for k in _VITALS}
                         at = {"spawn": spawn, "last_sleep": last_sleep}.get(
                             self.config.respawn_at, tuple(int(x) for x in env._player.pos)
                         )
                         pos = _respawn(env, at, self.config.death_inventory)
+                        if space is not None:
+                            space.log(f"step {steps}: respawned at {pos} ({self.config.death_inventory.replace('_', ' ')})")
                         deaths.append({"step": steps, "vitals": vitals, "pos": list(current["player_pos"]), "respawn": list(pos)})
                         current = _step_info(env, {}, 0.0)
                         lost = {"drop_all": "lost your inventory", "drop_materials": "lost your materials (tools kept)", "keep": "kept your inventory"}
@@ -534,12 +638,14 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         view_radius=self.config.view_radius,
                         last_action=action,
                         invalid_action=invalid_action,
-                        notebook=book is not None,
+                        tools=tools,
                     )
                     if respawned is not None:
                         observation, respawned = f"{respawned}\n\n{observation}", None
                     if book is not None:
                         observation = "\n".join([book.render(), *notes, "", observation])
+                    if space is not None:
+                        observation = "\n".join([space.index(), *results, "", observation])
                     segment = await interaction.turn(observation)
         finally:
             close = getattr(env, "close", None)
@@ -561,6 +667,11 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "survived": survived,
                 "deaths": float(len(deaths)),
                 **({"memory_writes": float(book.writes), "scratchpad_updates": float(book.scratchpad_updates)} if book else {}),
+                **(
+                    {f"workspace_{k}": float(space.counts.get(k, 0)) for k in ("search", "read", "write", "append")}
+                    if space
+                    else {}
+                ),
             }
         )
         trace.info["crafter"] = {
@@ -572,6 +683,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
             "seed": seed,
             "deaths": deaths,
             "notebook": book.summary() if book is not None else None,
+            "workspace": space.summary() if space is not None else None,
         }
         if self.config.episode_log:
             line = {
@@ -586,6 +698,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "ended_by": end,
                 "deaths": deaths,
                 "notebook": book.summary() if book is not None else None,
+                "workspace": space.summary() if space is not None else None,
                 "seed": seed,
                 "unlocked_at": unlocked_at,
                 "actions": dict(actions),
@@ -602,21 +715,29 @@ class CrafterTaskset(vf.Taskset[CrafterTask, CrafterConfig]):
         cfg = self.config
         base = cfg.seed + (1_000_000 if cfg.split == "eval" else 0)
         system = REASONING_SYSTEM_PROMPT if cfg.enable_reasoning else SYSTEM_PROMPT
-        notebook = None
+        if cfg.notebook and cfg.workspace:
+            raise ValueError("notebook and workspace are alternative memories: enable one")
+        if cfg.workspace and not (cfg.workspace_files or cfg.workspace_ledger):
+            raise ValueError("a workspace needs files, a ledger or both")
+        notebook = workspace = None
+        tools = None
         if cfg.notebook:
             notebook = {"slots": cfg.notebook_slots, "memory_chars": cfg.memory_chars, "scratchpad_chars": cfg.scratchpad_chars}
-            replaced = 0
-            for old, new in _NOTEBOOK_REPLY_FORMAT.items():
-                replaced += old in system
-                system = system.replace(old, new)
-            assert replaced, "the system prompt's reply format must admit the notebook tools"
-            system = f"{system}\n\n{nb.instructions(**notebook)}"
+            system, tools = f"{_admit_tools(system, 'notebook')}\n\n{nb.instructions(**notebook)}", "notebook"
+        if cfg.workspace:
+            workspace = {
+                "files_enabled": cfg.workspace_files,
+                "ledger_enabled": cfg.workspace_ledger,
+                "file_chars": cfg.workspace_file_chars,
+            }
+            guide = ws.instructions(cfg.workspace_files, cfg.workspace_ledger, cfg.workspace_file_chars)
+            system, tools = f"{_admit_tools(system, 'workspace')}\n\n{guide}", "workspace"
         for i in range(cfg.num_examples):
             seed = base + i
             if cfg.include_initial_obs_in_system:
                 # The system prompt carries the opening observation, so this renders a
                 # world per task up front (about a second each).
-                observation = _initial_observation(seed, cfg.max_episode_steps, cfg.view_radius, cfg.notebook)
+                observation = _initial_observation(seed, cfg.max_episode_steps, cfg.view_radius, tools)
                 system_prompt, prompt = f"{system}\n\nINITIAL OBSERVATION:\n{observation}", "What action do you take?"
             else:
                 # Prompt-less: the env opens the episode with the observation of the
@@ -627,7 +748,13 @@ class CrafterTaskset(vf.Taskset[CrafterTask, CrafterConfig]):
                     name=f"crafter#{cfg.split}{i}",
                     prompt=prompt,
                     system_prompt=system_prompt,
-                    info={"seed": seed, "episode_idx": i, "split": cfg.split, "notebook": notebook},
+                    info={
+                        "seed": seed,
+                        "episode_idx": i,
+                        "split": cfg.split,
+                        "notebook": notebook,
+                        "workspace": workspace,
+                    },
                 ),
                 cfg.task,
             )
