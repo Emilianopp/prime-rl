@@ -53,10 +53,13 @@ else
 fi
 uv run inference @ "$OUT/inference.toml" --sglang.python "$SGL_PY" "${EVICT[@]}" > "$OUT/inference.log" 2>&1 &
 INFER=$!
-until curl -sf -m 5 http://localhost:8000/health > /dev/null; do
+# The front end can outlive crashed engine processes, so also give up after 20 minutes.
+for _ in $(seq 120); do
+  curl -sf -m 5 http://localhost:8000/health > /dev/null && break
   kill -0 $INFER 2>/dev/null || { echo "inference died"; tail -30 "$OUT/inference.log"; exit 1; }
   sleep 10
 done
+curl -sf -m 5 http://localhost:8000/health > /dev/null || { echo "inference not up after 20 min"; tail -30 "$OUT/inference.log"; pkill -u "$USER" -f "$SLURM_TMPDIR/sgl-venv/"; exit 1; }
 echo "inference up $(date +%T)"
 
 ( while sleep 30; do curl -s -m 5 http://localhost:8000/metrics | grep "^kvs:" > "$OUT/kvs.prom.tmp" && mv "$OUT/kvs.prom.tmp" "$OUT/kvs.prom"; done ) &
