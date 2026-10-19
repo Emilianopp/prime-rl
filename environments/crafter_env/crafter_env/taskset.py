@@ -289,6 +289,64 @@ def _format_inventory(inventory: dict[str, int]) -> tuple[str, str]:
     return vitals, resource_text
 
 
+# Observation extras (CrafterEnvConfig.observation_extras): facts the 9x9 map shows
+# only implicitly - what is around and where, what the player can craft or place
+# right now, and that it is being hurt.
+_CREATURES = {15: "zombie", 16: "skeleton", 14: "cow"}
+_RESOURCES = {6: "tree", 1: "water", 3: "stone", 8: "coal", 9: "iron", 10: "diamond", 7: "lava", 11: "table", 12: "furnace"}
+
+
+def _offset(dx: int, dy: int) -> str:
+    parts = ([f"{abs(dx)}{'E' if dx > 0 else 'W'}"] if dx else []) + ([f"{abs(dy)}{'S' if dy > 0 else 'N'}"] if dy else [])
+    return " ".join(parts) or "here"
+
+
+def _nearby(env: crafter.Env, radius: int) -> tuple[str, str]:
+    """(creatures in view, nearest of each resource), with offsets from the player."""
+    semantic = _player_info(env).get("semantic")
+    if semantic is None:
+        return "unknown", "unknown"
+    px, py = (int(v) for v in env._player.pos)
+    width, height = semantic.shape
+    creatures, nearest = [], {}
+    for x in range(max(0, px - radius), min(width, px + radius + 1)):
+        for y in range(max(0, py - radius), min(height, py + radius + 1)):
+            sid, d = int(semantic[x, y]), max(abs(x - px), abs(y - py))
+            if sid in _CREATURES:
+                creatures.append((d, _CREATURES[sid], x - px, y - py))
+            elif sid in _RESOURCES and (sid not in nearest or d < nearest[sid][0]):
+                nearest[sid] = (d, x - px, y - py)
+    creatures_text = ", ".join(f"{name} {_offset(dx, dy)}" for _, name, dx, dy in sorted(creatures)[:5]) or "none"
+    order = sorted(nearest.items(), key=lambda kv: kv[1][0])
+    resources_text = ", ".join(f"{_RESOURCES[sid]} {_offset(dx, dy)}" for sid, (_, dx, dy) in order) or "none"
+    return creatures_text, resources_text
+
+
+def _available(env: crafter.Env) -> list[str]:
+    """The place/make actions whose requirements are met right now."""
+    player, world = env._player, env._world
+    out = []
+    target = tuple(int(v) for v in player.pos + player.facing)
+    material, obj = world[target]
+    for name, info in constants.place.items():
+        if obj is None and material in info["where"] and all(player.inventory[k] >= v for k, v in info["uses"].items()):
+            out.append(f"place_{name}")
+    nearby, _ = world.nearby(player.pos, 1)
+    for name, info in constants.make.items():
+        if all(u in nearby for u in info["nearby"]) and all(player.inventory[k] >= v for k, v in info["uses"].items()):
+            out.append(f"make_{name}")
+    return out
+
+
+def _ahead_requirement(env: crafter.Env) -> str:
+    """What collecting the tile ahead needs and the player lacks, if anything."""
+    player = env._player
+    material, _ = env._world[tuple(int(v) for v in player.pos + player.facing)]
+    need = (constants.collect.get(material) or {}).get("require") or {}
+    missing = [k for k, v in need.items() if player.inventory[k] < v]
+    return f" (collecting it needs {', '.join(missing)})" if missing else ""
+
+
 def _format_observation(
     *,
     env: crafter.Env,
@@ -300,6 +358,8 @@ def _format_observation(
     invalid_action: str | None = None,
     done: bool = False,
     tools: str | None = None,
+    extras: bool = False,
+    health_lost: int = 0,
 ) -> str:
     inventory = info.get("inventory") or {}
     achievements = info.get("achievements") or {}
@@ -316,12 +376,22 @@ def _format_observation(
     lines = [
         f"Step: {step}/{max_steps}",
         f"Position: ({int(pos[0])}, {int(pos[1])}), facing {facing}",
-        f"Ahead: {_describe_ahead(env)}",
+        f"Ahead: {_describe_ahead(env)}" + (_ahead_requirement(env) if extras else ""),
         f"Vitals: {vitals}",
         f"Inventory: {resources}",
         f"Unlocked achievements ({len(unlocked)}/{len(ACHIEVEMENTS)}): {unlocked_text}",
         f"Last reward: {float(info.get('reward', 0.0)):.3f}",
     ]
+    if extras:
+        creatures, resources = _nearby(env, view_radius)
+        available = _available(env)
+        lines += [
+            f"Creatures in view: {creatures}",
+            f"Nearest: {resources}",
+            f"Can place/make now: {', '.join(available) if available else 'nothing'}",
+        ]
+        if health_lost > 0:
+            lines.append(f"You lost {health_lost} health since your last action.")
     if last_action is not None:
         lines.append(f"Last action: {last_action}")
     if invalid_action is not None:
@@ -404,6 +474,10 @@ class CrafterEnvConfig(vf.EnvConfig):
     death_inventory: Literal["drop_all", "drop_materials", "keep"] = "drop_all"
     """What a death takes: every item (Minecraft, minus the pickup: Crafter has no item
     drops), the materials but not the tools, or nothing."""
+    observation_extras: bool = False
+    """Add to each observation the creatures in view and the nearest of each resource
+    (with offsets), the place/make actions available right now, what collecting the
+    tile ahead still needs, and how much health the last step cost."""
     death_penalty: float = Field(0.0, ge=0.0)
     """Subtracted from the episode reward per death."""
 
@@ -553,6 +627,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 max_steps=max_steps,
                 view_radius=self.config.view_radius,
                 tools=tools,
+                extras=self.config.observation_extras,
             )
             if space is not None:
                 opening = f"{space.index()}\n\n{opening}"
@@ -579,6 +654,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                     notes = book.apply(segment.last_reply) if book is not None else []
                     results = space.apply(segment.last_reply, steps) if space is not None else []
                     before = dict(current["achievements"])
+                    health_before = int(current["inventory"].get("health", 0))
                     found = _ACTION.findall(segment.last_reply)
                     if found:
                         raw_action = found[0]
@@ -639,6 +715,8 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         last_action=action,
                         invalid_action=invalid_action,
                         tools=tools,
+                        extras=self.config.observation_extras,
+                        health_lost=max(0, health_before - int(current["inventory"].get("health", 0))) if respawned is None else 0,
                     )
                     if respawned is not None:
                         observation, respawned = f"{respawned}\n\n{observation}", None

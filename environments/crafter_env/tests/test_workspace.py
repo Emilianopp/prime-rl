@@ -109,3 +109,27 @@ def test_ledger_logs_sightings_from_the_start():
 def test_notebook_and_workspace_are_exclusive():
     with pytest.raises(ValueError):
         list(CrafterTaskset(CrafterConfig(num_examples=1, notebook=True, workspace=True)).load())
+
+
+def test_observation_extras(monkeypatch):
+    _, received, _ = _play(
+        CrafterConfig(num_examples=1), ["<action>do</action>"] * 3, monkeypatch, kill_at=None, max_episode_steps=4,
+        observation_extras=True,
+    )
+    first = received[0]
+    assert "Creatures in view: " in first and "Nearest: tree " in first  # seed 42 spawns by trees
+    assert "Can place/make now: " in first
+
+
+def test_extras_report_health_loss_and_affordances():
+    import crafter
+
+    from crafter_env.taskset import _available, _format_observation, _player_info
+
+    env = crafter.Env(seed=42, length=100)
+    env.reset()
+    env._player.inventory["wood"] = 2
+    obs = _format_observation(env=env, info=_player_info(env), step=1, max_steps=100, view_radius=4, extras=True, health_lost=2)
+    assert "place_table" in _available(env) and "You lost 2 health since your last action." in obs
+    plain = _format_observation(env=env, info=_player_info(env), step=1, max_steps=100, view_radius=4)
+    assert "Creatures in view" not in plain and "lost" not in plain
