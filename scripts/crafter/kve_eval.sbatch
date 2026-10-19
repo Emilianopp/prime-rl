@@ -11,7 +11,8 @@
 #
 #   sbatch kve_eval.sbatch
 #
-# Env: KEEP (eviction max_turns, default 50), N (episodes, default 256), CONC
+# Env: KEEP (eviction max_turns, default 50; "full": the same session path with
+# eviction off, i.e. full context), N (episodes, default 256), CONC
 # (in-flight episodes, default 128), RESPAWN (unset: death ends the episode;
 # AT:INVENTORY:PENALTY, e.g. spawn:drop_all:0.05, respawns, see the env's
 # on_death / respawn_at / death_inventory / death_penalty), NOTEBOOK (1: the
@@ -42,8 +43,15 @@ rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
 export CUDA_HOME=$($SGL_PY -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13
 
-uv run inference @ configs/crafter/inference-kve.toml --sglang.python "$SGL_PY" \
-  --sglang.eviction.max-turns "$KEEP" > "$OUT/inference.log" 2>&1 &
+if [ "$KEEP" = full ]; then
+  # Same server, same sessions, no [sglang.eviction]: everything stays resident.
+  sed '/^\[sglang.eviction\]/,$d' configs/crafter/inference-kve.toml > "$OUT/inference.toml"
+  EVICT=()
+else
+  cp configs/crafter/inference-kve.toml "$OUT/inference.toml"
+  EVICT=(--sglang.eviction.max-turns "$KEEP")
+fi
+uv run inference @ "$OUT/inference.toml" --sglang.python "$SGL_PY" "${EVICT[@]}" > "$OUT/inference.log" 2>&1 &
 INFER=$!
 until curl -sf -m 5 http://localhost:8000/health > /dev/null; do
   kill -0 $INFER 2>/dev/null || { echo "inference died"; tail -30 "$OUT/inference.log"; exit 1; }
