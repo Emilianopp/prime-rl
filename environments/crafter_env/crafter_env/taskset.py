@@ -121,8 +121,19 @@ def _admit_tools(system: str, tools: str) -> str:
     return system
 
 
-def _closing(tools: str | None, reasoning: bool) -> str:
+# The reply format of the memory arms without their tools (an ablation control): the
+# memory arms drop the base prompt's "exactly one action" / "reply only as" wording.
+_RELAXED_REPLY_FORMAT = {
+    "Reply with exactly one action in XML:": "Reply with one action in XML:",
+    "Output the XML action.": "Output the XML action.",
+}
+_RELAXED_CLOSING = "Choose the next action as <action>action_name</action>."
+
+
+def _closing(tools: str | None, reasoning: bool, relaxed: bool = False) -> str:
     """The observation's last line: what to reply with, consistent with the system prompt."""
+    if relaxed and tools is None and not reasoning:
+        return _RELAXED_CLOSING
     if not reasoning:
         return _CLOSINGS[tools]
     line = "Reason in 2-4 sentences, then give the action on the last line as <action>action_name</action>."
@@ -374,6 +385,7 @@ def _format_observation(
     health_lost: int = 0,
     repeated_action: str | None = None,
     reasoning: bool = False,
+    relaxed: bool = False,
 ) -> str:
     inventory = info.get("inventory") or {}
     achievements = info.get("achievements") or {}
@@ -427,7 +439,7 @@ def _format_observation(
             _format_local_map(info, view_radius),
             f"Legend: {_MAP_LEGEND}",
             "",
-            _closing(tools, reasoning),
+            _closing(tools, reasoning, relaxed),
         ]
     )
     return "\n".join(lines)
@@ -460,6 +472,10 @@ class CrafterConfig(vf.TasksetConfig):
     notebook: bool = False
     """Give the model notebook tools (memories + scratchpad, crafter_env.notebook),
     explained in the system prompt and shown at the top of every observation."""
+    relaxed_reply_format: bool = False
+    """Ablation control for the memory arms: their reply format (no "exactly one action" /
+    "reply only as" wording) without their tools. No effect with a notebook, a
+    workspace or reasoning, which set their own reply format."""
     workspace: bool = False
     """Give the model a queryable workspace (crafter_env.workspace): markdown files it
     writes and a ledger the env writes for it, one search tool over both. Excludes
@@ -493,6 +509,9 @@ class CrafterEnvConfig(vf.EnvConfig):
     death_inventory: Literal["drop_all", "drop_materials", "keep"] = "drop_all"
     """What a death takes: every item (Minecraft, minus the pickup: Crafter has no item
     drops), the materials but not the tools, or nothing."""
+    announce_malformed: bool = True
+    """Tell the model when a reply without an action tag made its last action repeat
+    (off: the repeat is silent, as in v0 - for comparisons with runs made before)."""
     observation_extras: bool = False
     """Add to each observation the creatures in view and the nearest of each resource
     (with offsets), the place/make actions available right now, what collecting the
@@ -637,6 +656,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
         space = ws.Workspace(**task.data.info["workspace"]) if task.data.info.get("workspace") else None
         tools = "notebook" if book is not None else "workspace" if space is not None else None
         reasoning = bool(task.data.info.get("reasoning"))
+        relaxed = bool(task.data.info.get("relaxed_reply_format"))
         seen: set[tuple[str, int, int]] = set()  # ledger sightings: (kind, 5x5 block)
         if space is not None:
             for line in _ledger_sightings(env, 0, seen, self.config.view_radius):
@@ -652,6 +672,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 tools=tools,
                 extras=self.config.observation_extras,
                 reasoning=reasoning,
+                relaxed=relaxed,
             )
             if space is not None:
                 opening = f"{space.index()}\n\n{opening}"
@@ -749,7 +770,8 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                         tools=tools,
                         extras=self.config.observation_extras,
                         reasoning=reasoning,
-                        repeated_action=repeated,
+                        relaxed=relaxed,
+                        repeated_action=repeated if self.config.announce_malformed else None,
                         health_lost=max(0, health_before - int(current["inventory"].get("health", 0))) if respawned is None else 0,
                     )
                     if respawned is not None:
@@ -838,6 +860,9 @@ class CrafterTaskset(vf.Taskset[CrafterTask, CrafterConfig]):
         if cfg.notebook:
             notebook = {"slots": cfg.notebook_slots, "memory_chars": cfg.memory_chars, "scratchpad_chars": cfg.scratchpad_chars}
             system, tools = f"{_admit_tools(system, 'notebook')}\n\n{nb.instructions(**notebook)}", "notebook"
+        if cfg.relaxed_reply_format and not (cfg.notebook or cfg.workspace or cfg.enable_reasoning):
+            for old, new in _RELAXED_REPLY_FORMAT.items():
+                system = system.replace(old, new)
         if cfg.workspace:
             workspace = {
                 "files_enabled": cfg.workspace_files,
@@ -869,6 +894,7 @@ class CrafterTaskset(vf.Taskset[CrafterTask, CrafterConfig]):
                         "notebook": notebook,
                         "workspace": workspace,
                         "reasoning": cfg.enable_reasoning,
+                        "relaxed_reply_format": cfg.relaxed_reply_format,
                     },
                 ),
                 cfg.task,

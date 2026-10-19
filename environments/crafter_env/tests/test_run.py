@@ -121,3 +121,18 @@ def test_reasoning_prompt_and_observations_agree():
     assert "reason before you act" in task.data.system_prompt
     interaction = play(CrafterEnvConfig(max_episode_steps=4), reasoning=True)
     assert all("Reason in 2-4 sentences" in m and "Reply only as" not in m for m in interaction.received)
+
+
+
+def test_relaxed_reply_format_control():
+    task = next(iter(CrafterTaskset(CrafterConfig(num_examples=1, relaxed_reply_format=True)).load()))
+    assert "Reply with one action in XML:" in task.data.system_prompt
+    assert "exactly one action" not in task.data.system_prompt and "Notebook" not in task.data.system_prompt
+
+
+
+def test_the_malformed_notice_can_be_switched_off(monkeypatch):
+    monkeypatch.setattr(__import__(__name__), "REPLIES", ["<action>do</action>", "<"])
+    interaction = play(CrafterEnvConfig(max_episode_steps=5, announce_malformed=False))
+    assert not any(m and "had no <action> tag" in m for m in interaction.received)
+    assert interaction.trace.metrics["malformed_replies"] == 2.0
