@@ -74,6 +74,7 @@ echo "inference up $(date +%T)"
 if [ -n "$WEIGHTS" ]; then
   curl -sf -m 1800 -X POST http://localhost:8000/update_weights -H "Content-Type: application/json" \
     -d "{\"weight_dir\": \"$WEIGHTS\"}" || { echo "weight update from $WEIGHTS failed"; pkill -u "$USER" -f "$SLURM_TMPDIR/sgl-venv/"; exit 1; }
+  # SGLang now serves the weights dir as the model, so the eval skips its model-name check.
   echo "loaded weights $WEIGHTS $(date +%T)"
 fi
 
@@ -101,6 +102,7 @@ sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"$
 [ -n "$MAX_TOKENS" ] && sed -i "s/^env.player.max_total_tokens = .*/env.player.max_total_tokens = $MAX_TOKENS/" "$OUT/eval.toml"
 [ -n "$MIN_TOKENS" ] && sed -i "s|^\[sampling\]$|[sampling]\nmin_tokens = $MIN_TOKENS|" "$OUT/eval.toml"
 uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false \
+  ${WEIGHTS:+--client.skip-model-check true} \
   --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "${CONC_MIN:-$CONC}" --concurrency.max-inflight "$CONC" \
   --concurrency.initial-inflight "$CONC" > "$OUT/eval.log" 2>&1
 echo "eval exit $? $(date +%T)"
