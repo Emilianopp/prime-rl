@@ -1,0 +1,37 @@
+# Light SFT so Qwen3.5-4B keeps replying well-formed under KV-Streams eviction.
+#
+# Data: full-context Crafter episodes (token-exact eval traces, no re-rendering),
+# turned into rows by scripts/kv_streams/traces_to_sft.py: each episode is replayed
+# through the server's own turn window (a random r8..r50 per episode) to get every
+# token's eviction position, so the trainer attends with the stale-KV context state
+# the engine builds while the targets are the replies the model gave with full
+# context. One epoch: set max_steps to ceil(packed rows / batch_size), which the
+# converter prints. The final weights are exported for /update_weights
+# (scripts/crafter/kve_eval.sbatch WEIGHTS=...). Checkpoints every 10 steps, so a
+# run longer than one 3-hour job resumes with --resume.
+#
+#   sft @ configs/crafter/sft-kve.toml --data.path <rows.jsonl> --max-steps <one epoch>
+
+max_steps = 80
+export_weights = true
+
+[ckpt]
+interval = 10
+
+[deployment]
+num_train_gpus = 4
+
+[model]
+name = "Qwen/Qwen3.5-4B"
+
+[data]
+type = "tokens"
+path = "rows.jsonl"
+seq_len = 65536  # whole episodes; shorter ones pack together
+batch_size = 64
+micro_batch_size = 1
+
+[optim]
+lr = 2e-6
+weight_decay = 0.0
+max_norm = 1.0

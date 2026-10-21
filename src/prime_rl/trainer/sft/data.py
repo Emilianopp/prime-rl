@@ -18,7 +18,7 @@ from torch.utils.data import IterableDataset, get_worker_info
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers.tokenization_utils import PreTrainedTokenizer
 
-from prime_rl.configs.sft import DataConfig, LossMaskConfig, SFTColumnsConfig, SFTDataConfig
+from prime_rl.configs.sft import DataConfig, LossMaskConfig, SFTColumnsConfig, SFTDataConfig, TokensDataConfig
 from prime_rl.trainer.world import get_world
 from prime_rl.utils.chat_template import deserialize_tool_calls, normalize_messages
 from prime_rl.utils.logger import get_logger
@@ -33,6 +33,7 @@ class Sample(TypedDict):
     seq_lens: list[int]
     mm_kwargs: dict[str, Tensor] | None
     mm_token_type_ids: list[int] | None
+    kv_death: list[int] | None
 
 
 class Batch(TypedDict):
@@ -43,6 +44,7 @@ class Batch(TypedDict):
     seq_lens: Int[Tensor, "packed"]
     mm_kwargs: dict[str, Tensor] | None
     mm_token_type_ids: Int[Tensor, "batch seq"] | None
+    kv_death: Int[Tensor, "batch seq"] | None
 
 
 class StatefulIterableDataset(Stateful, IterableDataset):
@@ -479,6 +481,58 @@ class SFTDataset(StatefulIterableDataset):
             yield processed_example
 
 
+class TokensDataset(SFTDataset):
+    """Pre-tokenized samples (``TokensDataConfig``): token ids as they were sampled - no
+    renderer - with a loss mask and, for KV-Streams traces, each token's eviction
+    position (``kv_death``), so the trainer attends exactly as the engine did."""
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        shuffle: bool = True,
+        seed: int = 0,
+        seq_len: int = 128,
+        non_dp_size: int = 1,
+        max_epochs: int | None = None,
+    ):
+        StatefulIterableDataset.__init__(self, non_dp_size)
+        self.logger = get_logger()
+        self.dataset = dataset
+        self.num_examples = len(dataset)
+        self.shuffle = shuffle
+        self.seed = seed
+        self.seq_len = seq_len
+        self.max_examples = None
+        self.max_epochs = max_epochs
+
+    def _process(self, example: dict) -> dict | None:
+        ids = list(example["input_ids"])
+        mask = [bool(m) for m in example["loss_mask"]]
+        death = example.get("kv_death")
+        if len(mask) != len(ids) or (death is not None and len(death) != len(ids)):
+            raise ValueError("input_ids, loss_mask and kv_death must have the same length")
+        # Causal shift: token i predicts token i + 1. A token keeps its own eviction
+        # position as a key; positions stay chronological.
+        input_ids, target_ids, loss_mask = ids[:-1], ids[1:], mask[1:]
+        kv_death = list(death[:-1]) if death is not None else None
+        if len(input_ids) > self.seq_len:
+            input_ids, target_ids, loss_mask = input_ids[: self.seq_len], target_ids[: self.seq_len], loss_mask[: self.seq_len]
+            kv_death = kv_death[: self.seq_len] if kv_death is not None else None
+        if not any(loss_mask):
+            self.logger.warning(f"Skipping example {example.get('__index', '')}: no trainable tokens within {self.seq_len} tokens")
+            return None
+        return {
+            "input_ids": input_ids,
+            "target_ids": target_ids,
+            "loss_mask": loss_mask,
+            "position_ids": list(range(len(input_ids))),
+            "seq_lens": [len(input_ids)],
+            "mm_kwargs": None,
+            "mm_token_type_ids": None,
+            "kv_death": kv_death,
+        }
+
+
 class CatDataset(StatefulIterableDataset):
     """Pack samples into rows of at most `seq_len` tokens, padded to a multiple of `pad_to_multiple_of`."""
 
@@ -540,6 +594,9 @@ class CatDataset(StatefulIterableDataset):
                 assert isinstance(value, list)
                 packed_samples[key].extend(value)
             packed_samples["seq_lens"].append(sample_len)
+            # Eviction positions are per sequence (as the kv_death mask reads them), so
+            # packing appends them unchanged; samples without any never evict.
+            packed_samples["kv_death"].extend(sample.get("kv_death") or [-1] * sample_len)
 
             sample_mm_kwargs = sample.get("mm_kwargs")
             sample_mm_type_ids = sample.get("mm_token_type_ids")
@@ -597,6 +654,8 @@ class CatDataset(StatefulIterableDataset):
             result["loss_mask"].extend([False] * pad_len)
             result["target_ids"].extend([0] * pad_len)
             result["seq_lens"][-1] += pad_len
+        kv_death = packed["kv_death"][:seq_len] + [-1] * pad_len
+        result["kv_death"] = kv_death if any(d >= 0 for d in kv_death) else None
         result["mm_kwargs"] = packed["mm_kwargs"]
         if packed["mm_token_type_ids"] is not None:
             result["mm_token_type_ids"] = packed["mm_token_type_ids"][:seq_len] + [0] * pad_len
@@ -619,6 +678,9 @@ def cat_collate(samples: list[Sample]) -> Batch:
         "mm_kwargs": dict(mm_kwargs) if mm_kwargs is not None else None,
         "mm_token_type_ids": (
             torch.tensor(mm_token_type_ids, dtype=torch.long).unsqueeze(0) if mm_token_type_ids is not None else None
+        ),
+        "kv_death": (
+            torch.tensor(sample["kv_death"], dtype=torch.long).unsqueeze(0) if sample.get("kv_death") is not None else None
         ),
     }
 
@@ -756,8 +818,21 @@ def setup_dataset(
             multimodal=multimodal,
             columns=config.columns,
         )
+    elif config.type == "tokens":
+        return TokensDataset(
+            raw_dataset if raw_dataset is not None else load_tokens_dataset(config),
+            shuffle=config.shuffle,
+            seed=config.seed,
+            seq_len=config.seq_len,
+            non_dp_size=non_dp_size,
+            max_epochs=max_epochs,
+        )
     else:
         raise ValueError(f"Invalid dataset type: {config.type}")
+
+
+def load_tokens_dataset(config: TokensDataConfig) -> Dataset:
+    return Dataset.from_json(config.path)
 
 
 def setup_dataloader(dataset: StatefulIterableDataset, config: DataConfig, cp: int) -> StatefulDataLoader:
