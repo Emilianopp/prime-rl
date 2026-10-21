@@ -5,6 +5,7 @@ import pytest
 
 from prime_rl.inference.sglang.server import (
     GenerateRequestError,
+    SessionDesyncError,
     SessionTable,
     TraceAffinity,
     TurnWindow,
@@ -389,3 +390,108 @@ def test_with_overlap_scheduling_evictions_start_after_the_last_sampled_token():
     # Resident 14 tokens: overlap scheduling already computed the last sampled token's
     # KV (position 13) with turn 1 visible, so turn 1 is unseen from position 14 on.
     assert run(scenario())[-1].get("eviction") == {"spans": [[3, 8]], "at": 14}
+
+
+def _evicting_run(delta: bool):
+    """Four r2-1 turns, each as a full prompt or as a session delta (prefix_len)."""
+
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        table = SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E))
+        prompt, held, responses = SYSTEM + USER + GEN, 0, []
+        for _ in range(4):
+            send, prefix = (prompt[held:], held) if delta and held else (prompt, 0)
+            responses.append(
+                await generate_sglang(engine, send, {}, sessions=table, trace_id="t", prefix_len=prefix)
+            )
+            held = len(prompt) + 2
+            prompt = prompt + [90, E] + BRIDGE + USER + GEN
+        return engine, table, responses
+
+    return run(scenario())
+
+
+def test_delta_requests_match_full_prompts_and_skip_the_echo():
+    full_engine, full_table, full = _evicting_run(delta=False)
+    delta_engine, delta_table, delta = _evicting_run(delta=True)
+    # The engine sees the same calls, evictions and all, and the trainer the same records.
+    assert delta_engine.calls == full_engine.calls
+    assert delta_engine.evictions == full_engine.evictions
+    assert [r["choices"][0].get("eviction") for r in delta] == [r["choices"][0].get("eviction") for r in full]
+    assert delta_table.stats == full_table.stats and delta_table.stats["evicting_calls"] == 2
+    # Only the first (full) request gets its prompt back; usage still counts the whole prompt.
+    assert "prompt_token_ids" in delta[0] and all("prompt_token_ids" not in r for r in delta[1:])
+    assert [r["usage"]["prompt_tokens"] for r in delta] == [len(r["prompt_token_ids"]) for r in full]
+
+
+@pytest.mark.parametrize("prefix", [0, 4, 6])
+def test_delta_on_a_prefix_the_session_does_not_hold_is_rejected(prefix):
+    async def scenario():
+        engine = FakeEngine()
+        table = SessionTable(engine, timeout=60)
+        if prefix:
+            await generate_sglang(engine, [1, 2, 3], {}, sessions=table, trace_id="t")  # holds 5 tokens
+        with pytest.raises(SessionDesyncError):
+            await generate_sglang(engine, [7, 8], {}, sessions=table, trace_id="t", prefix_len=prefix or 5)
+        return engine
+
+    calls = run(scenario()).calls
+    assert sum(c[0] == "generate" for c in calls) == (1 if prefix else 0)
+
+
+def test_delta_without_a_session_table_is_rejected():
+    with pytest.raises(SessionDesyncError):
+        run(generate_sglang(FakeEngine(), [7, 8], {}, trace_id="t", prefix_len=5))
+
+
+def test_only_a_response_that_ran_on_the_session_is_marked():
+    async def scenario():
+        engine = FakeEngine()
+        table = SessionTable(engine, timeout=60)
+        on_session = await generate_sglang(engine, [1, 2, 3], {}, sessions=table, trace_id="t")
+        no_table = await generate_sglang(engine, [1, 2, 3], {}, trace_id="t")
+        engine.gate = asyncio.Event()
+        first = asyncio.create_task(generate_sglang(engine, [1, 2, 3, 90, 91, 4], {}, sessions=table, trace_id="t"))
+        await asyncio.sleep(0)
+        busy = asyncio.create_task(generate_sglang(engine, [1, 2, 3, 90, 91, 5], {}, sessions=table, trace_id="t"))
+        await asyncio.sleep(0)
+        engine.gate.set()
+        return on_session, no_table, await first, await busy
+
+    on_session, no_table, first, busy = run(scenario())
+    # The client sends deltas only after a marked response: never to a server without
+    # sessions, and not after a busy trace's stateless call.
+    assert on_session.get("session") and first.get("session")
+    assert "session" not in no_table and "session" not in busy
+
+
+def test_delta_while_the_trace_is_busy_is_rejected():
+    async def scenario():
+        engine = FakeEngine()
+        table = SessionTable(engine, timeout=60)
+        await table.generate("t", [1, 2, 3], {})
+        engine.gate = asyncio.Event()
+        first = asyncio.create_task(table.generate("t", [7], {}, prefix_len=5))
+        await asyncio.sleep(0)
+        with pytest.raises(SessionDesyncError):
+            await table.generate("t", [8], {}, prefix_len=5)
+        engine.gate.set()
+        await first
+
+    run(scenario())
+
+
+def test_aborted_delta_call_is_retried_on_the_full_prompt():
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        table = SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E))
+        prompt = SYSTEM + USER + GEN
+        await table.generate("t", prompt, {})
+        engine.abort = True
+        tail = BRIDGE + USER + GEN
+        await table.generate("t", tail, {}, prefix_len=len(prompt) + 2)
+        return engine
+
+    engine = run(scenario())
+    # The retry reopens on the full chronological prompt, rebuilt from the session.
+    assert engine.calls[-2] == ("generate", "t.1", SYSTEM + USER + GEN + [90, E] + BRIDGE + USER + GEN)
