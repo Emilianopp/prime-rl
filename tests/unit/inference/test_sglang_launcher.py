@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from prime_rl.configs.inference import InferenceConfig
-from prime_rl.inference.sglang.launcher import sglang_server_args
+from prime_rl.inference.sglang.launcher import eviction_launch_args, sglang_server_args
 
 
 def test_sglang_backend_drops_the_default_router():
@@ -63,3 +63,18 @@ def test_sessions_enable_streaming_sessions_and_stay_out_of_server_args():
 def test_data_parallel_size_maps_to_dp_size():
     config = InferenceConfig(backend="sglang", vllm={"data_parallel_size": 2})
     assert sglang_server_args(config)["dp_size"] == 2
+
+
+def test_eviction_enables_kv_eviction_and_resolves_the_message_end_token():
+    config = InferenceConfig(backend="sglang", sglang={"sessions": True, "eviction": {"max_turns": 8, "stride": 1}})
+    args = sglang_server_args(config)
+    assert args["enable_kv_eviction"] is True and args["page_size"] == 1
+    assert "eviction" not in args
+    ids = {"<|im_end|>": 151645}
+    assert eviction_launch_args(config, token_id=ids.get) == {"max_turns": 8, "stride": 1, "message_end_id": 151645}
+    assert eviction_launch_args(InferenceConfig(backend="sglang")) is None
+
+
+def test_eviction_requires_sessions():
+    with pytest.raises(ValidationError, match="requires inference.sglang.sessions"):
+        InferenceConfig(backend="sglang", sglang={"eviction": {"max_turns": 8}})

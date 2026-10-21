@@ -11,7 +11,7 @@ from prime_rl.configs.inference import InferenceConfig
 SERVER_SCRIPT = Path(__file__).with_name("server.py")
 
 # [inference.sglang] fields prime-rl reads itself; everything else is a ServerArgs field.
-PRIME_RL_FIELDS = {"python", "sessions", "session_timeout"}
+PRIME_RL_FIELDS = {"python", "sessions", "session_timeout", "eviction"}
 
 
 def sglang_server_args(config: InferenceConfig) -> dict[str, Any]:
@@ -41,8 +41,27 @@ def sglang_server_args(config: InferenceConfig) -> dict[str, Any]:
         args["enable_fp32_lm_head"] = True
     if config.sglang.sessions:
         args["enable_streaming_session"] = True
+    if config.sglang.eviction is not None:
+        args["enable_kv_eviction"] = True
+        args["page_size"] = 1
     args.update(config.sglang.model_dump(exclude=PRIME_RL_FIELDS))
     return args
+
+
+def eviction_launch_args(config: InferenceConfig, token_id=None) -> dict[str, Any] | None:
+    """The server's turn-window schedule, with the message-end token resolved to
+    its id here (the SGLang server runs without a tokenizer)."""
+    eviction = config.sglang.eviction
+    if eviction is None:
+        return None
+    if token_id is None:
+        from transformers import AutoTokenizer
+
+        token_id = AutoTokenizer.from_pretrained(config.vllm.model).convert_tokens_to_ids
+    message_end_id = token_id(eviction.message_end_token)
+    if not isinstance(message_end_id, int) or message_end_id < 0:
+        raise ValueError(f"{eviction.message_end_token!r} is not a single token of {config.vllm.model}")
+    return {"max_turns": eviction.max_turns, "stride": eviction.stride, "message_end_id": message_end_id}
 
 
 def server(config: InferenceConfig) -> None:
@@ -53,6 +72,7 @@ def server(config: InferenceConfig) -> None:
         "server_args": sglang_server_args(config),
         "sessions": config.sglang.sessions,
         "session_timeout": config.sglang.session_timeout,
+        "eviction": eviction_launch_args(config),
     }
     args_path.write_text(json.dumps(launch, indent=2))
     python = config.sglang.python or sys.executable

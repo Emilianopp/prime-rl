@@ -189,6 +189,26 @@ class VllmConfig(BaseConfig):
         return self
 
 
+class SglangEvictionConfig(BaseConfig):
+    """KV-Streams turn-window eviction (the kv-eviction ``r{max_turns}-{stride}`` schedule).
+
+    The first message is protected; every two later message ends close a turn.
+    Once ``max_turns`` turns are complete, the ``stride`` oldest live turns are
+    evicted from the trace's session KV, again every ``stride`` turns after that.
+    Survivors keep their positions and are never recomputed."""
+
+    max_turns: int = Field(8, ge=1)
+    stride: int = Field(1, ge=1)
+    message_end_token: str = "<|im_end|>"
+    """The token that ends a chat message in the model's template."""
+
+    @model_validator(mode="after")
+    def validate_stride(self):
+        if self.stride > self.max_turns:
+            raise ValueError("inference.sglang.eviction.stride must not exceed max_turns")
+        return self
+
+
 class SglangConfig(BaseConfig):
     """Arguments forwarded to the SGLang server when ``inference.backend = "sglang"``,
     under SGLang's own ``ServerArgs`` names (``[inference.sglang] page_size = 1`` or
@@ -214,6 +234,15 @@ class SglangConfig(BaseConfig):
 
     session_timeout: float = Field(3600.0, gt=0)
     """Idle seconds after which SGLang closes a session the orchestrator never finished."""
+
+    eviction: SglangEvictionConfig | None = None
+    """KV-Streams: evict retired turns from each trace's session KV (requires ``sessions``). Generation is unchanged: responses carry the full chronological prompt."""
+
+    @model_validator(mode="after")
+    def validate_eviction(self):
+        if self.eviction is not None and not self.sessions:
+            raise ValueError("inference.sglang.eviction requires inference.sglang.sessions = true")
+        return self
 
     @model_validator(mode="before")
     @classmethod

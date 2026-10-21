@@ -1,8 +1,15 @@
 import asyncio
+import re
 
 import pytest
 
-from prime_rl.inference.sglang.server import GenerateRequestError, SessionTable, TraceAffinity, generate_sglang
+from prime_rl.inference.sglang.server import (
+    GenerateRequestError,
+    SessionTable,
+    TraceAffinity,
+    TurnWindow,
+    generate_sglang,
+)
 
 
 class FakeEngine:
@@ -15,19 +22,32 @@ class FakeEngine:
         self.open: set[str] = set()
         self.gate: asyncio.Event | None = None
         self.ranks: list[int | None] = []
+        self.evictions: list[dict | None] = []
 
     async def generate(
-        self, input_ids, sampling_params, *, request=None, session_id=None, cache_salt=None, priority=None, routed_dp_rank=None
+        self,
+        input_ids,
+        sampling_params,
+        *,
+        request=None,
+        session_id=None,
+        cache_salt=None,
+        priority=None,
+        routed_dp_rank=None,
+        kv_eviction=None,
     ):
         self.calls.append(("generate", session_id, list(input_ids)))
         self.ranks.append(routed_dp_rank)
+        self.evictions.append(kv_eviction)
         if self.gate is not None:
             await self.gate.wait()
         finish = {"type": "abort", "message": "boom"} if self.abort else {"type": "stop"}
+        state = {"state_id": f"s{len(self.evictions)}"} if kv_eviction is not None else None
         return {
             "output_ids": list(self.completion),
             "meta_info": {
                 "id": "r",
+                "kv_eviction": {"cache_state": state} if state else None,
                 "finish_reason": finish,
                 "output_token_logprobs": [(-0.1, t, None) for t in self.completion],
             },
@@ -58,9 +78,9 @@ def test_append_only_turns_send_only_the_new_tail():
 
     engine, r1, r2 = run(scenario())
     assert engine.calls == [
-        ("open", "t#0"),
-        ("generate", "t#0", [1, 2, 3]),
-        ("generate", "t#0", [7, 8]),
+        ("open", "t.0"),
+        ("generate", "t.0", [1, 2, 3]),
+        ("generate", "t.0", [7, 8]),
     ]
     # The response always carries the full prompt, as without a session.
     assert r2["prompt_token_ids"] == [1, 2, 3, 90, 91, 7, 8]
@@ -76,8 +96,8 @@ def test_rewritten_history_reopens_the_session_on_the_full_prompt():
         return engine
 
     engine = run(scenario())
-    assert engine.calls[-3:] == [("close", "t#0"), ("open", "t#1"), ("generate", "t#1", [1, 5, 6])]
-    assert engine.open == {"t#1"}
+    assert engine.calls[-3:] == [("close", "t.0"), ("open", "t.1"), ("generate", "t.1", [1, 5, 6])]
+    assert engine.open == {"t.1"}
 
 
 def test_concurrent_branch_runs_stateless():
@@ -95,7 +115,7 @@ def test_concurrent_branch_runs_stateless():
 
     engine = run(scenario())
     assert ("generate", None, [9, 9]) in engine.calls
-    assert ("generate", "t#0", [1, 2]) in engine.calls
+    assert ("generate", "t.0", [1, 2]) in engine.calls
 
 
 def test_abort_closes_the_session_and_raises():
@@ -110,7 +130,7 @@ def test_abort_closes_the_session_and_raises():
 
     engine = run(scenario())
     # After the abort the next call starts a fresh session on the full prompt.
-    assert engine.calls[-2:] == [("open", "t#1"), ("generate", "t#1", [1, 2, 3, 90, 91, 4])]
+    assert engine.calls[-2:] == [("open", "t.1"), ("generate", "t.1", [1, 2, 3, 90, 91, 4])]
 
 
 def test_finish_closes_the_trace_session():
@@ -124,7 +144,7 @@ def test_finish_closes_the_trace_session():
 
     engine = run(scenario())
     assert engine.open == set()
-    assert engine.calls[-1] == ("close", "t#0")
+    assert engine.calls[-1] == ("close", "t.0")
 
 
 def test_without_a_trace_id_generation_is_stateless():
@@ -157,3 +177,92 @@ def test_session_turns_carry_the_trace_rank():
         return engine
 
     assert run(scenario()).ranks == [0, 1, 0]
+
+
+@pytest.mark.parametrize(
+    "max_turns,stride,expected",
+    [
+        # completed turns 0..10 -> live turns, as kv_eviction.truncation.kv_eviction_live_turns
+        (8, 1, [0, 1, 2, 3, 4, 5, 6, 7, 7, 7, 7]),
+        (8, 2, [0, 1, 2, 3, 4, 5, 6, 7, 6, 7, 6]),
+        (4, 4, [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2]),
+    ],
+)
+def test_turn_window_live_turns(max_turns, stride, expected):
+    window = TurnWindow(max_turns=max_turns, stride=stride, message_end_id=7)
+    assert [window.live_turns(n) for n in range(11)] == expected
+
+
+E = 7  # message end
+SYSTEM, USER, GEN = [1, 2, E], [3, E], [4]  # system message, a user message, the generation prompt
+BRIDGE = [5]  # the newline between a reply's end and the next message
+
+
+def test_turn_window_layout_protects_the_first_message():
+    window = TurnWindow(max_turns=2, stride=1, message_end_id=E)
+    prompt = SYSTEM + USER + GEN
+    assert window.layout(prompt) == (3, 0)
+    for _ in range(2):  # two completed turns: [user, reply] pairs
+        prompt += [90, E] + BRIDGE + USER + GEN
+    # The oldest turn (user [3, E] + generation prompt + reply [90, E]) is dead.
+    assert window.layout(prompt) == (3, 5)
+
+
+def test_eviction_retires_the_oldest_turn_each_call():
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        window = TurnWindow(max_turns=2, stride=1, message_end_id=E)
+        table = SessionTable(engine, timeout=60, eviction=window)
+        prompt = SYSTEM + USER + GEN
+        for _ in range(4):
+            await table.generate("t", prompt, {})
+            prompt = prompt + [90, E] + BRIDGE + USER + GEN
+        return engine, table
+
+    engine, table = run(scenario())
+    calls = engine.evictions
+    assert [c["call_index"] for c in calls] == [0, 1, 2, 3]
+    assert [c["expected_state_id"] for c in calls] == [None, "s1", "s2", "s3"]
+    assert all(c["protected_prefix_len"] == 3 and c["cache_id"] == "t.0" for c in calls)
+    # Turns complete at calls 1, 2, 3; from the second one on, the oldest live
+    # turn dies each call. Survivor coordinates: evicted turns are gone, so the
+    # next retired turn always starts right after the protected prefix.
+    assert [c["evict_spans"] for c in calls] == [[], [], [[3, 8]], [[3, 9]]]
+    assert table.stats["evicting_calls"] == 2 and table.stats["evicted_tokens"] == 11
+
+
+def test_aborted_eviction_call_is_retried_on_a_fresh_session():
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        table = SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E))
+        prompt = SYSTEM + USER + GEN
+        await table.generate("t", prompt, {})
+        engine.abort = True
+        prompt = prompt + [90, E] + BRIDGE + USER + GEN
+        await table.generate("t", prompt, {})
+        return engine, table
+
+    engine, table = run(scenario())
+    # The aborted call on t#0 is retried once, as call 0 of a fresh session with
+    # the full prompt; that abort is returned.
+    assert [(c["cache_id"], c["call_index"]) for c in engine.evictions] == [("t.0", 0), ("t.0", 1), ("t.1", 0)]
+    assert engine.calls[-2:] == [
+        ("generate", "t.1", SYSTEM + USER + GEN + [90, E] + BRIDGE + USER + GEN),
+        ("close", "t.1"),
+    ]
+    assert table.stats["failed_calls"] == 2 and table.stats["reopened"] == 1
+
+
+def test_session_and_call_ids_match_sglang_id_pattern():
+    sglang_id = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        table = SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E))
+        prompt = SYSTEM + USER + GEN
+        await table.generate("trace/with#odd chars", prompt, {})
+        await table.generate("trace/with#odd chars", prompt + [90, E] + BRIDGE + USER + GEN, {})
+        return engine
+
+    for call in run(scenario()).evictions:
+        assert sglang_id.match(call["cache_id"]) and sglang_id.match(call["call_id"]), call
