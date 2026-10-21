@@ -209,6 +209,13 @@ def inference_local(config: InferenceConfig):
     # server subprocess. config.env_vars wins over the defaults; existing os.environ loses.
     os.environ.update({**DEFAULT_COMMON_ENV_VARS, **DEFAULT_INFERENCE_ENV_VARS, **config.env_vars})
 
+    if config.backend == "sglang":
+        from prime_rl.inference.sglang.launcher import server as sglang_server
+
+        logger.info(f"Starting SGLang inference on http://{host}:{port}/v1\n")
+        sglang_server(config)
+        return
+
     setup_vllm_env(config)
 
     router_process: subprocess.Popen | None = None
@@ -240,6 +247,8 @@ def inference_local(config: InferenceConfig):
 
 
 def inference(config: InferenceConfig):
+    if config.slurm is not None and config.backend == "sglang":
+        raise ValueError("inference.backend = 'sglang' does not support SLURM launches yet; run it locally.")
     if config.slurm is not None:
         inference_slurm(config)
     else:
