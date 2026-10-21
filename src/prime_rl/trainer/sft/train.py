@@ -699,8 +699,6 @@ def train(config: SFTConfig):
             ckpt_manager.maybe_clean()
 
     if config.export_weights and not paused:
-        if config.model.lora is not None:
-            raise NotImplementedError("export_weights saves full weights; LoRA runs are not supported")
         export_dir = config.run_dir / "weights" / f"step_{progress.step}"
         logger.info(f"Exporting final weights to {export_dir}")
         save_state_dict_parallel(convert_state_dict_to_hf(model, gather_weights_parallel(model)), export_dir)

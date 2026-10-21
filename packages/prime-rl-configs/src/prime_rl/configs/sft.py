@@ -300,6 +300,12 @@ class SFTConfig(BaseConfig):
         return self.output_dir / self.run.dir
 
     @model_validator(mode="after")
+    def validate_export_weights(self):
+        if self.export_weights and self.model.lora is not None:
+            raise ValueError("export_weights saves full weights; LoRA runs are not supported")
+        return self
+
+    @model_validator(mode="after")
     def resolve_moe_router_dtype_auto(self):
         """Resolve ``model.moe_router_dtype='auto'``: SFT defaults to bf16 routing, skipping the fp32 gate GEMM and its fp32 FSDP unit."""
         if self.model.moe_router_dtype == "auto":

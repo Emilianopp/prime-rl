@@ -63,6 +63,10 @@ def trace_calls(
         sampled = bool(node.get("sampled")) and True in mask
         if sampled:
             first = mask.index(True)
+            if not all(mask[first:]):
+                # The replay treats the rest of the node as the engine's output: tokens the
+                # engine did not sample there would shift every eviction point after it.
+                raise ValueError("a sampled node has unsampled tokens after its reply")
             calls.append((len(stream) + first, ids[first:]))
             target = keep_reply(str((node.get("message") or {}).get("content") or ""))
             dropped += not target
@@ -84,11 +88,10 @@ def evict(stream: list[int], calls: list[tuple[int, list[int]]], window: int, st
     death = [-1] * len(stream)
 
     async def replay():
-        for prompt_end, reply in calls:
+        for prompt_end, _ in calls:
             ret = await table.generate("trace", stream[:prompt_end], {})
             if table.stats["reopened"] or table.stats["failed_calls"]:
                 raise ValueError("the trace does not extend its own session (rewritten history)")
-            assert ret["output_ids"] == reply
             for start, end in (ret.get("eviction") or {}).get("spans", []):
                 for j in range(start, end):
                     if death[j] < 0:  # first death wins

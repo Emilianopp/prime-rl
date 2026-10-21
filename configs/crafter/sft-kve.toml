@@ -12,7 +12,7 @@
 #
 #   sft @ configs/crafter/sft-kve.toml --data.path <rows.jsonl> --max-steps <one epoch>
 
-max_steps = 80
+max_steps = 72  # one epoch of the 5k-episode set at batch_size 64
 export_weights = true
 
 [ckpt]
