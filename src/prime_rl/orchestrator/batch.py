@@ -381,6 +381,7 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
     # No copy needed: SamplingMask holds immutable bytes, and _pad_sampling_mask only
     # ever mutates _materialize_bin's own accumulator.
     sampling_mask = training_example.sampling_mask
+    kv_death = training_example.kv_death
 
     if len(input_ids) > seq_len:
         cut = seq_len
@@ -404,6 +405,8 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
             routed_experts = _slice_routed_experts(routed_experts, cut)
         if sampling_mask is not None:
             sampling_mask = _slice_sampling_mask(sampling_mask, cut)
+        if kv_death is not None:
+            kv_death = kv_death[:cut]
         if mm_token_type_ids is not None:
             mm_token_type_ids = mm_token_type_ids[:cut]
         env_names = env_names[:cut]
@@ -420,6 +423,8 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
     )
     if ref_logprobs is not None:
         assert len(ref_logprobs) == len(input_ids), f"ref_logprobs: {len(ref_logprobs)}"
+    if kv_death is not None:
+        assert len(kv_death) == len(input_ids), f"kv_death: {len(kv_death)}"
     for stream_name, stream in (
         ("rl_weights", rl_weights),
         ("ce_weights", ce_weights),
@@ -463,6 +468,7 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
         seq_lens=[len(input_ids)],
         trace_ids=[training_example.trace_id or ""],
         branch_indices=[training_example.branch_index if training_example.branch_index is not None else -1],
+        kv_death=kv_death,
     )
 
 
@@ -531,6 +537,7 @@ def _materialize_bin(bin_content: _MicroBatchBin) -> MicroBatch:
     # Sampling masks are per-token optional (unlike routed_experts): samples
     # without them get zero-count backfill instead of constraining packing.
     has_sampling_mask = any(sample.sampling_mask is not None for sample in bin_content.samples)
+    has_kv_death = any(sample.kv_death is not None for sample in bin_content.samples)
 
     input_ids: list[int] = []
     loss_mask: list[bool] = []
@@ -548,6 +555,7 @@ def _materialize_bin(bin_content: _MicroBatchBin) -> MicroBatch:
     sampling_mask: SamplingMask | None = SamplingMask(ids=b"", counts=b"") if has_sampling_mask else None
     trace_ids: list[str] = []
     branch_indices: list[int] = []
+    kv_death: list[int] | None = [] if has_kv_death else None
 
     for sample in bin_content.samples:
         sample_len = len(sample.input_ids)
@@ -593,6 +601,8 @@ def _materialize_bin(bin_content: _MicroBatchBin) -> MicroBatch:
             sample_mask = sample.sampling_mask if sample.sampling_mask is not None else _empty_sampling_mask(sample_len)
             sampling_mask.ids += sample_mask.ids
             sampling_mask.counts += sample_mask.counts
+        if kv_death is not None:
+            kv_death.extend(sample.kv_death if sample.kv_death is not None else [-1] * sample_len)
         trace_ids.extend(sample.trace_ids or [""] * len(sample.sequence_lengths))
         branch_indices.extend(sample.branch_indices or [-1] * len(sample.sequence_lengths))
 
@@ -620,6 +630,7 @@ def _materialize_bin(bin_content: _MicroBatchBin) -> MicroBatch:
         seq_lens=seq_lens,
         trace_ids=trace_ids,
         branch_indices=branch_indices,
+        kv_death=kv_death,
     )
 
 
@@ -740,6 +751,8 @@ def pad_micro_batch(micro_batch: MicroBatch, pad_to_multiple_of: int) -> MicroBa
         _pad_routed_experts(micro_batch, padding_size)
     if micro_batch.sampling_mask is not None:
         _pad_sampling_mask(micro_batch, padding_size)
+    if micro_batch.kv_death is not None:
+        micro_batch.kv_death.extend([-1] * padding_size)
     micro_batch.env_names.extend([""] * padding_size)
 
     return micro_batch
@@ -762,6 +775,7 @@ def _assert_token_arrays_aligned(micro_batch: MicroBatch) -> None:
         "ce_weights",
         "ref_kl_weights",
         "mm_token_type_ids",
+        "kv_death",
     )
     for name in per_token_fields:
         values = getattr(micro_batch, name)

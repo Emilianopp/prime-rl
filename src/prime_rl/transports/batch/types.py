@@ -79,6 +79,12 @@ class TrainingSample(msgspec.Struct, array_like=True, gc=False, omit_defaults=Tr
     trace_id: str | None = None
     branch_index: int | None = None
 
+    # KV eviction (KV-Streams): per token, the position from which no later token
+    # attends to it (-1 = never evicted). Token j is visible to query i iff
+    # j <= i and (kv_death[j] == -1 or i < kv_death[j]). Positions index this
+    # sample's own token_ids. ``None`` = full context (no evictions).
+    kv_death: list[int] | None = None
+
 
 # Orchestrator -> Trainer
 class MicroBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
@@ -115,3 +121,8 @@ class MicroBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
     # (e.g. a dummy micro batch). ``None`` when no packed sample carried one.
     trace_ids: list[str] | None = None
     branch_indices: list[int] | None = None
+
+    # See TrainingSample.kv_death; positions are per packed sequence (like
+    # position_ids). ``None`` when no packed sample carried one; otherwise the
+    # samples without one are filled with -1.
+    kv_death: list[int] | None = None
