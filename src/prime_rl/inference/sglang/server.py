@@ -18,10 +18,13 @@ speaks SGLang's request format.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import gc
+import itertools
 import json
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -31,6 +34,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# verifiers sends the trace id in this header (verifiers.v1.clients.client.SESSION_ID_HEADER).
+SESSION_ID_HEADER = "X-Session-ID"
 
 # Same clamp as prime-rl's vLLM server: renderers read it as "no sampling evidence".
 LOGPROB_SENTINEL = -9999.0
@@ -152,39 +158,158 @@ def build_generate_response(ret: dict[str, Any], prompt_token_ids: list[int]) ->
     }
 
 
+class SglangEngine:
+    """The few SGLang calls this module makes, over the tokenizer manager.
+
+    Kept behind one small class so the session logic can be tested with a fake.
+    """
+
+    def __init__(self, tokenizer_manager: Any):
+        self.tokenizer_manager = tokenizer_manager
+
+    async def generate(
+        self,
+        input_ids: list[int],
+        sampling_params: dict[str, Any],
+        *,
+        request: Request | None = None,
+        session_id: str | None = None,
+        cache_salt: str | None = None,
+        priority: int | None = None,
+    ) -> dict[str, Any]:
+        from sglang.srt.managers.io_struct import GenerateReqInput
+
+        obj = GenerateReqInput(
+            input_ids=list(input_ids),
+            sampling_params=sampling_params,
+            return_logprob=True,
+            logprob_start_len=-1,
+            top_logprobs_num=0,
+            stream=False,
+            cache_salt=cache_salt,
+            priority=priority,
+            session_params={"id": session_id} if session_id is not None else None,
+        )
+        # The HTTP request lets SGLang abort the generation when its client disconnects
+        # (a cancelled episode); without it the request runs on to max_tokens.
+        return await self.tokenizer_manager.generate_request(obj, request).__anext__()
+
+    async def open_session(self, session_id: str, timeout: float) -> bool:
+        from sglang.srt.managers.io_struct import OpenSessionReqInput
+
+        opened = await self.tokenizer_manager.open_session(
+            OpenSessionReqInput(capacity_of_str_len=1 << 30, session_id=session_id, streaming=True, timeout=timeout)
+        )
+        return opened is not None
+
+    async def close_session(self, session_id: str) -> None:
+        from sglang.srt.managers.io_struct import CloseSessionReqInput
+
+        await self.tokenizer_manager.close_session(CloseSessionReqInput(session_id=session_id))
+
+
+def _aborted(ret: dict[str, Any]) -> bool:
+    return (ret["meta_info"].get("finish_reason") or {}).get("type") == "abort"
+
+
+@dataclass
+class _TraceSession:
+    engine_session: str | None = None
+    # Prompt + completion of the last call: what the engine session holds.
+    resident: list[int] = field(default_factory=list)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+class SessionTable:
+    """One SGLang streaming session per trace (keyed by ``X-Session-ID``).
+
+    A request whose prompt extends the session's resident tokens sends only the
+    new tail; the session already holds the rest as KV, so it is never
+    re-prefilled or evicted by the radix cache. Any other prompt (a rewritten
+    history, e.g. a re-prefill compaction branch) reopens the session on the full
+    prompt. A request arriving while its trace's session is busy (a concurrent
+    branch) runs stateless. The response is identical either way.
+    """
+
+    def __init__(self, engine: SglangEngine | None, timeout: float):
+        self.engine = engine
+        self.timeout = timeout
+        self._traces: dict[str, _TraceSession] = {}
+        self._incarnation = itertools.count()
+
+    async def generate(
+        self, trace_id: str, token_ids: list[int], sampling_params: dict[str, Any], **kwargs: Any
+    ) -> dict[str, Any]:
+        trace = self._traces.setdefault(trace_id, _TraceSession())
+        if trace.lock.locked():
+            return await self.engine.generate(token_ids, sampling_params, **kwargs)
+        async with trace.lock:
+            resident = trace.resident
+            extends = (
+                trace.engine_session is not None
+                and len(token_ids) > len(resident)
+                and token_ids[: len(resident)] == resident
+            )
+            if extends:
+                tail = token_ids[len(resident) :]
+            else:
+                await self._close(trace)
+                engine_session = f"{trace_id}#{next(self._incarnation)}"
+                if not await self.engine.open_session(engine_session, self.timeout):
+                    logger.warning("could not open an SGLang session for trace %s; running stateless", trace_id)
+                    return await self.engine.generate(token_ids, sampling_params, **kwargs)
+                trace.engine_session = engine_session
+                tail = token_ids
+            try:
+                ret = await self.engine.generate(tail, sampling_params, session_id=trace.engine_session, **kwargs)
+            except BaseException:
+                await self._close(trace)
+                raise
+            if _aborted(ret):
+                # The engine session's contents are no longer known: start over next call.
+                await self._close(trace)
+                return ret
+            trace.resident = list(token_ids) + list(ret.get("output_ids") or [])
+            return ret
+
+    async def finish(self, trace_id: str) -> None:
+        trace = self._traces.pop(trace_id, None)
+        if trace is not None:
+            await self._close(trace)
+
+    async def _close(self, trace: _TraceSession) -> None:
+        if trace.engine_session is not None:
+            # SGLang defers the close until an in-flight request on it finishes.
+            await self.engine.close_session(trace.engine_session)
+        trace.engine_session = None
+        trace.resident = []
+
+
 async def generate_sglang(
-    tokenizer_manager: Any,
+    engine: SglangEngine,
     token_ids: list[int],
     sampling_params: dict[str, Any],
     *,
     request: Request | None = None,
+    sessions: SessionTable | None = None,
+    trace_id: str | None = None,
     cache_salt: str | None = None,
     priority: int | None = None,
 ) -> dict[str, Any]:
     """Token-in / token-out generation on SGLang; the single SGLang call site.
 
-    Always returns prime-rl's generate response: the prompt token ids the engine
-    ran, the completion token ids, and one sampled-token logprob per completion
-    token. Later steps add an optional session and ``kv_eviction`` here, so every
-    mode keeps this one path and one response shape.
+    Always returns prime-rl's generate response: the full prompt token ids, the
+    completion token ids, and one sampled-token logprob per completion token -
+    the same with or without a session.
     """
-    from sglang.srt.managers.io_struct import GenerateReqInput
-
-    obj = GenerateReqInput(
-        input_ids=list(token_ids),
-        sampling_params=translate_sampling_params(sampling_params),
-        return_logprob=True,
-        logprob_start_len=-1,
-        top_logprobs_num=0,
-        stream=False,
-        cache_salt=cache_salt,
-        priority=priority,
-    )
-    # The HTTP request lets SGLang abort the generation when its client disconnects
-    # (a cancelled episode); without it the request runs on to max_tokens.
-    ret = await tokenizer_manager.generate_request(obj, request).__anext__()
-    finish = ret["meta_info"].get("finish_reason") or {}
-    if finish.get("type") == "abort":
+    params = translate_sampling_params(sampling_params)
+    kwargs = {"cache_salt": cache_salt, "priority": priority, "request": request}
+    if sessions is not None and trace_id is not None:
+        ret = await sessions.generate(trace_id, list(token_ids), params, **kwargs)
+    else:
+        ret = await engine.generate(token_ids, params, **kwargs)
+    if _aborted(ret):
+        finish = ret["meta_info"].get("finish_reason") or {}
         raise GenerateRequestError(finish.get("message") or "request aborted by the SGLang scheduler")
     return build_generate_response(ret, token_ids)
 
@@ -211,10 +336,20 @@ def render_load_metrics(loads: list[Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Set in main(): the engine adapter and, with sessions on, the per-trace table.
+_STATE: dict[str, Any] = {"engine": None, "sessions": None}
+
+
 def _tokenizer_manager():
     from sglang.srt.entrypoints.http_server import _global_state
 
     return _global_state.tokenizer_manager
+
+
+def _engine() -> SglangEngine:
+    if _STATE["engine"] is None:
+        _STATE["engine"] = SglangEngine(_tokenizer_manager())
+    return _STATE["engine"]
 
 
 def _error(message: str, status_code: int) -> JSONResponse:
@@ -228,11 +363,16 @@ async def inference_generate(request: Request):
         return _error("streaming is not supported on the SGLang backend", 400)
     if body.get("content_parts") or body.get("features"):
         return _error("multimodal inputs are not supported on the SGLang backend", 400)
+    sessions = _STATE["sessions"]
+    if sessions is not None and sessions.engine is None:
+        sessions.engine = _engine()
     try:
         return await generate_sglang(
-            _tokenizer_manager(),
+            _engine(),
             body["token_ids"],
             body.get("sampling_params") or {},
+            sessions=sessions,
+            trace_id=request.headers.get(SESSION_ID_HEADER),
             cache_salt=body.get("cache_salt"),
             priority=body.get("priority"),
             request=request,
@@ -296,7 +436,11 @@ async def liveness(request: Request):
 
 @router.post("/finish_session")
 async def finish_session(request: Request):
-    """The router releases sticky sessions; with no router there is nothing to release."""
+    """The orchestrator releases a finished trace: close its SGLang session, if any."""
+    sessions = _STATE["sessions"]
+    session_id = request.query_params.get("session_id")
+    if sessions is not None and session_id:
+        await sessions.finish(session_id)
     return {"status": "ok"}
 
 
@@ -311,16 +455,23 @@ def _tune_gc() -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="prime-rl endpoints on an SGLang engine")
-    parser.add_argument("--server-args-json", required=True, help="JSON file of SGLang ServerArgs fields")
+    parser.add_argument(
+        "--server-args-json",
+        required=True,
+        help='JSON file: {"server_args": {SGLang ServerArgs fields}, "sessions": bool, "session_timeout": seconds}',
+    )
     args = parser.parse_args(argv)
     with open(args.server_args_json) as f:
-        server_args_dict = json.load(f)
+        launch = json.load(f)
 
     from sglang.srt.entrypoints.http_server import app, launch_server
     from sglang.srt.server_args import ServerArgs
 
+    if launch.get("sessions"):
+        # The engine binds lazily: the tokenizer manager exists only once the server starts.
+        _STATE["sessions"] = SessionTable(engine=None, timeout=float(launch.get("session_timeout", 3600.0)))
     app.include_router(router)
-    launch_server(ServerArgs(**server_args_dict), launch_callback=_tune_gc)  # after warmup
+    launch_server(ServerArgs(**launch["server_args"]), launch_callback=_tune_gc)  # after warmup
 
 
 if __name__ == "__main__":
