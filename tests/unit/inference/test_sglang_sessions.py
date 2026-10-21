@@ -299,6 +299,31 @@ def test_finish_aborts_the_inflight_request_and_never_reopens():
     assert engine.open == set() and table.stats["failed_calls"] == 0
 
 
+def test_finish_while_the_session_opens_closes_it():
+    async def scenario():
+        engine = FakeEngine()
+        gate = asyncio.Event()
+        open_session = engine.open_session
+
+        async def slow_open(session_id, timeout):  # e.g. the scheduler is overloaded
+            await gate.wait()
+            return await open_session(session_id, timeout)
+
+        engine.open_session = slow_open
+        table = SessionTable(engine, timeout=60)
+        turn = asyncio.create_task(table.generate("t", [1, 2, 3], {}))
+        await asyncio.sleep(0)
+        await table.finish("t")  # no session or request yet: nothing to abort or close
+        gate.set()
+        with pytest.raises(GenerateRequestError):
+            await turn
+        return engine
+
+    engine = run(scenario())
+    assert engine.open == set()  # not left open until the session timeout
+    assert not [c for c in engine.calls if c[0] == "generate"]  # and nothing generated on it
+
+
 def test_finish_without_a_request_in_flight_only_closes():
     async def scenario():
         engine = FakeEngine()

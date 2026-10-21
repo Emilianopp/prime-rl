@@ -332,6 +332,11 @@ class SessionTable:
                         return await self.engine.generate(token_ids, sampling_params, **kwargs)
                     trace.engine_session = engine_session
                     self.stats["reopened" if reopen else "opened"] += 1
+                    if trace.finished:
+                        # finish() ran while the session opened, so it had nothing to abort or
+                        # close: close it here and generate nothing.
+                        await self._close(trace)
+                        raise GenerateRequestError(f"trace {trace_id} finished while its session opened")
                     tail = token_ids
                 call_kwargs, evict_to = dict(kwargs), trace.evicted
                 if self.eviction is not None:
@@ -345,7 +350,8 @@ class SessionTable:
                     ret = await self.engine.generate(
                         tail, sampling_params, session_id=trace.engine_session, **call_kwargs
                     )
-                except BaseException:
+                except BaseException:  # e.g. SGLang aborted it on a client disconnect
+                    self._note_resurrection(trace_id, trace)
                     await self._close(trace)
                     raise
                 finally:
