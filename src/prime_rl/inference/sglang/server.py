@@ -301,12 +301,7 @@ class _TraceSession:
 
 class SessionDesyncError(Exception):
     """A delta request (``prefix_len``) that does not match its session: the client
-    resends the full prompt. ``unavailable``: this server keeps no sessions at all,
-    so the client stops sending deltas to it."""
-
-    def __init__(self, message: str, unavailable: bool = False):
-        super().__init__(message)
-        self.unavailable = unavailable
+    resends the full prompt."""
 
 
 class SessionTable:
@@ -328,7 +323,9 @@ class SessionTable:
     ``prefix_len`` = the session's resident length (``generate(..., prefix_len=)``):
     then nothing per call scales with the trace's length - no full prompt to
     receive, compare or echo back. A ``prefix_len`` the session does not hold
-    raises ``SessionDesyncError`` (HTTP 409) and the client resends in full.
+    raises ``SessionDesyncError`` (HTTP 409) and the client resends in full. A
+    response that ran on the session is marked ``"session": true``, and a client
+    sends deltas only after one, so a server without sessions (vLLM) never gets one.
     """
 
     def __init__(
@@ -616,7 +613,7 @@ async def generate_sglang(
     if affinity is not None:
         kwargs["routed_dp_rank"] = affinity.rank(trace_id)
     if prefix_len and (sessions is None or trace_id is None):
-        raise SessionDesyncError("a delta request (prefix_len) needs a session", unavailable=True)
+        raise SessionDesyncError("a delta request (prefix_len) needs a session")
     if sessions is not None and trace_id is not None:
         ret = await sessions.generate(trace_id, list(token_ids), params, prefix_len=prefix_len, **kwargs)
     else:
@@ -625,8 +622,13 @@ async def generate_sglang(
         finish = ret["meta_info"].get("finish_reason") or {}
         raise GenerateRequestError(finish.get("message") or "request aborted by the SGLang scheduler")
     if prefix_len:
-        return build_generate_response(ret, None, prompt_len=ret.get("prompt_len"))
-    return build_generate_response(ret, token_ids)
+        response = build_generate_response(ret, None, prompt_len=ret.get("prompt_len"))
+    else:
+        response = build_generate_response(ret, token_ids)
+    if "prompt_len" in ret:
+        # Ran on the trace's session: the client may send the next turn as a delta.
+        response["session"] = True
+    return response
 
 
 def render_load_metrics(loads: list[Any]) -> str:
@@ -702,7 +704,7 @@ async def inference_generate(request: Request):
                 "error": {
                     "message": str(e),
                     "code": 409,
-                    "type": "session_unavailable" if e.unavailable else "session_desync",
+                    "type": "session_desync",
                 }
             },
             status_code=409,

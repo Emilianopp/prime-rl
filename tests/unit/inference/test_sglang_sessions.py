@@ -440,9 +440,29 @@ def test_delta_on_a_prefix_the_session_does_not_hold_is_rejected(prefix):
 
 
 def test_delta_without_a_session_table_is_rejected():
-    with pytest.raises(SessionDesyncError) as error:
+    with pytest.raises(SessionDesyncError):
         run(generate_sglang(FakeEngine(), [7, 8], {}, trace_id="t", prefix_len=5))
-    assert error.value.unavailable
+
+
+def test_only_a_response_that_ran_on_the_session_is_marked():
+    async def scenario():
+        engine = FakeEngine()
+        table = SessionTable(engine, timeout=60)
+        on_session = await generate_sglang(engine, [1, 2, 3], {}, sessions=table, trace_id="t")
+        no_table = await generate_sglang(engine, [1, 2, 3], {}, trace_id="t")
+        engine.gate = asyncio.Event()
+        first = asyncio.create_task(generate_sglang(engine, [1, 2, 3, 90, 91, 4], {}, sessions=table, trace_id="t"))
+        await asyncio.sleep(0)
+        busy = asyncio.create_task(generate_sglang(engine, [1, 2, 3, 90, 91, 5], {}, sessions=table, trace_id="t"))
+        await asyncio.sleep(0)
+        engine.gate.set()
+        return on_session, no_table, await first, await busy
+
+    on_session, no_table, first, busy = run(scenario())
+    # The client sends deltas only after a marked response: never to a server without
+    # sessions, and not after a busy trace's stateless call.
+    assert on_session.get("session") and first.get("session")
+    assert "session" not in no_table and "session" not in busy
 
 
 def test_delta_while_the_trace_is_busy_is_rejected():
