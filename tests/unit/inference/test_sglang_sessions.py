@@ -23,6 +23,8 @@ class FakeEngine:
         self.gate: asyncio.Event | None = None
         self.ranks: list[int | None] = []
         self.evictions: list[dict | None] = []
+        self.rids: list[str | None] = []
+        self.aborted: set[str] = set()
 
     async def generate(
         self,
@@ -35,13 +37,16 @@ class FakeEngine:
         priority=None,
         routed_dp_rank=None,
         kv_eviction=None,
+        rid=None,
     ):
         self.calls.append(("generate", session_id, list(input_ids)))
         self.ranks.append(routed_dp_rank)
         self.evictions.append(kv_eviction)
+        self.rids.append(rid)
         if self.gate is not None:
             await self.gate.wait()
-        finish = {"type": "abort", "message": "boom"} if self.abort else {"type": "stop"}
+        aborted = self.abort or rid in self.aborted
+        finish = {"type": "abort", "message": "boom"} if aborted else {"type": "stop"}
         state = {"state_id": f"s{len(self.evictions)}"} if kv_eviction is not None else None
         return {
             "output_ids": list(self.completion),
@@ -61,6 +66,12 @@ class FakeEngine:
     async def close_session(self, session_id):
         self.calls.append(("close", session_id))
         self.open.discard(session_id)
+
+    def abort_request(self, rid):
+        self.calls.append(("abort", rid))
+        self.aborted.add(rid)
+        if self.gate is not None:
+            self.gate.set()
 
 
 def run(coro):
@@ -266,3 +277,61 @@ def test_session_and_call_ids_match_sglang_id_pattern():
 
     for call in run(scenario()).evictions:
         assert sglang_id.match(call["cache_id"]) and sglang_id.match(call["call_id"]), call
+
+
+def test_finish_aborts_the_inflight_request_and_never_reopens():
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        table = SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E))
+        prompt = SYSTEM + USER + GEN
+        await table.generate("t", prompt, {})
+        engine.gate = asyncio.Event()  # the next turn sits in the engine (e.g. queued on a full KV pool)
+        turn = asyncio.create_task(table.generate("t", prompt + [90, E] + BRIDGE + USER + GEN, {}))
+        await asyncio.sleep(0)
+        await table.finish("t")  # the orchestrator cancelled the episode
+        ret = await turn
+        return engine, table, ret
+
+    engine, table, ret = run(scenario())
+    assert ("abort", "t.0.c1") in engine.calls  # a kv_eviction request's rid is its call id
+    assert ret["meta_info"]["finish_reason"]["type"] == "abort"
+    assert [c for c in engine.calls if c[0] == "open"] == [("open", "t.0")]  # no retry on a fresh session
+    assert engine.open == set() and table.stats["failed_calls"] == 0
+
+
+def test_finish_while_the_session_opens_closes_it():
+    async def scenario():
+        engine = FakeEngine()
+        gate = asyncio.Event()
+        open_session = engine.open_session
+
+        async def slow_open(session_id, timeout):  # e.g. the scheduler is overloaded
+            await gate.wait()
+            return await open_session(session_id, timeout)
+
+        engine.open_session = slow_open
+        table = SessionTable(engine, timeout=60)
+        turn = asyncio.create_task(table.generate("t", [1, 2, 3], {}))
+        await asyncio.sleep(0)
+        await table.finish("t")  # no session or request yet: nothing to abort or close
+        gate.set()
+        with pytest.raises(GenerateRequestError):
+            await turn
+        return engine
+
+    engine = run(scenario())
+    assert engine.open == set()  # not left open until the session timeout
+    assert not [c for c in engine.calls if c[0] == "generate"]  # and nothing generated on it
+
+
+def test_finish_without_a_request_in_flight_only_closes():
+    async def scenario():
+        engine = FakeEngine()
+        table = SessionTable(engine, timeout=60)
+        await table.generate("t", [1, 2, 3], {})
+        await table.finish("t")
+        return engine
+
+    engine = run(scenario())
+    assert not [c for c in engine.calls if c[0] == "abort"]
+    assert engine.calls[-1] == ("close", "t.0") and engine.rids == ["t.0.r0"]
