@@ -15,7 +15,8 @@
 # rank (x2 ranks).  The cell ends once EPISODES (default 512) episodes have
 # finished, or at the time limit; summary.json is written either way.
 #
-# Env: REPO (prime-rl checkout), VENV (its environment; another checkout's venv
+# Env: EXTRA_ARGS (extra `rl` arguments, e.g. another model), HARNESS (agent harness id: inline-chat = in-process chat, null = the
+# chat program relaunched per turn), REPO (prime-rl checkout), VENV (its environment; another checkout's venv
 # runs this checkout's code via PYTHONPATH), SGLANG_VENV (the SGLang fork's
 # venv), GRID_OUT (results root). Mila: the DCGM exporter holds ZMQ port 5555.
 set -u
@@ -24,9 +25,10 @@ REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
 GRID_OUT=${GRID_OUT:-$SCRATCH/kv-race/tw_grid}
-MAX_TURNS=${MAX_TURNS:-8} STRIDE=${STRIDE:-1}
+MAX_TURNS=${MAX_TURNS:-8} STRIDE=${STRIDE:-1} HARNESS=${HARNESS:-inline-chat}
 CELL=${ARM}_c${CPR}${CELL_SUFFIX:-}
 [ "$ARM" = kve ] && CELL=kve_c${CPR}_r${MAX_TURNS}-${STRIDE}${CELL_SUFFIX:-}
+[ "$HARNESS" != inline-chat ] && CELL=${CELL}_h${HARNESS}
 OUT=$GRID_OUT/$CELL/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 INFLIGHT=$((2 * CPR))
@@ -36,10 +38,10 @@ if [ "$BATCH" -lt 512 ]; then BATCH=$(( (EPISODES + 3) / 4 * 4 )); fi
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false
 export UV_PROJECT_ENVIRONMENT=$VENV
 if [ "$VENV" != "$REPO/.venv" ]; then
-  export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src${PYTHONPATH:+:$PYTHONPATH}
+  export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/textworld_env:$REPO/deps/verifiers${PYTHONPATH:+:$PYTHONPATH}
 fi
 cd "$REPO"
-echo "[$CELL] $(git log --oneline -1)  inflight=$INFLIGHT batch=$BATCH steps=$STEPS" | tee "$OUT/cell.txt"
+echo "[$CELL] $(git log --oneline -1)  inflight=$INFLIGHT batch=$BATCH steps=$STEPS harness=$HARNESS extra=${EXTRA_ARGS:-}" | tee "$OUT/cell.txt"
 
 case $ARM in
   vllm) BACKEND=(); ENGINE_PORT=8100 ;;  # the engine, behind the router on 8000
@@ -57,7 +59,8 @@ case $ARM in
 esac
 
 # The cell's config: the grid base + this cell's episode log.
-sed "s|^env.max_episode_steps = .*|env.max_episode_steps = $STEPS\nenv.episode_log = \"$OUT/episodes.jsonl\"|" \
+sed -e "s|^env.max_episode_steps = .*|env.max_episode_steps = $STEPS\nenv.episode_log = \"$OUT/episodes.jsonl\"|" \
+  -e "s|^env.player.harness.id = .*|env.player.harness.id = \"$HARNESS\"|" \
   configs/textworld-grid/rl.toml > "$OUT/rl.toml"
 
 uv run rl @ "$OUT/rl.toml" --clean --output-dir "$OUT/run" \
@@ -67,7 +70,7 @@ uv run rl @ "$OUT/rl.toml" --clean --output-dir "$OUT/run" \
   --orchestrator.concurrency.max-inflight "$INFLIGHT" \
   --monitors.wandb.project textworld-grid-kvs --monitors.wandb.name "$CELL" \
   --rollout-transport.type zmq --rollout-transport.port 5655 \
-  "${BACKEND[@]}" > "$OUT/rl.log" 2>&1 &
+  "${BACKEND[@]}" ${EXTRA_ARGS:-} > "$OUT/rl.log" 2>&1 &
 RL_PID=$!
 
 # Engine gauges and GPU utilization every 15 s until the cell is done.
