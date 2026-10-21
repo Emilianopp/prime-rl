@@ -157,6 +157,7 @@ async def generate_sglang(
     token_ids: list[int],
     sampling_params: dict[str, Any],
     *,
+    request: Request | None = None,
     cache_salt: str | None = None,
     priority: int | None = None,
 ) -> dict[str, Any]:
@@ -179,8 +180,9 @@ async def generate_sglang(
         cache_salt=cache_salt,
         priority=priority,
     )
-    # No client handle: prime-rl's dispatcher owns cancellation, not HTTP disconnects.
-    ret = await tokenizer_manager.generate_request(obj, None).__anext__()
+    # The HTTP request lets SGLang abort the generation when its client disconnects
+    # (a cancelled episode); without it the request runs on to max_tokens.
+    ret = await tokenizer_manager.generate_request(obj, request).__anext__()
     finish = ret["meta_info"].get("finish_reason") or {}
     if finish.get("type") == "abort":
         raise GenerateRequestError(finish.get("message") or "request aborted by the SGLang scheduler")
@@ -233,6 +235,7 @@ async def inference_generate(request: Request):
             body.get("sampling_params") or {},
             cache_salt=body.get("cache_salt"),
             priority=body.get("priority"),
+            request=request,
         )
     except (GenerateRequestError, ValueError) as e:
         # The tokenizer manager raises ValueError for requests the scheduler rejects (400).
