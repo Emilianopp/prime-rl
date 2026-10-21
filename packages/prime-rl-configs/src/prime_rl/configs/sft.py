@@ -164,6 +164,23 @@ class SFTDataConfig(BaseDataConfig):
         return self
 
 
+class TokensDataConfig(BaseDataConfig):
+    type: Literal["tokens"] = "tokens"
+
+    path: str
+    """Local JSONL of pre-tokenized samples, e.g. token-exact rollout traces: ``input_ids``
+    (list[int]), ``loss_mask`` (list[bool] over ``input_ids``: the tokens to learn) and
+    optionally ``kv_death`` (list[int], KV-Streams: the position from which each token's
+    KV is evicted, -1 for never; the trainer then attends exactly as the engine did, see
+    ``trainer/models/layers/kv_death.py``). No renderer is applied."""
+
+    shuffle: bool = True
+    """Shuffle the dataset at the start of each epoch."""
+
+    seed: int = 0
+    """Random seed for shuffling. Re-shuffled per epoch by adding the epoch count to the seed."""
+
+
 class SFTValConfig(BaseConfig):
     interval: int = Field(50, ge=1)
     """Run validation every N training steps."""
@@ -174,7 +191,7 @@ class SFTValConfig(BaseConfig):
     data: SFTDataConfig
 
 
-DataConfig: TypeAlias = Annotated[FakeDataConfig | SFTDataConfig, Field(discriminator="type")]
+DataConfig: TypeAlias = Annotated[FakeDataConfig | SFTDataConfig | TokensDataConfig, Field(discriminator="type")]
 
 
 class BaseDeploymentConfig(BaseConfig):
@@ -251,6 +268,11 @@ class SFTConfig(BaseConfig):
 
     ckpt: CheckpointConfig | None = None
 
+    export_weights: bool = False
+    """Save the final weights as an HF safetensors checkpoint (the filesystem weight
+    broadcast's format) under ``<run_dir>/weights/step_<N>``, without a consumer
+    handshake - e.g. to load into an inference server's ``/update_weights``."""
+
     resume: ResumeConfig | None = None
     """Resume the run from a checkpoint (point at it with the previous run's ``run.name``). Without ``[ckpt]`` the run loads the checkpoint but saves no new ones. If None, does not resume."""
 
@@ -276,6 +298,12 @@ class SFTConfig(BaseConfig):
     def run_dir(self) -> Path:
         assert self.run.dir is not None  # resolved at construction
         return self.output_dir / self.run.dir
+
+    @model_validator(mode="after")
+    def validate_export_weights(self):
+        if self.export_weights and self.model.lora is not None:
+            raise ValueError("export_weights saves full weights; LoRA runs are not supported")
+        return self
 
     @model_validator(mode="after")
     def resolve_moe_router_dtype_auto(self):

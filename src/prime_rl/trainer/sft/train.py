@@ -19,6 +19,8 @@ from prime_rl.configs.trainer import CheckpointConfig
 from prime_rl.transports.weights import prune_broadcasts_beyond, setup_weight_sender
 from prime_rl.utils.cp import setup_context_parallel, setup_cp_params, shard_for_cp
 from prime_rl.trainer.lora import get_lora_state
+from prime_rl.trainer.models.layers.kv_death import build_kv_death_block_mask
+from prime_rl.utils.weights import convert_state_dict_to_hf, gather_weights_parallel, save_state_dict_parallel
 from prime_rl.trainer.models.layers.lm_head import IGNORE_INDEX
 from prime_rl.trainer.models.layers.lora import set_lora_num_tokens
 from prime_rl.utils.logger import format_time, setup_logger
@@ -281,6 +283,14 @@ def train(config: SFTConfig):
 
         token_count = loss_mask.sum(dtype=torch.int64)
 
+        # KV-Streams traces: attend as the engine did after each eviction (layers/kv_death.py).
+        block_mask = None
+        kv_death = micro_batch.get("kv_death")
+        if kv_death is not None:
+            if cp_enabled:
+                raise NotImplementedError("kv_death (KV-Streams) with context parallelism is not supported")
+            block_mask = build_kv_death_block_mask(kv_death.to("cuda")[0], seq_lens)
+
         # Labels without a temperature make the LM head return the summed cross-entropy directly.
         labels = target_ids.masked_fill(~loss_mask, IGNORE_INDEX)
 
@@ -294,6 +304,7 @@ def train(config: SFTConfig):
                 mm_kwargs=mm_kwargs,
                 mm_token_type_ids=mm_type_ids,
                 seq_lens_are_pre_shard=seq_lens_are_pre_shard,
+                block_mask=block_mask,
             )
             loss_sum = out["loss"]
 
@@ -686,6 +697,11 @@ def train(config: SFTConfig):
             controller.mark_saved(progress.step)
         else:
             ckpt_manager.maybe_clean()
+
+    if config.export_weights and not paused:
+        export_dir = config.run_dir / "weights" / f"step_{progress.step}"
+        logger.info(f"Exporting final weights to {export_dir}")
+        save_state_dict_parallel(convert_state_dict_to_hf(model, gather_weights_parallel(model)), export_dir)
 
     # Broadcast the final weights so the evals process can run its forced final epoch. A paused
     # run has no final epoch.
