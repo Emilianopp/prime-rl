@@ -43,6 +43,7 @@ class Qwen3_5Attention(FlashAttention):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         cu_seqlens: torch.LongTensor,
         max_seqlen: int,
+        block_mask=None,
     ) -> tuple[torch.Tensor, None]:
         batch_size, sequence_length, _ = hidden_states.shape
 
@@ -71,12 +72,15 @@ class Qwen3_5Attention(FlashAttention):
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
 
+        # Context parallelism swaps in an attention that takes no block_mask: pass it only when set.
+        mask = {"block_mask": block_mask} if block_mask is not None else {}
         attention_output = self._compute_attention(
             query_states[0],
             key_states[0],
             value_states[0],
             cu_seqlens,
             max_seqlen,
+            **mask,
         ).reshape(batch_size, sequence_length, -1)
         if output_gate is not None:
             attention_output = attention_output * output_gate.sigmoid()

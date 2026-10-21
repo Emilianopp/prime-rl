@@ -1,3 +1,4 @@
+import inspect
 import logging
 import os
 import time
@@ -1029,6 +1030,9 @@ def forward(
     # True when seq_lens holds the full pre-CP-shard document boundaries
     # (kept global because documents can straddle the shard cut).
     seq_lens_are_pre_shard: bool = False,
+    # KV-Streams eviction mask (see ``layers/kv_death.py``). Passed only when set, so a
+    # model without support rejects it instead of attending to evicted context.
+    block_mask=None,
 ) -> PrimeLmOutput:
     kwargs = {
         "input_ids": input_ids,
@@ -1056,5 +1060,10 @@ def forward(
 
     if routed_experts is not None:
         kwargs["routed_experts"] = routed_experts
+    if block_mask is not None:
+        # Models without kv_death support take **kwargs and would drop the mask silently.
+        if "block_mask" not in inspect.signature(model.forward).parameters:
+            raise NotImplementedError(f"{type(model).__name__} does not support kv_death (KV-Streams) masks")
+        kwargs["block_mask"] = block_mask
 
     return cast_float_and_contiguous(model(**kwargs))

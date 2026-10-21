@@ -66,6 +66,7 @@ from prime_rl.trainer.utils import (
 )
 from prime_rl.trainer.world import get_world
 from prime_rl.trainer.lora import get_lora_state
+from prime_rl.trainer.models.layers.kv_death import build_kv_death_block_mask, evicted_context
 from prime_rl.trainer.models.layers.lora import set_lora_num_tokens
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl import monitors
@@ -390,6 +391,18 @@ def train(config: TrainerConfig):
 
             seq_lens = micro_batch["seq_lens"].to("cuda")
 
+            # KV-Streams rollouts: the engine evicted tokens mid-rollout, so replay the
+            # chronological stream with the matching attention mask (see layers/kv_death.py).
+            kv_death = micro_batch.get("kv_death")
+            block_mask, evicted_ctx = None, None
+            if kv_death is not None:
+                kv_death = kv_death.to("cuda")
+                evicted_ctx = evicted_context(kv_death[0], seq_lens).unsqueeze(0)
+                if not config.model.debug.ignore_kv_death:
+                    if cp_enabled:
+                        raise NotImplementedError("kv_death (KV-Streams) with context parallelism is not supported")
+                    block_mask = build_kv_death_block_mask(kv_death[0], seq_lens)
+
             labels = shift_tensor_left(input_ids)
             if sampling_mask is not None:
                 # Sampling masks ride at the sampled token's own position (like inference
@@ -460,6 +473,7 @@ def train(config: TrainerConfig):
                     seq_lens_are_pre_shard=seq_lens_are_pre_shard,
                     routed_experts=routed_experts,
                     sampling_mask=sampling_mask,
+                    block_mask=block_mask,
                 )
 
             if out.get("logprobs") is None:
@@ -547,6 +561,13 @@ def train(config: TrainerConfig):
                     mismatch_kl = _mismatch_kl_from_log_ratio(log_ratio)
                 mismatch_kl = mismatch_kl.detach().to("cpu")
                 tensors["mismatch_kl/all"].append(mismatch_kl)
+                if evicted_ctx is not None:
+                    # Split by whether evictions already shaped the token's context:
+                    # a wrong mask shows up on the evicted-context tokens only.
+                    in_evicted_ctx = evicted_ctx[mismatch_mask].to("cpu")
+                    tensors["mismatch_kl/evicted_context"].append(mismatch_kl[in_evicted_ctx])
+                    tensors["mismatch_kl/full_context"].append(mismatch_kl[~in_evicted_ctx])
+                    tensors["kv_death/evicted_context_fraction"].append(in_evicted_ctx.float().mean().unsqueeze(0))
                 mismatch_env_names = [
                     env_name for env_name, keep in zip(env_names, mismatch_mask.flatten().tolist()) if keep
                 ]
@@ -663,6 +684,12 @@ def train(config: TrainerConfig):
         step_message = f"Step {progress.step} | {format_time(step_time):>7} | Loss {tensor_stats['loss/mean']:.4f} | Entropy {tensor_stats['entropy/all/mean']:.4f}"
         if "mismatch_kl/all/mean" in tensor_stats:
             step_message += f" | Mismatch KL {tensor_stats['mismatch_kl/all/mean']:.4f}"
+        if "mismatch_kl/evicted_context/mean" in tensor_stats:
+            step_message += (
+                f" (evicted context {tensor_stats['mismatch_kl/evicted_context/mean']:.4f},"
+                f" full context {tensor_stats.get('mismatch_kl/full_context/mean', float('nan')):.4f},"
+                f" {tensor_stats.get('kv_death/evicted_context_fraction/mean', float('nan')):.0%} of tokens)"
+            )
         if grad_norm is not None:
             step_message += f" | Grad. Norm {grad_norm:.4f}"
         step_message += f" | LR {current_lr:.2e} | Throughput {throughput:.0f} tokens/s | MFU {mfu:.1f}% | Peak Mem. {peak_memory:.1f} GiB"

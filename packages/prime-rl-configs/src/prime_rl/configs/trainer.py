@@ -103,6 +103,9 @@ class DebugModelConfig(BaseConfig):
     random_init: bool = False
     """Randomly initialize the model instead of loading weights."""
 
+    ignore_kv_death: bool = False
+    """Negative control for KV-Streams runs: attend densely, ignoring the rollouts' per-token ``kv_death``. The trainer then computes logprobs over context the rollout never saw (mismatch KL should jump on evicted-context tokens); diagnosis only."""
+
     force_balanced_routing: bool = False
     """Replace MoE token-choice routing with a round-robin assignment so every expert sees an equal share. Intended for fake-data smoke tests where untrained routing would otherwise OOM under severe imbalance. Gating scores are still gathered from the override indices so the forward pass stays consistent."""
 
