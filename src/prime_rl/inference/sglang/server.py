@@ -176,6 +176,7 @@ class SglangEngine:
         session_id: str | None = None,
         cache_salt: str | None = None,
         priority: int | None = None,
+        routed_dp_rank: int | None = None,
     ) -> dict[str, Any]:
         from sglang.srt.managers.io_struct import GenerateReqInput
 
@@ -189,6 +190,7 @@ class SglangEngine:
             cache_salt=cache_salt,
             priority=priority,
             session_params={"id": session_id} if session_id is not None else None,
+            routed_dp_rank=routed_dp_rank,
         )
         # The HTTP request lets SGLang abort the generation when its client disconnects
         # (a cancelled episode); without it the request runs on to max_tokens.
@@ -285,6 +287,34 @@ class SessionTable:
         trace.resident = []
 
 
+class TraceAffinity:
+    """Pin each trace to one data-parallel rank, the least loaded (fewest live
+    traces) at its first request: the in-server analogue of vllm-router's
+    ``sticky_least_loaded``. A trace's prefix - radix cache or streaming session -
+    stays on the rank that holds it. SGLang sends session open/close to every
+    rank, so pinning the generate requests is enough."""
+
+    def __init__(self, dp_size: int):
+        self.dp_size = dp_size
+        self._ranks: dict[str, int] = {}
+        self._live = [0] * dp_size
+
+    def rank(self, trace_id: str | None) -> int | None:
+        if self.dp_size <= 1 or trace_id is None:
+            return None  # SGLang's own load balancing
+        rank = self._ranks.get(trace_id)
+        if rank is None:
+            rank = min(range(self.dp_size), key=self._live.__getitem__)
+            self._ranks[trace_id] = rank
+            self._live[rank] += 1
+        return rank
+
+    def release(self, trace_id: str) -> None:
+        rank = self._ranks.pop(trace_id, None)
+        if rank is not None:
+            self._live[rank] -= 1
+
+
 async def generate_sglang(
     engine: SglangEngine,
     token_ids: list[int],
@@ -292,6 +322,7 @@ async def generate_sglang(
     *,
     request: Request | None = None,
     sessions: SessionTable | None = None,
+    affinity: TraceAffinity | None = None,
     trace_id: str | None = None,
     cache_salt: str | None = None,
     priority: int | None = None,
@@ -304,6 +335,8 @@ async def generate_sglang(
     """
     params = translate_sampling_params(sampling_params)
     kwargs = {"cache_salt": cache_salt, "priority": priority, "request": request}
+    if affinity is not None:
+        kwargs["routed_dp_rank"] = affinity.rank(trace_id)
     if sessions is not None and trace_id is not None:
         ret = await sessions.generate(trace_id, list(token_ids), params, **kwargs)
     else:
@@ -336,8 +369,9 @@ def render_load_metrics(loads: list[Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# Set in main(): the engine adapter and, with sessions on, the per-trace table.
-_STATE: dict[str, Any] = {"engine": None, "sessions": None}
+# Set in main(): the engine adapter, the per-trace session table (sessions on)
+# and the trace -> DP rank pinning (dp_size > 1).
+_STATE: dict[str, Any] = {"engine": None, "sessions": None, "affinity": None}
 
 
 def _tokenizer_manager():
@@ -372,6 +406,7 @@ async def inference_generate(request: Request):
             body["token_ids"],
             body.get("sampling_params") or {},
             sessions=sessions,
+            affinity=_STATE["affinity"],
             trace_id=request.headers.get(SESSION_ID_HEADER),
             cache_salt=body.get("cache_salt"),
             priority=body.get("priority"),
@@ -436,11 +471,13 @@ async def liveness(request: Request):
 
 @router.post("/finish_session")
 async def finish_session(request: Request):
-    """The orchestrator releases a finished trace: close its SGLang session, if any."""
-    sessions = _STATE["sessions"]
+    """The orchestrator releases a finished trace: close its SGLang session and DP pin, if any."""
+    sessions, affinity = _STATE["sessions"], _STATE["affinity"]
     session_id = request.query_params.get("session_id")
     if sessions is not None and session_id:
         await sessions.finish(session_id)
+    if affinity is not None and session_id:
+        affinity.release(session_id)
     return {"status": "ok"}
 
 
@@ -470,6 +507,9 @@ def main(argv: list[str] | None = None) -> None:
     if launch.get("sessions"):
         # The engine binds lazily: the tokenizer manager exists only once the server starts.
         _STATE["sessions"] = SessionTable(engine=None, timeout=float(launch.get("session_timeout", 3600.0)))
+    dp_size = int(launch["server_args"].get("dp_size") or 1)
+    if dp_size > 1:
+        _STATE["affinity"] = TraceAffinity(dp_size)
     app.include_router(router)
     launch_server(ServerArgs(**launch["server_args"]), launch_callback=_tune_gc)  # after warmup
 
