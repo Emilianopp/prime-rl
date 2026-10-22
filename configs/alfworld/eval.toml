@@ -1,0 +1,41 @@
+# ALFWorld eval (inference only): admissible-commands regime, reasoning then one
+# <action> per turn, up to 150 actions, reward 1 if the task is completed. Serve
+# configs/alfworld/inference.toml first.
+#
+#   uv run eval @ configs/alfworld/eval.toml
+
+model = "Qwen/Qwen3.5-9B"
+group_size = 1
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+# Any admin URL enables releasing each episode's session when it finishes.
+admin_base_url = ["http://localhost:8000/v1"]
+
+[renderer]  # token-in/out with the trace id as session id, as in training
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[concurrency]
+min_inflight = 64
+max_inflight = 64
+
+[sampling]
+max_completion_tokens = 1024
+temperature = 1.0
+
+[[source]]
+name = "alfworld"
+env.taskset.id = "alfworld-env"
+env.taskset.dataset_path = "alfworld_data"
+env.taskset.split = "valid_seen"
+env.max_episode_steps = 150
+# Trace tokens; 64 episodes x 64k stays under 4 engines' KV, so pinned
+# concurrency cannot deadlock on a full cache.
+env.player.max_total_tokens = 65536
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16
