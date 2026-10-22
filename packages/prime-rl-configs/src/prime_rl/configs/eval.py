@@ -3,6 +3,7 @@ from pathlib import Path
 
 import verifiers.v1 as vf
 from pydantic import AliasChoices, Field, model_validator
+from renderers import RendererConfig
 
 from prime_rl.configs.monitors import EvalMonitorsConfig
 from prime_rl.configs.orchestrator import ConcurrencyConfig, EvalSourcesConfig, ScheduledEvalConfig
@@ -79,6 +80,12 @@ class EvalConfig(ServedEvalConfig):
 
     group_size: int = Field(1, ge=1, validation_alias=AliasChoices("group_size", "r"))
     """Default rollouts per example. Can be overridden per env."""
+
+    renderer: RendererConfig | None = None
+    """Sample through this renderer, token-in/out, like the RL policy client, instead of
+    chat completions. Each trace then carries its id as the session id, so a prime-rl
+    server with ``inference.sglang.sessions`` (and KV-Streams eviction) serves eval
+    episodes exactly as it serves training rollouts. None: plain chat completions."""
 
     run: RunConfig = Field(default_factory=RunConfig)
     """Run metadata. ``run.name`` names the run directory under ``output_dir``."""
