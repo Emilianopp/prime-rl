@@ -16,28 +16,33 @@
 #      kve-dense  same rollouts, trainer ignores kv_death (negative control)
 #      full       full-context rollouts (plain SGLang), the mismatch floor
 #
-# Env: BATCH (episodes per step, default 128), MAMBA (DeltaNet state slots per
-# engine, >= 3 x CPR; default 700), REPO (prime-rl checkout; its deps/ submodules
+# Env: GAME (textworld, default, or crafter), BATCH (episodes per step, default
+# 128), MAMBA (DeltaNet state slots per engine, >= 3 x CPR; default 700), REPO (prime-rl checkout; its deps/ submodules
 # must be checked out), VENV, SGLANG_VENV, OUT_ROOT.
 #
 # Recommended KV-Streams setting (Qwen3.5-4B, 2x A100-80GB inference): the
 # concurrency controller on with a c256 ceiling, which it trims to what the KV
 # pool holds:  CPR=256 BATCH=512 MAMBA=840.
 set -u
-ARM=$1 STEPS=${2:-4} CPR=${3:-48} BATCH=${BATCH:-128} MAMBA=${MAMBA:-700}
+ARM=$1 STEPS=${2:-4} CPR=${3:-48} BATCH=${BATCH:-128} MAMBA=${MAMBA:-700} GAME=${GAME:-textworld}
+case $GAME in
+  textworld) BASE=configs/textworld-grid/rl.toml GAME_STEPS=200 ;;
+  crafter)   BASE=configs/crafter/rl.toml GAME_STEPS=100 ;;
+  *) echo "unknown game $GAME"; exit 2 ;;
+esac
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/kve_train}/${ARM}_c${CPR}_b${BATCH}/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/kve_train}/${GAME}_${ARM}_c${CPR}_b${BATCH}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 INFLIGHT=$((2 * CPR))
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false
 export UV_PROJECT_ENVIRONMENT=$VENV
 # This checkout's code and pinned verifiers/renderers, over the venv's editable installs.
-export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/textworld_env:$REPO/deps/verifiers:$REPO/deps/renderers${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/textworld_env:$REPO/environments/crafter_env:$REPO/deps/verifiers:$REPO/deps/renderers${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[$ARM c$CPR] $(git log --oneline -1) steps=$STEPS batch=$BATCH mamba=$MAMBA" | tee "$OUT/cell.txt"
+echo "[$GAME $ARM c$CPR] $(git log --oneline -1) steps=$STEPS batch=$BATCH mamba=$MAMBA" | tee "$OUT/cell.txt"
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
@@ -55,8 +60,8 @@ case $ARM in
   *) echo "unknown arm $ARM"; exit 2 ;;
 esac
 
-sed "s|^env.max_episode_steps = .*|env.max_episode_steps = 200\nenv.episode_log = \"$OUT/episodes.jsonl\"|" \
-  configs/textworld-grid/rl.toml > "$OUT/rl.toml"
+sed "s|^env.max_episode_steps = .*|env.max_episode_steps = $GAME_STEPS\nenv.episode_log = \"$OUT/episodes.jsonl\"|" \
+  "$BASE" > "$OUT/rl.toml"
 
 # KV-Streams counters (evicting calls, evicted tokens, reopens) while the engine is up.
 ( while sleep 30; do curl -s -m 5 http://localhost:8000/metrics | grep "^kvs:" > "$OUT/kvs.prom.tmp" && mv "$OUT/kvs.prom.tmp" "$OUT/kvs.prom"; done ) &
@@ -66,7 +71,7 @@ uv run rl @ "$OUT/rl.toml" --clean --output-dir "$OUT/run" \
   --orchestrator.concurrency.initial-inflight "$INFLIGHT" \
   --orchestrator.concurrency.min-inflight 4 \
   --orchestrator.concurrency.max-inflight "$INFLIGHT" \
-  --monitors.wandb.project kve-train-check --monitors.wandb.name "${ARM}_c${CPR}" \
+  --monitors.wandb.project kve-train-check --monitors.wandb.name "${GAME}_${ARM}_c${CPR}" \
   --rollout-transport.type zmq --rollout-transport.port 5655 \
   "${MODEL[@]}" "${BACKEND[@]}" > "$OUT/rl.log" 2>&1
 echo "rl exit $?"
