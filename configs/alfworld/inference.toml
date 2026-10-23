@@ -1,6 +1,6 @@
 # ALFWorld inference: Qwen3.5-9B on SGLang, one node, 4 A100-80GB as 4 data-parallel
 # engines, KV-Streams sessions with an r10-1 turn window (v0's best truncation arm
-# kept 10 turns). Paired with configs/alfworld/eval.toml; scripts/alfworld/eval.sbatch
+# kept 10 turns). Paired with configs/alfworld/eval.toml; ENV=alfworld scripts/kv_streams/eval.sbatch
 # runs both (KEEP=full drops [sglang.eviction]: the same session path, full context).
 #
 #   uv run inference @ configs/alfworld/inference.toml --sglang.python <SGLang fork venv>/bin/python
