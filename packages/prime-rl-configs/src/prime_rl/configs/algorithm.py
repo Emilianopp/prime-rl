@@ -207,6 +207,15 @@ class GRPOAlgoConfig(BaseAlgoConfig):
     loss_aggregation: Literal["token", "prompt"] = "token"
     """How the rl loss weights tokens across prompt groups. ``token``: every loss token in the batch weighs the same, so groups with more total tokens dominate the gradient. ``prompt``: prompt-mean (MiMo-V2.6 Eq. 1) — each trainable token of group ``q`` gets rl weight ``1 / T_q`` (``T_q`` = the group's trainable tokens), and the trainer divides the rl loss by the summed weights, i.e. the number of groups. All rl envs of a run must use the same value."""
 
+    credit: Literal["trace", "episode"] = "trace"
+    """What the baseline compares. ``trace``: each trainable trace is one rollout. ``episode``: an episode's reward is the sum of its traces' rewards, its advantage is that minus the mean over the group's episodes, and every trainable trace of the episode gets it — for envs that split one episode into several traces (e.g. KV-Streams segments resumed from a summary), where per-trace credit would count a long episode once per segment."""
+
+    @model_validator(mode="after")
+    def validate_credit(self):
+        if self.credit == "episode" and (self.length_penalty is not None or self.length_weighted_baseline):
+            raise ValueError("credit = 'episode' does not support the per-trace length_penalty or length_weighted_baseline")
+        return self
+
 
 class EchoAlgoConfig(GRPOAlgoConfig):
     type: Literal["echo"] = "echo"  # type: ignore[assignment]

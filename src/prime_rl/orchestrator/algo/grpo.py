@@ -22,8 +22,33 @@ class GRPOAlgorithm(Algorithm):
         self.length_penalty = config.length_penalty
         self.length_weighted_baseline = config.length_weighted_baseline
         self.loss_aggregation = config.loss_aggregation
+        self.credit = config.credit
 
     async def score_group(self, episodes: list[vf.Episode]) -> None:
+        if self.credit == "episode":
+            traces = self._assign_episode_advantages(episodes)
+        else:
+            traces = self._assign_trace_advantages(episodes)
+        nodes = [node for trace in traces for node in trainable_nodes(trace)]
+        if self.loss_aggregation == "prompt" and nodes:
+            # rl weight 1/T_q per token: each group's weights sum to 1, and the trainer divides the
+            # rl loss by the sum of rl weights, i.e. the number of groups.
+            weight = 1.0 / sum(sum(node.mask) for node in nodes)
+            for node in nodes:
+                node.loss_weights = {**(node.loss_weights or {}), "rl": [weight if m else 0.0 for m in node.mask]}
+
+    @staticmethod
+    def _assign_episode_advantages(episodes: list[vf.Episode]) -> list[vf.Trace]:
+        """One reward per episode (the sum over its traces), so an episode split into
+        several traces counts once; every trainable trace gets its episode's advantage."""
+        pairs = list(iter_trainable_traces(episodes))
+        totals = {episode.id: sum(trace.reward for trace in episode.traces) for episode, _ in pairs}
+        baseline = sum(totals.values()) / len(totals) if totals else 0.0
+        for episode, trace in pairs:
+            assign_advantages(trace, totals[episode.id] - baseline)
+        return [trace for _, trace in pairs]
+
+    def _assign_trace_advantages(self, episodes: list[vf.Episode]) -> list[vf.Trace]:
         import torch  # only the trainer-side extras ship torch; an eval process never scores a group
 
         traces = [trace for _, trace in iter_trainable_traces(episodes)]
@@ -52,10 +77,4 @@ class GRPOAlgorithm(Algorithm):
         advantages = shaped_rewards - baseline
         for trace, advantage in zip(traces, advantages.tolist(), strict=True):
             assign_advantages(trace, advantage)
-        nodes = [node for trace in traces for node in trainable_nodes(trace)]
-        if self.loss_aggregation == "prompt" and nodes:
-            # rl weight 1/T_q per token: each group's weights sum to 1, and the trainer divides the
-            # rl loss by the sum of rl weights, i.e. the number of groups.
-            weight = 1.0 / sum(sum(node.mask) for node in nodes)
-            for node in nodes:
-                node.loss_weights = {**(node.loss_weights or {}), "rl": [weight if m else 0.0 for m in node.mask]}
+        return traces

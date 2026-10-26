@@ -205,6 +205,36 @@ def test_grpo_length_weighted_baseline():
     assert advs == pytest.approx([0.75 - 65 / 120, -1 / 12 - 65 / 120])
 
 
+def _segmented_episode(reward: float, segments: int) -> vf.Episode:
+    """One episode split into ``segments`` traces (e.g. KV-Streams segments resumed from a
+    summary); the env records its reward on the last one."""
+    traces = [
+        _build_episode(reward if i == segments - 1 else 0.0, sampled_lengths=[2]).traces[0] for i in range(segments)
+    ]
+    episode = _build_episode(0.0, sampled_lengths=[1])
+    return vf.Episode(env=episode.env, task=episode.task, group=episode.group, traces=traces, ok=True)
+
+
+def test_grpo_episode_credit_counts_a_segmented_episode_once():
+    # Rewards 1 (split into 3 traces) and 0: per-episode baseline 0.5, so +0.5 on all three
+    # segments and -0.5 on the other episode. Per-trace credit would see rewards [0, 0, 1, 0].
+    group = [_segmented_episode(1.0, segments=3), _build_episode(0.0, sampled_lengths=[2])]
+    algo = GRPOAlgorithm(GRPOAlgoConfig(credit="episode"), clients=None)
+    asyncio.run(algo.score_group(group))
+    segment_advantages = [next(n.advantages[0] for n in trace.nodes if n.advantages) for trace in group[0].traces]
+    assert segment_advantages == pytest.approx([0.5, 0.5, 0.5])
+    assert _scalar(group[1]) == pytest.approx(-0.5)
+    # One trace per episode: the same as per-trace credit.
+    plain = _make_group(rewards=[1.0, 0.5, 0.8])
+    asyncio.run(GRPOAlgorithm(GRPOAlgoConfig(credit="episode"), clients=None).score_group(plain))
+    assert [_scalar(e) for e in plain] == pytest.approx(_grpo(_make_group(rewards=[1.0, 0.5, 0.8])))
+
+
+def test_grpo_episode_credit_refuses_per_trace_length_terms():
+    with pytest.raises(ValueError, match="credit = 'episode'"):
+        GRPOAlgoConfig(credit="episode", length_weighted_baseline=True)
+
+
 def test_max_rl_mean_normalized():
     # mean 0.25: the success gets (1 - 0.25)/0.25 = 3, failures (0 - 0.25)/0.25 = -1
     assert _max_rl(_make_group(rewards=[1.0, 0.0, 0.0, 0.0])) == pytest.approx([3.0, -1.0, -1.0, -1.0])
