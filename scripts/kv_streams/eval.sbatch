@@ -16,7 +16,8 @@
 # episode_log: alfworld, textworld), KEEP (turn window; default: the inference
 # config's; "full": no eviction), DATA (the taskset's dataset_path), SPLIT (the
 # taskset's split; default: the eval config's), N (episodes, default all), CONC
-# (in-flight episodes, default 64), REPO (prime-rl checkout, deps/ submodules
+# (in-flight episodes, default 64), SET ("key = value" overrides of the eval
+# source, separated by ";", e.g. "env.max_episode_steps = 400"), REPO (prime-rl checkout, deps/ submodules
 # checked out), VENV, SGLANG_VENV, OUT_ROOT.
 set -u
 ENV=${ENV:?set ENV, e.g. alfworld} KEEP=${KEEP:-} DATA=${DATA:?set DATA, the dataset_path} SPLIT=${SPLIT:-} N=${N:-1000000} CONC=${CONC:-64}
@@ -54,6 +55,16 @@ echo "inference up $(date +%T)"
 sed -e "s|^env.taskset.dataset_path = .*|env.taskset.dataset_path = \"$DATA\"\nenv.episode_log = \"$OUT/episodes.jsonl\"|" \
     ${SPLIT:+-e "s|^env.taskset.split = .*|env.taskset.split = \"$SPLIT\"|"} \
     configs/$ENV/eval.toml > "$OUT/eval.toml"
+IFS=';' read -ra OVERRIDES <<< "${SET:-}"
+for kv in "${OVERRIDES[@]}"; do
+  kv=$(echo "$kv" | sed 's/^ *//; s/ *$//'); key=${kv%% =*}
+  [ -z "$kv" ] && continue
+  if grep -q "^$key = " "$OUT/eval.toml"; then
+    sed -i "s|^$key = .*|$kv|" "$OUT/eval.toml"
+  else
+    sed -i "s|^env.episode_log = .*|&\n$kv|" "$OUT/eval.toml"
+  fi
+done
 uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false --select.limit "$N" \
   --concurrency.min-inflight "$CONC" --concurrency.max-inflight "$CONC" --concurrency.initial-inflight "$CONC" > "$OUT/eval.log" 2>&1
 echo "eval exit $? $(date +%T)"
