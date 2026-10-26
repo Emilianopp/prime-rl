@@ -158,7 +158,7 @@ class TextWorldEnv(vf.Env[TextWorldEnvConfig]):
         outcome = {"score": score, "max_score": info["max_score"], "won": won, "steps": steps, "done": done}
         trace.info["textworld"] = outcome
         if self.config.episode_log:
-            line = {"start": started, "end": time.time(), "reward": reward, "task": info["task"], **outcome}
+            line = {"start": started, "end": time.time(), "reward": reward, "task": info["task"], "game": info["game_idx"], **outcome}
             with open(self.config.episode_log, "a") as f:
                 f.write(json.dumps(line) + "\n")
 
