@@ -1258,11 +1258,11 @@ def test_custom_renderer_rejects_unknown_fields(tmp_path, custom_renderer_import
 
 
 def test_segments_require_episode_credit():
-    from prime_rl.configs.algorithm import GRPOAlgoConfig
     from prime_rl.configs.orchestrator import TrainSourceConfig
 
     segments = {"budget_tokens": 131072, "summary_tokens": 8192}
-    env = vf.SingleAgentEnvConfig(agent=vf.AgentConfig(segments=segments))
+    source = {"env": {"taskset": {"id": "reverse-text"}, "agent": {"segments": segments}}}
     with pytest.raises(ValidationError, match="credit = 'episode'"):
-        TrainSourceConfig(env=env)
-    assert TrainSourceConfig(env=env, algo=GRPOAlgoConfig(credit="episode")).algo.credit == "episode"
+        TrainSourceConfig.model_validate(source)
+    episode = TrainSourceConfig.model_validate({**source, "algo": {"type": "grpo", "credit": "episode"}})
+    assert episode.algo.credit == "episode"
