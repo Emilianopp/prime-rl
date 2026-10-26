@@ -583,7 +583,7 @@ class Dispatcher:
 
         def on_delta(delta: dict) -> None:
             session_ids.add(delta["trace"])
-            if delta.get("is_completed"):
+            if (delta.get("set") or {}).get("is_completed"):
                 # A trace that finishes before its episode (e.g. a closed segment) releases its
                 # engine session now rather than holding its KV until the episode ends.
                 release = asyncio.create_task(clients.finish_sessions([delta["trace"]]))
