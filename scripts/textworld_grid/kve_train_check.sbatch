@@ -17,7 +17,9 @@
 #      full       full-context rollouts (plain SGLang), the mismatch floor
 #
 # Env: GAME (textworld, default, or crafter), BATCH (episodes per step, default
-# 128), MAMBA (DeltaNet state slots per engine, >= 3 x CPR; default 700), REPO (prime-rl checkout; its deps/ submodules
+# 128), MAMBA (DeltaNet state slots per engine, >= 3 x CPR; default 700), EPISODE_STEPS
+# (game steps per episode, default the game's), SEGMENTS (B:BS: episodes in segments of
+# at most B trace tokens joined by summaries of at most BS, with episode credit), REPO (prime-rl checkout; its deps/ submodules
 # must be checked out), VENV, SGLANG_VENV, OUT_ROOT.
 #
 # Recommended KV-Streams setting (Qwen3.5-4B, 2x A100-80GB inference): the
@@ -30,10 +32,11 @@ case $GAME in
   crafter)   BASE=configs/crafter/rl.toml GAME_STEPS=100 ;;
   *) echo "unknown game $GAME"; exit 2 ;;
 esac
+GAME_STEPS=${EPISODE_STEPS:-$GAME_STEPS} SEGMENTS=${SEGMENTS:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/kve_train}/${GAME}_${ARM}_c${CPR}_b${BATCH}/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/kve_train}/${GAME}_${ARM}_c${CPR}_b${BATCH}${SEGMENTS:+_seg-${SEGMENTS//:/-}}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 INFLIGHT=$((2 * CPR))
 
@@ -60,7 +63,12 @@ case $ARM in
   *) echo "unknown arm $ARM"; exit 2 ;;
 esac
 
-sed "s|^env.max_episode_steps = .*|env.max_episode_steps = $GAME_STEPS\nenv.episode_log = \"$OUT/episodes.jsonl\"|" \
+SEG=""
+if [ -n "$SEGMENTS" ]; then
+  IFS=: read -r SEG_B SEG_S <<< "$SEGMENTS"
+  SEG="\nenv.player.segments.budget_tokens = $SEG_B\nenv.player.segments.summary_tokens = $SEG_S\nalgo.credit = \"episode\""
+fi
+sed "s|^env.max_episode_steps = .*|env.max_episode_steps = $GAME_STEPS\nenv.episode_log = \"$OUT/episodes.jsonl\"$SEG|" \
   "$BASE" > "$OUT/rl.toml"
 
 # KV-Streams counters (evicting calls, evicted tokens, reopens) while the engine is up.
