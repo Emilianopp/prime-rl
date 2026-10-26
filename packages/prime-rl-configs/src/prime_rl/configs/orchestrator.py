@@ -271,6 +271,15 @@ class TrainSourceConfig(EnvConfig):
                 )
         return self
 
+    @model_validator(mode="after")
+    def validate_segments(self):
+        """An episode played in segments records its reward on its last segment, so
+        every segment needs the episode's credit."""
+        in_segments = any(agent.segments is not None for agent in agent_config_fields(self.env).values())
+        if in_segments and getattr(self.algo, "credit", None) != "episode":
+            raise ValueError(f"Source '{self.resolved_name}' runs agents in segments: set algo.credit = 'episode'")
+        return self
+
 
 class EvalSourceConfig(EnvConfig):
     sampling: vf.SamplingConfig = vf.SamplingConfig()

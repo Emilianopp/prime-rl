@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import Field, model_validator
+from verifiers.v1.configs.agent import agent_config_fields
 
 from prime_rl.configs.inference import InferenceConfig
 from prime_rl.configs.inference import WeightBroadcastConfig as InferenceWeightBroadcastConfig
@@ -466,6 +467,23 @@ class RLConfig(BaseConfig):
             )
         if self.rollout_transport is None:
             self.rollout_transport = self.trainer.rollout_transport
+        return self
+
+    @model_validator(mode="after")
+    def validate_segment_budgets(self):
+        """A segment is one training sample and one engine session: its token budget
+        must fit the trainer's sequence and the engine's context."""
+        limits = {"trainer.model.seq_len": self.trainer.model.seq_len}
+        if self.inference is not None and self.inference.vllm.max_model_len is not None:
+            limits["inference.vllm.max_model_len"] = self.inference.vllm.max_model_len
+        for source in self.orchestrator.train.source:
+            for name, agent in agent_config_fields(source.env).items():
+                for limit_name, limit in limits.items():
+                    if agent.segments is not None and agent.segments.budget_tokens > limit:
+                        raise ValueError(
+                            f"Source '{source.resolved_name}' agent '{name}': segments.budget_tokens "
+                            f"({agent.segments.budget_tokens}) exceeds {limit_name} ({limit})"
+                        )
         return self
 
     @model_validator(mode="after")
