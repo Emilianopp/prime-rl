@@ -19,7 +19,7 @@ export UV_CACHE_DIR=/tmp/uvcache_$USER UV_LINK_MODE=copy  # hard links on $SCRAT
 
 echo "== tools"; which gcc g++ || true; gcc --version | head -1
 [ -x "$TOOLS/bin/python" ] || ~/.local/bin/uv venv -q --seed --python 3.11 "$TOOLS"
-VIRTUAL_ENV=$TOOLS ~/.local/bin/uv pip install -q "cmake<4" patchelf numpy
+VIRTUAL_ENV=$TOOLS ~/.local/bin/uv pip install -q "cmake<4" patchelf numpy cffi
 export PATH=$TOOLS/bin:$PATH
 
 if [ ! -f "$SITE/mgba/__init__.py" ]; then
