@@ -1,4 +1,3 @@
-import inspect
 import logging
 import os
 import time
@@ -1061,8 +1060,9 @@ def forward(
     if routed_experts is not None:
         kwargs["routed_experts"] = routed_experts
     if block_mask is not None:
-        # Models without kv_death support take **kwargs and would drop the mask silently.
-        if "block_mask" not in inspect.signature(model.forward).parameters:
+        # Models without kv_death support take **kwargs and would drop the mask silently. A class
+        # attribute, not the forward's signature: FSDP's wrapper class hides the signature.
+        if not getattr(model, "supports_kv_death", False):
             raise NotImplementedError(f"{type(model).__name__} does not support kv_death (KV-Streams) masks")
         kwargs["block_mask"] = block_mask
 

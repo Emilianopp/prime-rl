@@ -317,6 +317,9 @@ class Qwen3_5VLMModel(nn.Module):
 
 
 class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel):
+    supports_kv_death = True
+    """`forward(block_mask=)` applies a KV-Streams kv_death mask on the full-attention layers."""
+
     def __init__(self, config) -> None:
         super().__init__(config)
         self.is_vlm = hasattr(config, "vision_config")
