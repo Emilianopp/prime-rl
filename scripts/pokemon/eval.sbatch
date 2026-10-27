@@ -2,6 +2,7 @@
 # Pokémon FireRed eval under KV-Streams: SGLang (4 DP engines) + `uv run eval` on one node.
 #   sbatch scripts/pokemon/eval.sbatch                      # r50-1 eviction, 64 episodes
 #   KEEP=full N=64 CONC=64 STEPS=1000 MODEL=Qwen/Qwen3.5-4B sbatch scripts/pokemon/eval.sbatch
+#   smoke on one GPU: N=8 CONC=8 STEPS=40 sbatch -p main --gres=gpu:a100l:1 -c 8 --mem=48G -t 2:00:00 scripts/pokemon/eval.sbatch
 # Needs: the FireRed ROM + start state (POKEMON_FIRERED_ROM / POKEMON_FIRERED_STATE) and the
 # emulator side from environments/pokemon_env/scripts/build_libmgba.sh: a Python 3.11 venv that runs
 # one game per episode in a worker process, and the mgba bindings + libmgba (MGBA_SITE).
@@ -42,6 +43,7 @@ if [ "$KEEP" = full ]; then
   EVICT=()
 fi
 [ -n "$MODEL" ] && sed -i "s|^model = .*|model = \"$MODEL\"|" "$OUT/inference.toml"
+sed -i "s|^data_parallel_size = .*|data_parallel_size = $(nvidia-smi -L | wc -l)|" "$OUT/inference.toml"  # one engine per GPU
 uv run inference @ "$OUT/inference.toml" --sglang.python "$SGL_PY" "${EVICT[@]}" > "$OUT/inference.log" 2>&1 &
 INFER=$!
 for _ in $(seq 120); do
