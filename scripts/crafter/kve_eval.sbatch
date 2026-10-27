@@ -34,14 +34,15 @@
 # slots per engine, default 400: ~3 per in-flight episode is enough), SEGMENTS (B:BS:
 # play each episode as segments of at most B trace tokens, each ending in a summary of
 # at most BS tokens that the next resumes from; see verifiers.v1.segments), EPISODE_STEPS
-# (game steps per episode instead of the world's 10,000), REPO (prime-rl checkout; deps/ submodules
+# (game steps per episode instead of the world's 10,000), SAMPLING (extra sampling keys,
+# e.g. "top_k=40 presence_penalty=2.0": Qwen3.5's non-thinking reasoning settings), REPO (prime-rl checkout; deps/ submodules
 # checked out), VENV, SGLANG_VENV, OUT_ROOT.
 set -u
-KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-} MIN_TOKENS=${MIN_TOKENS:-} FP32_STATE=${FP32_STATE:-} WEIGHTS=${WEIGHTS:-} SKIP=${SKIP:-0} CONC_MIN=${CONC_MIN:-} MAX_TOKENS=${MAX_TOKENS:-} MAMBA_SLOTS=${MAMBA_SLOTS:-} SEGMENTS=${SEGMENTS:-} EPISODE_STEPS=${EPISODE_STEPS:-}
+KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-} MIN_TOKENS=${MIN_TOKENS:-} FP32_STATE=${FP32_STATE:-} WEIGHTS=${WEIGHTS:-} SKIP=${SKIP:-0} CONC_MIN=${CONC_MIN:-} MAX_TOKENS=${MAX_TOKENS:-} MAMBA_SLOTS=${MAMBA_SLOTS:-} SEGMENTS=${SEGMENTS:-} EPISODE_STEPS=${EPISODE_STEPS:-} SAMPLING=${SAMPLING:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}${NOTEBOOK:+_notebook}${WORKSPACE:+_workspace-$WORKSPACE}${EXTRAS:+_extras}${EXTRAS:+${EXTRAS#1}}${REASONING:+_reasoning}${RELAXED:+_relaxed}${SILENT_MALFORMED:+_silent}${MIN_TOKENS:+_min$MIN_TOKENS}${FP32_STATE:+_fp32}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${EPISODE_STEPS:+_steps$EPISODE_STEPS}_skip$SKIP${WEIGHTS:+_w-$(basename "$(dirname "$(dirname "$WEIGHTS")")")}/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}${NOTEBOOK:+_notebook}${WORKSPACE:+_workspace-$WORKSPACE}${EXTRAS:+_extras}${EXTRAS:+${EXTRAS#1}}${REASONING:+_reasoning}${RELAXED:+_relaxed}${SILENT_MALFORMED:+_silent}${MIN_TOKENS:+_min$MIN_TOKENS}${FP32_STATE:+_fp32}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${EPISODE_STEPS:+_steps$EPISODE_STEPS}${SAMPLING:+_samp-${SAMPLING// /_}}_skip$SKIP${WEIGHTS:+_w-$(basename "$(dirname "$(dirname "$WEIGHTS")")")}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY
@@ -106,6 +107,7 @@ case $WORKSPACE in
   *) echo "unknown WORKSPACE $WORKSPACE"; exit 2 ;;
 esac
 sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"$DEATH|" configs/crafter/eval-kve.toml > "$OUT/eval.toml"
+for kv in $SAMPLING; do sed -i "s|^\[sampling\]$|[sampling]\n${kv%%=*} = ${kv#*=}|" "$OUT/eval.toml"; done
 [ -n "$EPISODE_STEPS" ] && sed -i "s/^env.max_episode_steps = .*/env.max_episode_steps = $EPISODE_STEPS/" "$OUT/eval.toml"
 [ -n "$MAX_TOKENS" ] && sed -i "s/^env.player.max_total_tokens = .*/env.player.max_total_tokens = $MAX_TOKENS/" "$OUT/eval.toml"
 [ -n "$MIN_TOKENS" ] && sed -i "s|^\[sampling\]$|[sampling]\nmin_tokens = $MIN_TOKENS|" "$OUT/eval.toml"
