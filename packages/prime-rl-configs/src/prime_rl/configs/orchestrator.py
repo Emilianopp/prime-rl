@@ -243,6 +243,13 @@ class TrainSourceConfig(EnvConfig):
     """User-authored task sampler and admission gates. The default cycles
     through the taskset and admits every finalized group."""
 
+    stream_segments: bool = False
+    """Ship each segment of an episode played in segments (`AgentConfig.segments`)
+    to training as soon as the next segment opens, as its own one-trace episode in
+    its own group, instead of with its episode — for episodes that may never end.
+    Each segment is then credited alone (its own rewards, 0 if the env records
+    none) and ages from its own start, not its episode's."""
+
     @model_validator(mode="after")
     def validate_policy_sampling(self):
         if self.algo.sampling.source != "policy":
@@ -274,9 +281,18 @@ class TrainSourceConfig(EnvConfig):
     @model_validator(mode="after")
     def validate_segments(self):
         """An episode played in segments records its reward on its last segment, so
-        every segment needs the episode's credit."""
+        every segment needs the episode's credit - unless segments ship on their own."""
         in_segments = any(agent.segments is not None for agent in agent_config_fields(self.env).values())
-        if in_segments and getattr(self.algo, "credit", None) != "episode":
+        episode_credit = getattr(self.algo, "credit", None) == "episode"
+        if self.stream_segments:
+            if not in_segments:
+                raise ValueError(f"Source '{self.resolved_name}': stream_segments needs an agent with segments")
+            if episode_credit or self.group_size != 1:
+                raise ValueError(
+                    f"Source '{self.resolved_name}': stream_segments ships one-trace groups; "
+                    "it needs group_size = 1 and per-trace credit"
+                )
+        elif in_segments and not episode_credit:
             raise ValueError(f"Source '{self.resolved_name}' runs agents in segments: set algo.credit = 'episode'")
         return self
 

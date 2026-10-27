@@ -1266,3 +1266,16 @@ def test_segments_require_episode_credit():
         TrainSourceConfig.model_validate(source)
     episode = TrainSourceConfig.model_validate({**source, "algo": {"type": "grpo", "credit": "episode"}})
     assert episode.algo.credit == "episode"
+
+
+def test_stream_segments_needs_segments_and_one_trace_groups():
+    from prime_rl.configs.orchestrator import TrainSourceConfig
+
+    segments = {"budget_tokens": 131072, "summary_tokens": 8192}
+    env = {"taskset": {"id": "reverse-text"}, "agent": {"segments": segments}}
+    with pytest.raises(ValidationError, match="needs an agent with segments"):
+        TrainSourceConfig.model_validate({"env": {"taskset": {"id": "reverse-text"}}, "stream_segments": True})
+    with pytest.raises(ValidationError, match="group_size = 1"):
+        TrainSourceConfig.model_validate({"env": env, "stream_segments": True, "group_size": 4})
+    source = TrainSourceConfig.model_validate({"env": env, "stream_segments": True, "algo": {"type": "debug"}})
+    assert source.stream_segments
