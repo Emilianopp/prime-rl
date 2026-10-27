@@ -1,0 +1,42 @@
+# Inference-only Pokémon FireRed eval under KV-Streams: the policy as it is, no trainer.
+# Episodes run until max_episode_steps model turns or the trace reaches 256k tokens
+# (a turn is ~1k tokens: observation + reply). Serve configs/pokemon/inference.toml first;
+# scripts/pokemon/eval.sbatch runs both. The taskset reads the ROM and start state from
+# $POKEMON_FIRERED_ROM / $POKEMON_FIRERED_STATE (see environments/pokemon_env/README.md).
+#
+#   uv run eval @ configs/pokemon/eval.toml
+
+model = "Qwen/Qwen3.5-9B"
+group_size = 1
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+# Any admin URL enables releasing each episode's session when it finishes.
+admin_base_url = ["http://localhost:8000/v1"]
+
+[renderer]  # token-in/out with the trace id as session id, as in training
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[concurrency]
+min_inflight = 64
+max_inflight = 64
+
+[select]
+limit = 64
+
+[sampling]
+max_completion_tokens = 1024
+temperature = 1.0
+
+[[source]]
+name = "pokemon"
+env.taskset.id = "pokemon-env"
+env.max_episode_steps = 1000
+env.player.max_total_tokens = 256000  # trace tokens, under max_model_len
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16

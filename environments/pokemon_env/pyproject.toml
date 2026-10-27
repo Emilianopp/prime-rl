@@ -1,0 +1,13 @@
+[project]
+name = "pokemon-env"
+version = "0.1.0"
+description = "pokemon-env — Pokémon FireRed as text (mGBA, no frames), one episode per rollout, reward = story milestones / all."
+requires-python = ">=3.11"
+dependencies = ["verifiers", "mgba==0.10.2", "numpy"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pokemon_env"]

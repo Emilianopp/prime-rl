@@ -1,0 +1,29 @@
+# Inference for the Pokémon FireRed eval: Qwen3.5-9B on SGLang under KV-Streams, one node,
+# 4 A100-80GB as 4 data-parallel engines. Paired with configs/pokemon/eval.toml;
+# scripts/pokemon/eval.sbatch runs both.
+#
+#   uv run inference @ configs/pokemon/inference.toml --sglang.python <SGLang fork venv>/bin/python
+
+backend = "sglang"
+
+[server]
+port = 8000
+
+[vllm]  # engine-agnostic fields, translated for SGLang
+model = "Qwen/Qwen3.5-9B"
+data_parallel_size = 4
+# KV-Streams survivors keep their positions, so a trace's positions grow with every
+# token it ever wrote: this bounds the whole episode, not the live context.
+max_model_len = 262144
+gpu_memory_utilization = 0.9
+
+[sglang]
+sessions = true  # KV-Streams: one streaming session per trace
+max_mamba_cache_size = 200  # DeltaNet state slots per engine: >= 3 x episodes per engine (64 eps / 4 engines)
+mamba_ssm_dtype = "bfloat16"  # half the fp32 state per slot (the KV cache is bf16 already)
+mamba_radix_cache_strategy = "no_buffer"  # hybrid models: required for eviction
+disable_overlap_schedule = true  # hybrid models: required for eviction
+
+[sglang.eviction]  # turn window r50-1: past 50 complete turns, evict the oldest
+max_turns = 50
+stride = 1
