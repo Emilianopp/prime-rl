@@ -1,22 +1,25 @@
 #!/bin/bash
-# Install the PyPI `mgba` 0.10.2 bindings into SITE (a directory to put on PYTHONPATH) and build
-# the libmgba they were compiled against next to them: the wheels ship _pylib without libmgba,
-# so `import mgba` fails until this has run. The extension is abi3, so SITE works for any
-# Python >= 3.11 (the wheels are only tagged cp310/cp311). Run on a compute node:
+# Set up the emulator side of pokemon-env:
+#   - EMU_VENV: a Python 3.11 venv with numpy (the interpreter that runs the games;
+#     mGBA's bindings hang on Python >= 3.12 — see pokemon_env/firered/worker.py)
+#   - SITE: the PyPI `mgba` 0.10.2 bindings plus the libmgba they were compiled against,
+#     built from source here (the wheels ship _pylib without libmgba)
+# Run on a compute node, then point the env at them:
 #
 #   sbatch -p main-cpu -c 8 --mem=16G -t 1:00:00 --wrap "bash environments/pokemon_env/scripts/build_libmgba.sh"
-#   PYTHONPATH=$SITE <your python> -c "import mgba.core"
+#   export POKEMON_EMULATOR_PYTHON=$EMU_VENV/bin/python POKEMON_EMULATOR_PYTHONPATH=$SITE
 set -euo pipefail
 
 ROOT=${ROOT:-$SCRATCH/pokemon}
 SITE=${SITE:-$ROOT/py-mgba}
-TOOLS=$ROOT/build-tools
+EMU_VENV=${EMU_VENV:-$ROOT/emulator-venv}
+TOOLS=$EMU_VENV
 SRC=$ROOT/mgba-src
 export UV_CACHE_DIR=/tmp/uvcache_$USER UV_LINK_MODE=copy  # hard links on $SCRATCH load as "Bad message"
 
 echo "== tools"; which gcc g++ || true; gcc --version | head -1
 [ -x "$TOOLS/bin/python" ] || ~/.local/bin/uv venv -q --seed --python 3.11 "$TOOLS"
-VIRTUAL_ENV=$TOOLS ~/.local/bin/uv pip install -q "cmake<4" patchelf
+VIRTUAL_ENV=$TOOLS ~/.local/bin/uv pip install -q "cmake<4" patchelf numpy
 export PATH=$TOOLS/bin:$PATH
 
 if [ ! -f "$SITE/mgba/__init__.py" ]; then
@@ -71,4 +74,5 @@ echo "== unresolved symbols (should be empty)"
 nm -D --undefined-only "$PYLIB" | awk '{print $2}' | sort -u > /tmp/need_$USER.txt
 nm -D --defined-only "$SITE/mgba/libmgba.so.0.10" | awk '{print $3}' | sort -u > /tmp/have_$USER.txt
 comm -23 /tmp/need_$USER.txt /tmp/have_$USER.txt | grep -vE '^(Py|_Py|_)|@' || true
-PYTHONPATH=$SITE ${PYTHON:-$TOOLS/bin/python} -c "import mgba.core; print('import mgba: ok')"
+PYTHONPATH=$SITE "$TOOLS/bin/python" -c "import mgba.core; print('import mgba: ok')"
+echo "export POKEMON_EMULATOR_PYTHON=$TOOLS/bin/python POKEMON_EMULATOR_PYTHONPATH=$SITE"

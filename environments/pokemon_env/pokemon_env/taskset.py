@@ -11,11 +11,12 @@ turn, until ``max_episode_steps`` model turns or the trace's token budget.
 Reward = story milestones reached / all milestones (towns, gyms, badges, …).
 
 Needs your own FireRed US v1.0 ROM (``rom_path``), a start state made once with
-``python -m pokemon_env.make_start_state``, and libmgba next to the ``mgba``
-bindings (``scripts/build_libmgba.sh``); see the README.
+``python -m pokemon_env.make_start_state``, and mGBA's Python bindings with
+libmgba (``scripts/build_libmgba.sh``). The bindings hang on Python >= 3.12, so
+under a newer env server set ``emulator_python`` to a 3.10/3.11 interpreter that
+can import them: each episode's game then runs in its own worker process.
 """
 
-import asyncio
 import json
 import os
 import re
@@ -110,36 +111,38 @@ class PokemonEnvConfig(vf.EnvConfig):
     """Model turns before the episode is cut off."""
     settle_max: int = Field(300, ge=10)
     """Idle frames to wait for the game to accept input after a button (5x while a cutscene runs)."""
+    emulator_python: str | None = Field(default_factory=lambda: os.environ.get("POKEMON_EMULATOR_PYTHON") or None)
+    """Run each episode's emulator in a worker process under this Python (one that can import
+    `mgba`, i.e. <= 3.11); unset = in this process. Defaults to $POKEMON_EMULATOR_PYTHON."""
+    emulator_pythonpath: str = Field(default_factory=lambda: os.environ.get("POKEMON_EMULATOR_PYTHONPATH", ""))
+    """Extra PYTHONPATH for the worker (e.g. the directory holding the mgba bindings)."""
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, reward, milestones) to this file."""
 
 
-def _new_game(info: dict, settle_max: int):
-    from pokemon_env.firered.emulator import FireRedGame
-
-    game = FireRedGame(
-        rom_path=info["rom_path"],
-        state_path=info["start_state"],
-        info_level=info["info_level"],
-        view=info["view"],
-        radius=info["radius"],
-        settle_max=settle_max,
-    )
-    return game, game.reset(idle_frames=info["idle_frames"])
-
-
 class PokemonEnv(vf.Env[PokemonEnvConfig]):
     async def run(self, task, agents):
-        from pokemon_env.firered.emulator import BUTTONS, MILESTONES
+        from pokemon_env.firered.emulator import BUTTONS, MILESTONES  # mGBA itself loads only in a game
+        from pokemon_env.firered.handle import open_game
 
         info = task.data.info
         max_steps = self.config.max_episode_steps
         started = time.time()
-        game, observation = await asyncio.to_thread(_new_game, info, self.config.settle_max)
+        game = open_game(self.config.emulator_python, self.config.emulator_pythonpath)
         steps, malformed, frames = 0, 0, 0
         pressed: Counter[str] = Counter()
         end = "terminated"  # the run stopped answering (a turn or token limit)
+        summary = {"milestones": {}, "party": []}
         try:
+            await game.start(
+                rom_path=info["rom_path"],
+                state_path=info["start_state"],
+                info_level=info["info_level"],
+                view=info["view"],
+                radius=info["radius"],
+                settle_max=self.config.settle_max,
+            )
+            observation = (await game.request(cmd="reset", idle_frames=info["idle_frames"]))["observation"]
             async with agents.player.interaction(task) as interaction:
                 segment = await interaction.turn(f"Turn 1 of {max_steps}.\n\n{observation}")
                 while not segment.terminated:
@@ -148,27 +151,27 @@ class PokemonEnv(vf.Env[PokemonEnvConfig]):
                         end = "max_steps"
                         break
                     buttons = _parse_buttons(segment.last_reply, BUTTONS, info["max_buttons"])
-                    loc_before, xy_before = game.state.location_name(), game.state.player_xy()
-                    observation, step = await asyncio.to_thread(game.step, buttons)
-                    frames += step.frames
+                    step = await game.request(cmd="step", buttons=buttons)
+                    frames += step["frames"]
                     pressed.update(buttons)
+                    coords_before, coords = tuple(step["coords_before"]), tuple(step["coords"])
                     if not buttons:
                         malformed += 1
                         feedback = "Your reply had no valid <buttons>...</buttons> line; nothing was pressed."
-                    elif step.location == loc_before:
-                        feedback = f"Pressed {' '.join(buttons)}; moved {xy_before} → {step.coords}."
+                    elif step["location"] == step["location_before"]:
+                        feedback = f"Pressed {' '.join(buttons)}; moved {coords_before} → {coords}."
                     else:
-                        feedback = f"Pressed {' '.join(buttons)}; entered {step.location} at {step.coords}."
-                    if step.new_milestones:
-                        feedback += f" New milestone: {', '.join(step.new_milestones)}."
+                        feedback = f"Pressed {' '.join(buttons)}; entered {step['location']} at {coords}."
+                    if step["new_milestones"]:
+                        feedback += f" New milestone: {', '.join(step['new_milestones'])}."
                     segment = await interaction.turn(
-                        f"Turn {steps + 1} of {max_steps}.\n=== LAST ACTION ===\n{feedback}\n\n{observation}"
+                        f"Turn {steps + 1} of {max_steps}.\n=== LAST ACTION ===\n{feedback}\n\n{step['observation']}"
                     )
+            summary = await game.request(cmd="summary")
         finally:
-            party = await asyncio.to_thread(game.state.party)  # before close: memory views die with the core
-            await asyncio.to_thread(game.close)
+            await game.close()
         trace = interaction.trace
-        reached = dict(game.milestones)
+        reached = summary["milestones"]
         reward = len(reached) / len(MILESTONES)
         trace.record_reward("milestones", reward, 1.0)
         trace.record_metrics(
@@ -196,7 +199,7 @@ class PokemonEnv(vf.Env[PokemonEnvConfig]):
                 "buttons": dict(pressed),
                 "emulated_frames": frames,
                 "trace_tokens": trace.num_total_tokens,
-                "party": party,
+                "party": summary["party"],
                 "task": task.data.name,
                 **outcome,
             }

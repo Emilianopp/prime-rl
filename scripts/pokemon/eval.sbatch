@@ -2,8 +2,9 @@
 # Pokémon FireRed eval under KV-Streams: SGLang (4 DP engines) + `uv run eval` on one node.
 #   sbatch scripts/pokemon/eval.sbatch                      # r50-1 eviction, 64 episodes
 #   KEEP=full N=64 CONC=64 STEPS=1000 MODEL=Qwen/Qwen3.5-4B sbatch scripts/pokemon/eval.sbatch
-# Needs: the FireRed ROM + start state (POKEMON_FIRERED_ROM / POKEMON_FIRERED_STATE) and the mgba
-# bindings with libmgba (MGBA_SITE, built by environments/pokemon_env/scripts/build_libmgba.sh).
+# Needs: the FireRed ROM + start state (POKEMON_FIRERED_ROM / POKEMON_FIRERED_STATE) and the
+# emulator side from environments/pokemon_env/scripts/build_libmgba.sh: a Python 3.11 venv that runs
+# one game per episode in a worker process, and the mgba bindings + libmgba (MGBA_SITE).
 #SBATCH -J pokemon-eval
 #SBATCH -p short-unkillable
 #SBATCH --gres=gpu:a100l:4
@@ -18,16 +19,18 @@ REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$SCRATCH/kv-race/prime-rl-kvs/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
 MGBA_SITE=${MGBA_SITE:-$SCRATCH/pokemon/py-mgba}
+export POKEMON_EMULATOR_PYTHON=${POKEMON_EMULATOR_PYTHON:-$SCRATCH/pokemon/emulator-venv/bin/python}
+export POKEMON_EMULATOR_PYTHONPATH=$MGBA_SITE
 export POKEMON_FIRERED_ROM=${POKEMON_FIRERED_ROM:-$SCRATCH/pokemon/continual-harness/FireRed-GBAdvance/rom.gba}
 export POKEMON_FIRERED_STATE=${POKEMON_FIRERED_STATE:-$SCRATCH/pokemon/continual-harness/FireRed-GBAdvance/start.state}
 OUT=${OUT_ROOT:-$SCRATCH/kv-race/pokemon_eval}/r${KEEP}-1_n${N}_c${CONC}_s${STEPS}${MODEL:+_$(basename "$MODEL")}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY
 export UV_PROJECT_ENVIRONMENT=$VENV
-export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/pokemon_env:$REPO/deps/verifiers:$REPO/deps/renderers:$MGBA_SITE${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/pokemon_env:$REPO/deps/verifiers:$REPO/deps/renderers${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
 echo "[pokemon eval r$KEEP-1 n$N c$CONC steps$STEPS model=${MODEL:-config}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
-"$VENV/bin/python" -c "import mgba.core" || { echo "mgba not importable from $MGBA_SITE"; exit 1; }
+PYTHONPATH=$MGBA_SITE "$POKEMON_EMULATOR_PYTHON" -c "import mgba.core" || { echo "emulator python cannot import mgba"; exit 1; }
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
