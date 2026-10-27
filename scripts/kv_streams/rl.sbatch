@@ -22,11 +22,19 @@ SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
 OUT=${OUT_ROOT:-$SCRATCH/kv-race/rl}/$(basename "$CONFIG" .toml)/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
+echo "[rl $CONFIG steps=${STEPS:-config}] $(git -C "$REPO" log --oneline -1)" | tee "$OUT/cell.txt"
+
+# Run from node-local copies: one env worker imports for ~50 s off network scratch
+# and the elastic pool spawns ~30 at once (minutes before the first episode).
+rsync -a --exclude .git --exclude .venv --exclude outputs "$REPO/" "$SLURM_TMPDIR/repo/"
+rsync -a "$VENV/" "$SLURM_TMPDIR/prl-venv/"
+find "$SLURM_TMPDIR/prl-venv/bin" -maxdepth 1 -type f -exec sed -i "1s|^#!$VENV/|#!$SLURM_TMPDIR/prl-venv/|" {} +
+REPO=$SLURM_TMPDIR/repo VENV=$SLURM_TMPDIR/prl-venv
+
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=${WANDB_MODE:-offline} TOKENIZERS_PARALLELISM=false
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src$(for e in $ENVS; do printf ":%s" "$REPO/environments/$e"; done):$REPO/deps/verifiers:$REPO/deps/renderers${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[rl $CONFIG steps=${STEPS:-config}] $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
