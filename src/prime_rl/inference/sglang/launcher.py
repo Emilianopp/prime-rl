@@ -11,12 +11,26 @@ from prime_rl.configs.inference import InferenceConfig
 SERVER_SCRIPT = Path(__file__).with_name("server.py")
 
 # [inference.sglang] fields prime-rl reads itself; everything else is a ServerArgs field.
-PRIME_RL_FIELDS = {"python", "sessions", "session_timeout", "eviction"}
+PRIME_RL_FIELDS = {"python", "session_timeout", "eviction"}
+
+# KV-Streams on a hybrid model evicts attention KV only and keeps each session's live
+# recurrent state, which needs SGLang's no_buffer state cache without overlap scheduling.
+HYBRID_EVICTION_ARGS = {"mamba_radix_cache_strategy": "no_buffer", "disable_overlap_schedule": True}
 
 
-def sglang_server_args(config: InferenceConfig) -> dict[str, Any]:
+def is_hybrid(model: str) -> bool:
+    """Whether ``model`` interleaves linear-attention (recurrent-state) layers, as Qwen3.5 does."""
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(model)
+    config = getattr(config, "text_config", config)
+    return "linear_attention" in (getattr(config, "layer_types", None) or [])
+
+
+def sglang_server_args(config: InferenceConfig, hybrid: bool = False) -> dict[str, Any]:
     """Translate the engine-agnostic ``[inference.vllm]`` fields to SGLang ``ServerArgs``
-    names, then apply ``[inference.sglang]`` verbatim (it wins on conflicts)."""
+    names, then apply ``[inference.sglang]`` verbatim (it wins on conflicts). ``hybrid``:
+    the model has recurrent-state layers (see ``HYBRID_EVICTION_ARGS``)."""
     vllm = config.vllm
     args: dict[str, Any] = {
         "model_path": vllm.model,
@@ -39,11 +53,12 @@ def sglang_server_args(config: InferenceConfig) -> dict[str, Any]:
         args["disable_radix_cache"] = True
     if config.enable_fp32_lm_head:
         args["enable_fp32_lm_head"] = True
-    if config.sglang.sessions:
-        args["enable_streaming_session"] = True
     if config.sglang.eviction is not None:
+        args["enable_streaming_session"] = True
         args["enable_kv_eviction"] = True
         args["page_size"] = 1
+        if hybrid:
+            args.update(HYBRID_EVICTION_ARGS)
     args.update(config.sglang.model_dump(exclude=PRIME_RL_FIELDS))
     return args
 
@@ -69,7 +84,9 @@ def server(config: InferenceConfig) -> None:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     args_path = config.output_dir / "sglang_server_args.json"
     launch = {
-        "server_args": sglang_server_args(config),
+        "server_args": sglang_server_args(
+            config, hybrid=config.sglang.eviction is not None and is_hybrid(config.vllm.model)
+        ),
         "sessions": config.sglang.sessions,
         "session_timeout": config.sglang.session_timeout,
         "eviction": eviction_launch_args(config),

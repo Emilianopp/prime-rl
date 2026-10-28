@@ -1255,3 +1255,43 @@ def test_custom_renderer_rejects_unknown_fields(tmp_path, custom_renderer_import
 
     with pytest.raises(ConfigFileError, match="depth"):
         cli(SFTConfig, args=["@", str(config_file)])
+
+
+def _sglang_rl(**overrides) -> dict:
+    return {
+        "trainer": {},
+        "orchestrator": {},
+        "inference": {"backend": "sglang"},
+        "weight_broadcast": {"type": "filesystem"},
+        **overrides,
+    }
+
+
+def test_compaction_sets_the_engine_eviction_schedule():
+    config = RLConfig.model_validate(_sglang_rl(compaction={"max_turns": 12, "stride": 4}))
+    eviction = config.inference.sglang.eviction
+    assert (eviction.max_turns, eviction.stride) == (12, 4)
+    assert config.inference.sglang.sessions
+    # The resolved config re-validates to the same schedule.
+    again = RLConfig.model_validate(config.model_dump())
+    assert again.inference.sglang.eviction == eviction
+
+
+def test_full_context_runs_without_sessions():
+    config = RLConfig.model_validate(_sglang_rl())
+    assert config.inference.sglang.eviction is None and not config.inference.sglang.sessions
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"compaction": {"strategy": "summary"}}, "not built yet"),
+        ({"compaction": {"kv_streams": False}}, "not built yet"),
+        ({"compaction": {"max_turns": 4, "stride": 8}}, "must not exceed"),
+        ({"compaction": {}, "inference": {}}, "needs inference.backend = 'sglang'"),
+        ({"inference": {"backend": "sglang", "sglang": {"eviction": {"max_turns": 8}}}}, "instead of"),
+    ],
+)
+def test_compaction_refuses_what_it_cannot_run(overrides, match):
+    with pytest.raises(ValidationError, match=match):
+        RLConfig.model_validate(_sglang_rl(**overrides))

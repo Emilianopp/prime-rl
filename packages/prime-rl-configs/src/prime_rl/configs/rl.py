@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import Field, model_validator
 
-from prime_rl.configs.inference import InferenceConfig
+from prime_rl.configs.inference import InferenceConfig, SglangEvictionConfig
 from prime_rl.configs.inference import WeightBroadcastConfig as InferenceWeightBroadcastConfig
 from prime_rl.configs.monitors import FileMonitorConfig, PrimeTrainMonitorConfig
 from prime_rl.configs.orchestrator import OrchestratorConfig
@@ -159,6 +159,44 @@ DeploymentConfig: TypeAlias = Annotated[
 ]
 
 
+class CompactionConfig(BaseConfig):
+    """How earlier turns leave the model's context during an episode. Without this
+    section the run is full context: every turn sees the whole history, and the
+    inference engine's prefix cache spares re-computing it."""
+
+    strategy: Literal["sliding_window", "summary"] = "sliding_window"
+    """``sliding_window``: the oldest turns leave the context. ``summary``: a summary
+    the model writes replaces them (not built yet; whole-context resets with a
+    summary are continuous episodes)."""
+
+    kv_streams: bool = True
+    """Compact in the engine's KV (KV-Streams): each trace runs in an SGLang streaming
+    session, compacted turns are evicted from it, and the turns that stay keep their
+    positions and are never re-computed; the trainer masks the evicted keys per token.
+    ``false``: re-build the prompt without the compacted turns and re-prefill it (not
+    built yet)."""
+
+    max_turns: int = Field(8, ge=1)
+    """Turns the context holds before the first compaction."""
+
+    stride: int = Field(1, ge=1)
+    """Turns compacted at a time, every ``stride`` turns once ``max_turns`` is reached:
+    1 slides turn by turn, ``max_turns`` drops the whole window at once."""
+
+    message_end_token: str = "<|im_end|>"
+    """The token that ends a chat message in the model's template (turn boundaries)."""
+
+    @model_validator(mode="after")
+    def validate_built(self):
+        if self.strategy != "sliding_window":
+            raise ValueError(f"compaction.strategy = {self.strategy!r} is not built yet")
+        if not self.kv_streams:
+            raise ValueError("compaction.kv_streams = false (re-prefill) is not built yet")
+        if self.stride > self.max_turns:
+            raise ValueError("compaction.stride must not exceed compaction.max_turns")
+        return self
+
+
 class RLConfig(BaseConfig):
     trainer: TrainerConfig
 
@@ -216,6 +254,9 @@ class RLConfig(BaseConfig):
 
     max_steps: int | None = None
     """Shared maximum training steps. If None, falls back to the sub-config ``max_steps``."""
+
+    compaction: CompactionConfig | None = None
+    """How earlier turns leave the model's context (KV-Streams). None: full context."""
 
     seq_len: int | None = None
     """Shared sequence length. Propagates to ``trainer.model.seq_len`` and ``orchestrator.seq_len`` only when those values were not explicitly set; explicit per-component values always win."""
@@ -770,6 +811,27 @@ class RLConfig(BaseConfig):
             # the engine directly; multi-node runs get ADMIN_URLS from the sbatch.
             host = self.inference.server.host or "localhost"
             client.admin_base_url = [f"http://{host}:{self.inference.backend_port}/v1"]
+        return self
+
+    @model_validator(mode="after")
+    def auto_setup_compaction(self):
+        """KV-Streams compaction is the engine's eviction schedule; the trainer follows
+        it from the rollouts' per-token ``kv_death``. Sessions and eviction are set only
+        here, so a run is either full context or compacted, never in between."""
+        compaction = self.compaction
+        eviction = None
+        if compaction is not None:
+            if self.inference is None or self.inference.backend != "sglang":
+                raise ValueError("compaction.kv_streams needs inference.backend = 'sglang'")
+            eviction = SglangEvictionConfig(
+                max_turns=compaction.max_turns,
+                stride=compaction.stride,
+                message_end_token=compaction.message_end_token,
+            )
+        if self.inference is not None:
+            if self.inference.sglang.eviction not in (None, eviction):
+                raise ValueError("set [compaction] instead of inference.sglang.eviction")
+            self.inference.sglang.eviction = eviction
         return self
 
     @model_validator(mode="after")
