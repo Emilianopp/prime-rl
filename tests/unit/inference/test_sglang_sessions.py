@@ -3,6 +3,8 @@ import re
 
 import pytest
 
+from prime_rl.inference.sglang.eviction import occurrences
+from prime_rl.inference.sglang.model_evictions import qwen35
 from prime_rl.inference.sglang.server import (
     GenerateRequestError,
     SessionDesyncError,
@@ -359,6 +361,76 @@ def test_evicting_calls_report_chronological_spans_and_the_first_unseeing_positi
         {"spans": [[3, 8]], "at": 13},
         {"spans": [[8, 14]], "at": 19},
     ]
+
+
+OPEN, CLOSE, NL, TOOL = 60, 61, 62, 66  # <think>, </think>, its blank line, <tool_response>
+THINK = [OPEN, NL, CLOSE, NL]  # the empty think block the generation prompt prefills
+THINK_GEN = [4, *THINK]
+TOOL_RESULT = [3, TOOL, E]  # rendered as a user message that is not a query
+
+
+def _qwen():
+    return qwen35.Plan(empty_think_ids=THINK, user_ids=USER[:1], tool_response_ids=[TOOL])
+
+
+def _think_run(max_turns: int, calls: int, user=USER, think=THINK):
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        window = TurnWindow(max_turns=max_turns, stride=1, message_end_id=E)
+        table = SessionTable(engine, timeout=60, eviction=window, plans=[_qwen()])
+        prompt, choices = SYSTEM + USER + [4, *think], []
+        for _ in range(calls):
+            response = await generate_sglang(engine, prompt, {}, sessions=table, trace_id="t")
+            choices.append(response["choices"][0])
+            prompt = prompt + [90, E] + BRIDGE + user + [4, *think]
+        return engine, choices
+
+    return run(scenario())
+
+
+def test_an_earlier_turns_think_block_dies_when_the_next_turn_arrives():
+    engine, choices = _think_run(max_turns=100, calls=3)
+    # Turn 1's block is chronological [6, 10), turn 2's [16, 20); each dies at the next
+    # call, while the call's own block (in its new tail) stays visible.
+    assert [c.get("eviction") for c in choices] == [
+        None,
+        {"spans": [[6, 10]], "at": 11},
+        {"spans": [[16, 20]], "at": 21},
+    ]
+    # In survivor coordinates turn 2's block sits 4 tokens lower: turn 1's block is gone.
+    assert [c["evict_spans"] for c in engine.evictions] == [[], [[6, 10]], [[12, 16]]]
+
+
+def test_model_eviction_and_retired_turns_evict_together():
+    engine, choices = _think_run(max_turns=2, calls=4)
+    # Call 2 retires turn 1 ([3, 12), around its already-dead block) and turn 2's block;
+    # call 3 retires turn 2 ([12, 22), around its block) and turn 3's block [26, 30).
+    assert [c.get("eviction") for c in choices][2:] == [
+        {"spans": [[3, 6], [10, 12], [16, 20]], "at": 21},
+        {"spans": [[12, 16], [20, 22], [26, 30]], "at": 31},
+    ]
+    # The parts of a retired turn are one survivor span; the span beyond it shifts down.
+    assert [c["evict_spans"] for c in engine.evictions][2:] == [[[3, 8], [12, 16]], [[3, 9], [13, 17]]]
+
+
+def test_qwen_keeps_reasoning_and_evicts_only_empty_think_blocks():
+    # Thinking on: each turn's block holds reasoning, which stays attended.
+    _, choices = _think_run(max_turns=100, calls=3, think=[OPEN, 63, 64, CLOSE, NL])
+    assert [c.get("eviction") for c in choices] == [None, None, None]
+
+
+def test_occurrences_find_whole_markers_and_rescan_one_cut_off():
+    tokens = SYSTEM + THINK + [90, E, OPEN, 63, CLOSE, NL] + THINK
+    assert occurrences(tokens, 3, len(tokens), tuple(THINK)) == ([[3, 7], [13, 17]], len(tokens))
+    # A marker straddling the end of what the engine holds is looked for again next call.
+    assert occurrences(tokens, 3, 15, tuple(THINK)) == ([[3, 7]], 13)
+    assert occurrences(tokens, 7, 9, tuple(THINK)) == ([], 9)
+
+
+def test_qwen_reasoning_survives_tool_results_until_the_next_user_query():
+    # Every turn answers a tool result: no user query after turn 1, so nothing dies.
+    _, choices = _think_run(max_turns=100, calls=3, user=TOOL_RESULT)
+    assert [c.get("eviction") for c in choices] == [None, None, None]
 
 
 def test_reopening_an_evicting_trace_is_counted():
