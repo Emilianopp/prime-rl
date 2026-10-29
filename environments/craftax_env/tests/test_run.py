@@ -20,7 +20,8 @@ REPLIES = [
 
 
 class ScriptedInteraction:
-    def __init__(self):
+    def __init__(self, turns=None):
+        self.turns = turns  # stop answering after this many replies (the player's turn limit)
         self.received = []
         self.trace = SimpleNamespace(
             rewards={}, metrics={}, info={}, num_total_tokens=0,
@@ -31,13 +32,13 @@ class ScriptedInteraction:
     async def turn(self, message=None):
         self.received.append(message)
         reply = REPLIES[(len(self.received) - 1) % len(REPLIES)]
-        return SimpleNamespace(last_reply=reply, terminated=False)
+        return SimpleNamespace(last_reply=reply, terminated=self.turns is not None and len(self.received) > self.turns)
 
 
-def play(tmp_path, **env_config):
-    task = next(iter(CraftaxTaskset(CraftaxConfig(num_examples=1, max_output_tokens=2048)).load()))
+def play(tmp_path, turns=None, respawn=False, **env_config):
+    task = next(iter(CraftaxTaskset(CraftaxConfig(num_examples=1, max_output_tokens=2048, respawn=respawn)).load()))
     assert task.data.prompt is None  # the env opens the episode
-    interaction = ScriptedInteraction()
+    interaction = ScriptedInteraction(turns)
 
     @asynccontextmanager
     async def open_interaction(_task):
@@ -86,3 +87,40 @@ def test_run_plays_an_episode(tmp_path, forfeit_mode):
     played = sum(line["actions"].values())
     assert played == (line["turns"] if forfeit_mode == "noop" else line["turns"] - sum(line["forfeits"].values()))
     assert line["end"] >= line["start"]
+
+
+def test_respawn_prompt():
+    system = glyph.system_prompt(True, 2048, "freeze", respawn=True)
+    assert "Death does not end the episode" in system and "The episode terminates on death" not in system
+
+
+@pytest.mark.parametrize("death_inventory", ["drop_all", "keep"])
+def test_respawn_continues_the_game(tmp_path, monkeypatch, death_inventory):
+    step, calls = glyph.CraftaxGame.step, []
+
+    def lethal_step(game, action):
+        result = step(game, action)
+        calls.append(action)
+        if len(calls) in (3, 6):  # die twice
+            game.state = game.state.replace(
+                player_health=game.state.player_health * 0,
+                player_level=game.state.player_level * 0 + 1,  # killed underground
+                inventory=game.state.inventory.replace(wood=game.state.inventory.wood * 0 + 5),
+            )
+            return glyph.Step(result.reward, True, result.unlocked, 0)
+        return result
+
+    monkeypatch.setattr(glyph.CraftaxGame, "step", lethal_step)
+    task, interaction, line = play(
+        tmp_path, turns=10, respawn=True, max_episode_steps=0, on_death="respawn",
+        death_inventory=death_inventory, death_penalty=0.01, reward="achievements",
+    )
+    assert line["ended_by"] == "terminated"  # the player stopped answering, not a death
+    assert [d["turn"] for d in line["deaths"]] == [5, 10]  # the 3rd and 6th played actions; forfeits count as turns
+    assert all(d["floor"] == 1 for d in line["deaths"])
+    after = interaction.received[5]  # the observation after the first death
+    assert "You died (death 1, on floor 1" in after and "You respawned on the Overworld" in after
+    assert "Floor: 0 (Overworld)" in after and "HP: 9/9" in after
+    assert ("Wood:0" in after) == (death_inventory == "drop_all")
+    assert "Step: 5    Upstream timestep" in after  # no turn limit in the HUD
+    assert interaction.trace.rewards["craftax_achievements"] == pytest.approx(line["achievement_score"] / 226 - 0.02)
