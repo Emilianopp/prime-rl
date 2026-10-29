@@ -7,14 +7,14 @@
 #SBATCH --time=2:59:00
 #SBATCH --output=%x-%j.out
 # Inference-only eval of an env under KV-Streams: SGLang (4 data-parallel engines,
-# sessions) serving configs/$ENV/inference.toml + `uv run eval` of
+# sessions when evicting) serving configs/$ENV/inference.toml + `uv run eval` of
 # configs/$ENV/eval.toml with the renderer client, then the episode summary.
 #
 #   ENV=alfworld KEEP=full sbatch eval.sbatch
 #
 # Env: ENV (a configs/ dir with inference.toml + eval.toml whose env writes an
 # episode_log: alfworld, textworld), KEEP (turn window; default: the inference
-# config's; "full": no eviction), DATA (the taskset's dataset_path), SPLIT (the
+# config's; "full": no eviction, no sessions), DATA (the taskset's dataset_path), SPLIT (the
 # taskset's split; default: the eval config's), N (episodes, default all), CONC
 # (in-flight episodes, default 64), SET ("key = value" overrides of the eval
 # source, separated by ";", e.g. "env.max_episode_steps = 400"), REPO (prime-rl checkout, deps/ submodules

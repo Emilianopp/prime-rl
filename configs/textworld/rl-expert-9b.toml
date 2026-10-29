@@ -5,8 +5,12 @@
 #
 #   rl @ configs/textworld/rl-expert-9b.toml --inference.sglang.python <SGLang fork venv>/bin/python
 #
-# KV-Streams arm later: add [inference.sglang.eviction] (max_turns, stride) and the
-# two hybrid-model flags marked below; everything else stays the same.
+# How the history is managed is two optional blocks; this file sets neither, which is
+# full context: plain SGLang (no sessions), each turn's history from the prefix cache.
+# - [compaction] (commented below): KV-Streams eviction of the oldest turns. It turns
+#   on sessions and the hybrid-model flags itself; everything else stays the same.
+# - segments (commented in the train source): continuous episodes, a chain of
+#   segments joined by the model's own summaries, each one training sample.
 
 max_steps = 200
 seq_len = 65536  # whole episode in one sample; matches the trace cap below
@@ -62,6 +66,13 @@ env.player.harness.id = "inline-chat"
 env.player.runtime.type = "subprocess"
 serve.pool.type = "elastic"
 serve.pool.multiplex = 16
+# Continuous episodes (per agent for now; a top-level block is designed, not built).
+# Each segment adds at most new_tokens (its system prompt and inherited summary are not
+# counted), then hands over a summary of at most summary_tokens. seq_len must hold
+# new_tokens + summary_tokens + the system prompt.
+# env.player.segments.new_tokens = 32768
+# env.player.segments.summary_tokens = 4096
+# algo.credit = "episode"  # the episode's reward credits all its segments
 
 [orchestrator.eval]  # the 256 held-out expert games, every 10 steps
 interval = 10
@@ -84,12 +95,16 @@ max_model_len = 69632  # trace cap + one reply
 gpu_memory_utilization = 0.9
 
 [inference.sglang]
-sessions = true  # one streaming session per trace (the KV-Streams path, no eviction)
 max_mamba_cache_size = 600  # DeltaNet state slots per engine (~25 MB each at bf16 for 9B)
 mamba_ssm_dtype = "bfloat16"
-# For the KV-Streams arm add:
-# mamba_radix_cache_strategy = "no_buffer"
-# disable_overlap_schedule = true
+
+# The KV-Streams arm: uncomment. Sessions, page_size 1 and Qwen3.5's hybrid-model flags
+# follow from it; Qwen3.5's empty-think-block eviction too, once Emilianopp/prime-rl#20 lands.
+# [compaction]
+# strategy = "sliding_window"  # "summary": not built yet
+# kv_streams = true            # false (rebuild the prompt, re-prefill): not built yet
+# max_turns = 12               # complete turns held before the first eviction
+# stride = 1                   # turns evicted at a time (max_turns: drop the window at once)
 
 [monitors.wandb]
 project = "textworld-eviction-race"
