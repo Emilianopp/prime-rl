@@ -1,0 +1,21 @@
+[project]
+name = "craftax-env"
+version = "0.1.0"
+description = "craftax-env — GlyphBench's full Craftax (glyph observations) as text, one episode per rollout, reward = Craftax return / 226."
+requires-python = ">=3.11"
+dependencies = [
+    "verifiers",
+    "jax[cpu]",
+    # The Craftax fork GlyphBench pins: upstream Craftax plus its Unicode glyph renderer.
+    "craftax @ git+https://github.com/roger-creus/Craftax.git@ef0cd470f64605832089c921ec7a737dd38a23b8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["craftax_env"]
