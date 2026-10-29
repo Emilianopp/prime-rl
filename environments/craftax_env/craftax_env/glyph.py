@@ -35,6 +35,8 @@ MAX_RETURN = 226.0
 """Sum of Craftax's per-achievement rewards (1/3/5/8 by tier, 67 achievements):
 GlyphBench's "% of max reward" is 100 * return / 226."""
 FAST_FORWARD_MAX_TICKS = 10000
+ENDLESS_TIMESTEPS = 1_000_000_000
+"""The game's own time limit when a game has no turn limit (int32, out of reach)."""
 FLOOR_NAMES = (
     "Overworld",
     "Dungeon",
@@ -68,6 +70,17 @@ def _load(max_timesteps: int) -> tuple[Any, Any, Any]:
                 achievements=tuple(Achievement),
                 values=api.action_values(),
                 params={},
+            )
+            from craftax.craftax import constants as C
+            from craftax.craftax.util import game_logic_utils as U
+            from craftax.craftax.world_gen.world_gen import get_new_empty_inventory
+
+            blocked = [C.BlockType.WATER.value, C.BlockType.LAVA.value]
+            _runtime.update(
+                weights=np.asarray(C.ACHIEVEMENT_REWARD_MAP, dtype=float),
+                not_walkable=np.asarray(C.SOLID_BLOCK_MAPPING) | np.isin(np.arange(len(C.BlockType)), blocked),
+                max_vitals=U,
+                empty_inventory=get_new_empty_inventory,
             )
         params = _runtime["params"]
         if max_timesteps not in params:
@@ -204,7 +217,19 @@ _FORFEIT = {
 }
 
 
-def system_prompt(reasoning: bool, max_output_tokens: int | None, forfeit_mode: str) -> str:
+_TERMINATION = (
+    "The episode terminates on death, on defeating "
+    "the boss, or at the turn limit."
+)
+_CONTINUOUS = (
+    "Death does not end the episode: you respawn on the Overworld near the "
+    "spawn point with full health, food, drink, energy and mana, and unlocked "
+    "achievements stay unlocked. There is no turn limit; the episode ends on "
+    "defeating the boss or when the session's time runs out."
+)
+
+
+def system_prompt(reasoning: bool, max_output_tokens: int | None, forfeit_mode: str, respawn: bool = False) -> str:
     forfeit = _FORFEIT[forfeit_mode]
     if reasoning:
         if max_output_tokens is None:
@@ -231,7 +256,8 @@ def system_prompt(reasoning: bool, max_output_tokens: int | None, forfeit_mode: 
                 f"tag, the action is discarded and the turn is forfeited ({forfeit}). "
             )
         fmt = _ACTION_ONLY_FORMAT.format(valid=", ".join(ACTION_NAMES), budget=budget)
-    return "\n\n---\n".join([GAME_PROMPT, OBSERVATION_CONVENTIONS, fmt])
+    game = GAME_PROMPT.replace(_TERMINATION, _CONTINUOUS) if respawn else GAME_PROMPT
+    return "\n\n---\n".join([game, OBSERVATION_CONVENTIONS, fmt])
 
 
 # --- action parsing (GlyphBench's parse_action_response + ActionSpec.index_of) ---
@@ -284,11 +310,12 @@ class Step:
 class CraftaxGame:
     """Full Craftax from the pinned fork, with GlyphBench's HUD, message and
     sleep/rest fast-forward. ``turn`` counts model turns (forfeits included);
-    the game ends at ``max_turns``, on death or on the boss's defeat."""
+    the game ends at ``max_turns`` (None: never), on death or on the boss's defeat,
+    unless a death is undone with ``respawn``."""
 
-    def __init__(self, seed: int, max_turns: int = 10000) -> None:
-        self.max_turns = int(max_turns)
-        self._env, self._params, self._rt = _load(self.max_turns)
+    def __init__(self, seed: int, max_turns: int | None = 10000) -> None:
+        self.max_turns = int(max_turns) if max_turns else None
+        self._env, self._params, self._rt = _load(self.max_turns or ENDLESS_TIMESTEPS)
         jax = self._rt["jax"]
         self._key = jax.random.PRNGKey(int(seed))
         self._key, reset_key = jax.random.split(self._key)
@@ -296,6 +323,7 @@ class CraftaxGame:
         self.turn = 0
         self.message = ""
         self.achievements = self._achievement_names()
+        self.spawn = self.position
 
     # state accessors
     @property
@@ -315,6 +343,74 @@ class CraftaxGame:
     def position(self) -> tuple[int, int]:
         r, c = np.asarray(self.state.player_position).tolist()
         return int(r), int(c)
+
+    @property
+    def out_of_turns(self) -> bool:
+        return self.max_turns is not None and max(self.turn, self.timestep) >= self.max_turns
+
+    @property
+    def achievement_score(self) -> float:
+        """Craftax's reward for the unlocked achievements alone (no health term), out of 226."""
+        got = np.asarray(self.state.achievements, dtype=bool)
+        return float(self._rt["weights"][got].sum())
+
+    def respawn(self, death_inventory: str) -> tuple[int, int]:
+        """Undo a death: back on the Overworld at the free cell nearest the world's spawn
+        point, vitals at their maximum, sleep/rest and the vitals' counters reset, the
+        inventory per ``death_inventory`` ("drop_all": everything, enchantments included;
+        "drop_materials": materials and consumables, tools and armour kept; "keep").
+        Achievements, XP, attributes, learned spells and the world itself stay."""
+        jnp = self._rt["jax"].numpy
+        st, U = self.state, self._rt["max_vitals"]
+        at = self._free_cell(self.spawn)
+        inventory, extra = st.inventory, {}
+        if death_inventory == "drop_all":
+            inventory = self._rt["empty_inventory"]()
+            extra = {
+                "sword_enchantment": jnp.zeros_like(st.sword_enchantment),
+                "bow_enchantment": jnp.zeros_like(st.bow_enchantment),
+                "armour_enchantments": jnp.zeros_like(st.armour_enchantments),
+            }
+        elif death_inventory == "drop_materials":
+            zero = {k: jnp.zeros_like(getattr(st.inventory, k)) for k in (
+                "wood", "stone", "coal", "iron", "diamond", "sapling", "ruby", "sapphire",
+                "arrows", "torches", "books", "potions",
+            )}
+            inventory = st.inventory.replace(**zero)
+        self.state = st.replace(
+            inventory=inventory,
+            player_level=jnp.asarray(0, dtype=jnp.int32),
+            player_position=jnp.asarray(at, dtype=st.player_position.dtype),
+            player_health=jnp.asarray(U.get_max_health(st), dtype=jnp.float32),
+            player_food=jnp.asarray(U.get_max_food(st), dtype=jnp.int32),
+            player_drink=jnp.asarray(U.get_max_drink(st), dtype=jnp.int32),
+            player_energy=jnp.asarray(U.get_max_energy(st), dtype=jnp.int32),
+            player_mana=jnp.asarray(U.get_max_mana(st), dtype=jnp.int32),
+            player_recover=jnp.asarray(0.0, dtype=jnp.float32),
+            player_hunger=jnp.asarray(0.0, dtype=jnp.float32),
+            player_thirst=jnp.asarray(0.0, dtype=jnp.float32),
+            player_fatigue=jnp.asarray(0.0, dtype=jnp.float32),
+            player_recover_mana=jnp.asarray(0.0, dtype=jnp.float32),
+            is_sleeping=False,
+            is_resting=False,
+            **extra,
+        )
+        return at
+
+    def _free_cell(self, target: tuple[int, int], radius: int = 16) -> tuple[int, int]:
+        """The walkable, mob-free Overworld cell nearest ``target`` (ring by ring)."""
+        level = np.asarray(self.state.map[0])
+        mobs = np.asarray(self.state.mob_map[0])
+        blocked = self._rt["not_walkable"][level] | mobs
+        r0, c0 = target
+        for d in range(radius + 1):
+            for r in range(r0 - d, r0 + d + 1):
+                for c in range(c0 - d, c0 + d + 1):
+                    if max(abs(r - r0), abs(c - c0)) != d:
+                        continue
+                    if 0 <= r < level.shape[0] and 0 <= c < level.shape[1] and not blocked[r, c]:
+                        return r, c
+        return target
 
     def _achievement_names(self) -> set[str]:
         got = np.asarray(self.state.achievements)
@@ -351,13 +447,13 @@ class CraftaxGame:
         self.message = f"Last action {name} ({upstream}) yielded reward {reward:+.3f}.{note}"
         if unlocked:
             self.message += f" New achievements: {', '.join(unlocked)}."
-        return Step(reward, done or self.turn >= self.max_turns, unlocked, ticks)
+        return Step(reward, done or self.out_of_turns, unlocked, ticks)
 
     def forfeit(self) -> bool:
         """GlyphBench's "freeze": the turn counts, the world does not move. True if
         that was the last turn."""
         self.turn += 1
-        return self.turn >= self.max_turns
+        return self.out_of_turns
 
     def render(self) -> tuple[str, str, str, str]:
         """(legend, grid, hud, message) of the current state."""
@@ -418,7 +514,8 @@ class CraftaxGame:
             armor_parts.append(part)
         return "\n".join(
             [
-                f"Step: {self.turn} / {self.max_turns}    Upstream timestep: {int(sd[R.S_TIMESTEP])}",
+                (f"Step: {self.turn} / {self.max_turns}" if self.max_turns else f"Step: {self.turn}")
+                + f"    Upstream timestep: {int(sd[R.S_TIMESTEP])}",
                 f"HP: {int(sd[R.S_HEALTH])}/{int(sd[R.S_MAX_HEALTH])}    "
                 f"Food: {int(sd[R.S_FOOD])}/{int(sd[R.S_MAX_FOOD])}    "
                 f"Drink: {int(sd[R.S_DRINK])}/{int(sd[R.S_MAX_DRINK])}    "
