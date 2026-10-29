@@ -53,8 +53,7 @@ MODEL=(--model.name Qwen/Qwen3.5-4B --orchestrator.renderer.name qwen3.5 --orche
 BACKEND=(--inference.backend sglang --inference.sglang.python "$SGL_PY")
 case $ARM in
   kve|kve-dense)
-    BACKEND+=(--inference.sglang.sessions true --inference.sglang.eviction.max-turns 8 --inference.sglang.eviction.stride 1
-              --inference.sglang.mamba-radix-cache-strategy no_buffer --inference.sglang.disable-overlap-schedule true)
+    BACKEND+=(--compaction.max-turns 8 --compaction.stride 1)
     [ "$ARM" = kve-dense ] && BACKEND+=(--trainer.model.debug.ignore-kv-death true) ;;
   full) ;;
   *) echo "unknown arm $ARM"; exit 2 ;;

@@ -1,3 +1,4 @@
-# Overlay on start.toml: hold each trace's KV in an SGLang streaming session.
-[inference.sglang]
-sessions = true
+# Overlay on start.toml: KV-Streams compaction, so each trace runs in an SGLang
+# streaming session (reverse-text replies in one turn, so nothing is evicted).
+[compaction]
+max_turns = 8

@@ -10,7 +10,7 @@
 #
 #   sbatch cell.sbatch ARM CPR [EPISODES] [MAX_EPISODE_STEPS]
 #
-# ARM: vllm | sglang | sglang-sessions | kve (KV-Streams turn-window eviction,
+# ARM: vllm | sglang | kve (KV-Streams turn-window eviction,
 # r${MAX_TURNS:-8}-${STRIDE:-1}).  CPR: in-flight episodes per inference
 # rank (x2 ranks).  The cell ends once EPISODES (default 512) episodes have
 # finished, or at the time limit; summary.json is written either way.
@@ -49,15 +49,14 @@ echo "[$CELL] $(git log --oneline -1)  inflight=$INFLIGHT min_inflight=$MIN_INFL
 
 case $ARM in
   vllm) BACKEND=(); ENGINE_PORT=8100 ;;  # the engine, behind the router on 8000
-  sglang|sglang-sessions|kve)
+  sglang|kve)
     # Node-local copy: concurrent cold imports from scratch have failed with ENOENT.
     rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
     SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
     export CUDA_HOME=$($SGL_PY -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13
     ENGINE_PORT=8000  # no router
     BACKEND=(--inference.backend sglang --inference.sglang.python "$SGL_PY")
-    [ "$ARM" != sglang ] && BACKEND+=(--inference.sglang.sessions true)
-    [ "$ARM" = kve ] && BACKEND+=(--inference.sglang.eviction.max-turns "$MAX_TURNS" --inference.sglang.eviction.stride "$STRIDE")
+    [ "$ARM" = kve ] && BACKEND+=(--compaction.max-turns "$MAX_TURNS" --compaction.stride "$STRIDE")
     ;;
   *) echo "unknown arm $ARM"; exit 2 ;;
 esac

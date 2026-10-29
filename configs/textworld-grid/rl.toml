@@ -5,7 +5,7 @@
 #
 # Per cell, override from the command line:
 #   --orchestrator.concurrency.{min,max,initial}-inflight  2 x per-rank concurrency
-#   --inference.backend sglang  [--inference.sglang.sessions true]
+#   --inference.backend sglang  [--compaction.max-turns 8]
 #   --orchestrator.train.source.0.env.episode-log  per-episode JSONL
 # See scripts/textworld_grid/ for the runner and the summary.
 

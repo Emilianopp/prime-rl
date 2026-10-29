@@ -69,11 +69,8 @@ max_model_len = 49152
 gpu_memory_utilization = 0.9
 
 [inference.sglang]
-sessions = true  # KV-Streams: one streaming session per trace
 max_mamba_cache_size = 840  # DeltaNet state slots per engine: >= 3 x 256 sessions
-mamba_radix_cache_strategy = "no_buffer"  # hybrid models: required for eviction
-disable_overlap_schedule = true  # hybrid models: required for eviction
 
-[inference.sglang.eviction]  # turn window r8-1: past 8 complete turns, evict the oldest
+[compaction]  # KV-Streams turn window r8-1: past 8 complete turns, evict the oldest
 max_turns = 8
 stride = 1
