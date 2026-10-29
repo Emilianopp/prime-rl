@@ -35,7 +35,8 @@ ach_pct = [100 * e.get("achievement_score", 0) / 226 for e in eps]
 deaths = [len(e.get("deaths") or []) for e in eps]
 print(f"{n} episodes")
 print(f"% of max reward (100 * return / 226): mean {st.mean(pct):.2f}  p10 {q(pct, .1):.1f} / p50 {q(pct, .5):.1f} / p90 {q(pct, .9):.1f} / max {max(pct):.1f}")
-print(f"achievements' reward % of 226 (no health term): mean {st.mean(ach_pct):.2f}  p50 {q(ach_pct, .5):.1f} / max {max(ach_pct):.1f}")
+if all("achievement_score" in e for e in eps):
+    print(f"achievements' reward % of 226 (no health term): mean {st.mean(ach_pct):.2f}  p50 {q(ach_pct, .5):.1f} / max {max(ach_pct):.1f}")
 if any(deaths):
     print(f"respawned deaths per episode: mean {st.mean(deaths):.1f}, p10 {q(deaths, .1)} / p50 {q(deaths, .5)} / p90 {q(deaths, .9)} / max {max(deaths)}")
 counts = Counter(a for e in eps for a in e["achievements"])
