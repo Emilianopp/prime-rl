@@ -32,7 +32,7 @@
 # fill the KV cache and deadlock; trimmed episodes are dropped), MAX_TOKENS (end
 # episodes at this many trace tokens instead of 256000), MAMBA_SLOTS (DeltaNet state
 # slots per engine, default 400: ~3 per in-flight episode is enough), SEGMENTS (B:BS:
-# play each episode as segments of at most B trace tokens, each ending in a summary of
+# play each episode as segments of at most B new tokens, each ending in a summary of
 # at most BS tokens that the next resumes from; see verifiers.v1.segments), EPISODE_STEPS
 # (game steps per episode instead of the world's 10,000), SAMPLING (extra sampling keys,
 # e.g. "top_k=40 presence_penalty=2.0": Qwen3.5's non-thinking reasoning settings), REPO (prime-rl checkout; deps/ submodules
@@ -92,7 +92,7 @@ fi
 [ -n "$NOTEBOOK" ] && DEATH="$DEATH\nenv.taskset.notebook = true"
 if [ -n "$SEGMENTS" ]; then
   IFS=: read -r SEG_B SEG_S <<< "$SEGMENTS"
-  DEATH="$DEATH\nenv.player.segments.budget_tokens = $SEG_B\nenv.player.segments.summary_tokens = $SEG_S"
+  DEATH="$DEATH\nenv.player.segments.new_tokens = $SEG_B\nenv.player.segments.summary_tokens = $SEG_S"
 fi
 [ -n "$EXTRAS" ] && DEATH="$DEATH\nenv.observation_extras = true"
 [ "$EXTRAS" = perception ] && DEATH="$DEATH\nenv.extras_affordances = false"
