@@ -229,26 +229,29 @@ class SglangConfig(BaseConfig):
     python: str | None = None
     """Python interpreter that runs the SGLang server. ``None`` uses the current one; point it at an SGLang venv's interpreter when SGLang cannot share prime-rl's environment."""
 
-    sessions: bool = False
-    """Hold each trace's KV in an SGLang streaming session (keyed by the ``X-Session-ID`` trace id). Append-only turns then send only their new tokens, and nothing the trace wrote is re-prefilled or evicted by the radix cache. Sessions close when the orchestrator finishes the trace, or after ``session_timeout`` idle seconds."""
+    eviction: SglangEvictionConfig | None = None
+    """KV-Streams: hold each trace's KV in an SGLang streaming session (keyed by the ``X-Session-ID`` trace id) and evict retired turns from it. Append-only turns send only their new tokens; generation is unchanged (responses carry the full chronological prompt). Sessions close when the orchestrator finishes the trace, or after ``session_timeout`` idle seconds. In an RL run, set ``[compaction]`` instead. None: full context, served by the radix prefix cache."""
 
     session_timeout: float = Field(3600.0, gt=0)
     """Idle seconds after which SGLang closes a session the orchestrator never finished."""
 
-    eviction: SglangEvictionConfig | None = None
-    """KV-Streams: evict retired turns from each trace's session KV (requires ``sessions``). Generation is unchanged: responses carry the full chronological prompt."""
-
-    @model_validator(mode="after")
-    def validate_eviction(self):
-        if self.eviction is not None and not self.sessions:
-            raise ValueError("inference.sglang.eviction requires inference.sglang.sessions = true")
-        return self
+    @property
+    def sessions(self) -> bool:
+        """Streaming sessions run only with KV-Streams eviction: full context needs
+        nothing the radix prefix cache does not already give it."""
+        return self.eviction is not None
 
     @model_validator(mode="before")
     @classmethod
     def parse_extra_values(cls, data: dict) -> dict:
         """Same normalization as ``VllmConfig``: kebab-case to snake_case, JSON-parsed strings."""
-        return _normalize_pass_through(cls, data)
+        data = _normalize_pass_through(cls, data)
+        if isinstance(data, dict) and "sessions" in data:
+            raise ValueError(
+                "inference.sglang.sessions is gone: sessions run only with KV-Streams eviction "
+                "([compaction] in an RL run, else inference.sglang.eviction)"
+            )
+        return data
 
 
 class WeightBroadcastConfig(BaseConfig):

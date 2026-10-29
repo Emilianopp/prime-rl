@@ -84,7 +84,7 @@ class EvalConfig(ServedEvalConfig):
     renderer: RendererConfig | None = None
     """Sample through this renderer, token-in/out, like the RL policy client, instead of
     chat completions. Each trace then carries its id as the session id, so a prime-rl
-    server with ``inference.sglang.sessions`` (and KV-Streams eviction) serves eval
+    server with KV-Streams eviction (``inference.sglang.eviction``) serves eval
     episodes exactly as it serves training rollouts. None: plain chat completions."""
 
     run: RunConfig = Field(default_factory=RunConfig)

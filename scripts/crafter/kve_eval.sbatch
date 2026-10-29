@@ -11,8 +11,8 @@
 #
 #   sbatch kve_eval.sbatch
 #
-# Env: KEEP (eviction max_turns, default 50; "full": the same session path with
-# eviction off, i.e. full context), N (episodes, default 256), CONC
+# Env: KEEP (eviction max_turns, default 50; "full": eviction off, i.e. full context
+# on plain SGLang, no sessions), N (episodes, default 256), CONC
 # (in-flight episodes, default 128), RESPAWN (unset: death ends the episode;
 # AT:INVENTORY:PENALTY, e.g. spawn:drop_all:0.05, respawns, see the env's
 # on_death / respawn_at / death_inventory / death_penalty), NOTEBOOK (1: the
@@ -28,8 +28,8 @@
 # HF safetensors dir, e.g. an SFT run's weights/step_N: loaded into the server
 # through /update_weights before the eval), SKIP (skip the first SKIP tasks: disjoint
 # task ranges across jobs), CONC_MIN (let the concurrency controller trim down to
-# this under KV pressure instead of pinning CONC: full-context sessions otherwise
-# fill the KV cache and deadlock; trimmed episodes are dropped), MAX_TOKENS (end
+# this under KV pressure instead of pinning CONC: long episodes otherwise fill the KV
+# cache and stall the engine; trimmed episodes are dropped), MAX_TOKENS (end
 # episodes at this many trace tokens instead of 256000), MAMBA_SLOTS (DeltaNet state
 # slots per engine, default 400: ~3 per in-flight episode is enough), SEGMENTS (B:BS:
 # play each episode as segments of at most B new tokens, each ending in a summary of
@@ -56,7 +56,7 @@ SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
 export CUDA_HOME=$($SGL_PY -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13
 
 if [ "$KEEP" = full ]; then
-  # Same server, same sessions, no [sglang.eviction]: everything stays resident.
+  # No [sglang.eviction]: plain SGLang, no sessions; the prefix cache serves each turn.
   sed '/^\[sglang.eviction\]/,$d' configs/crafter/inference-kve.toml > "$OUT/inference.toml"
   EVICT=()
 else

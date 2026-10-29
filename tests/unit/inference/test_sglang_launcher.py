@@ -53,11 +53,12 @@ def test_unsupported_features_are_refused(overrides):
         InferenceConfig(backend="sglang", **overrides)
 
 
-def test_sessions_enable_streaming_sessions_and_stay_out_of_server_args():
-    config = InferenceConfig(backend="sglang", sglang={"sessions": True, "session_timeout": 120})
-    args = sglang_server_args(config)
-    assert args["enable_streaming_session"] is True
-    assert "sessions" not in args and "session_timeout" not in args
+def test_sessions_run_only_with_eviction():
+    config = InferenceConfig(backend="sglang", sglang={"session_timeout": 120})
+    assert not config.sglang.sessions
+    assert "enable_streaming_session" not in sglang_server_args(config)
+    with pytest.raises(ValidationError, match="sessions is gone"):
+        InferenceConfig(backend="sglang", sglang={"sessions": True})
 
 
 def test_data_parallel_size_maps_to_dp_size():
@@ -66,15 +67,27 @@ def test_data_parallel_size_maps_to_dp_size():
 
 
 def test_eviction_enables_kv_eviction_and_resolves_the_message_end_token():
-    config = InferenceConfig(backend="sglang", sglang={"sessions": True, "eviction": {"max_turns": 8, "stride": 1}})
+    config = InferenceConfig(
+        backend="sglang", sglang={"session_timeout": 120, "eviction": {"max_turns": 8, "stride": 1}}
+    )
     args = sglang_server_args(config)
+    assert config.sglang.sessions and args["enable_streaming_session"] is True
     assert args["enable_kv_eviction"] is True and args["page_size"] == 1
-    assert "eviction" not in args
+    assert "eviction" not in args and "session_timeout" not in args
+    assert "mamba_radix_cache_strategy" not in args  # not a hybrid model
     ids = {"<|im_end|>": 151645}
     assert eviction_launch_args(config, token_id=ids.get) == {"max_turns": 8, "stride": 1, "message_end_id": 151645}
     assert eviction_launch_args(InferenceConfig(backend="sglang")) is None
 
 
-def test_eviction_requires_sessions():
-    with pytest.raises(ValidationError, match="requires inference.sglang.sessions"):
-        InferenceConfig(backend="sglang", sglang={"eviction": {"max_turns": 8}})
+def test_eviction_on_a_hybrid_model_keeps_the_live_recurrent_state():
+    config = InferenceConfig(backend="sglang", sglang={"eviction": {"max_turns": 8}})
+    args = sglang_server_args(config, hybrid=True)
+    assert args["mamba_radix_cache_strategy"] == "no_buffer"
+    assert args["disable_overlap_schedule"] is True
+    explicit = InferenceConfig(
+        backend="sglang", sglang={"eviction": {"max_turns": 8}, "disable_overlap_schedule": False}
+    )
+    assert sglang_server_args(explicit, hybrid=True)["disable_overlap_schedule"] is False
+    # Full context changes nothing on a hybrid model.
+    assert "mamba_radix_cache_strategy" not in sglang_server_args(InferenceConfig(backend="sglang"), hybrid=True)
