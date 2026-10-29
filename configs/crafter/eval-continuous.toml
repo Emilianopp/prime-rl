@@ -49,6 +49,52 @@ env.death_inventory = "drop_all"
 env.death_penalty = 0.05
 env.player.segments.new_tokens = 131072
 env.player.segments.summary_tokens = 32768
+# The handoff request, appended to the observation that crosses the budget. A Crafter template
+# so summaries carry the game state (gradable section by section against the observation and the
+# map seen so far). It cancels the observation's own "Choose the next action" line, asks for the
+# summary in the reply (thinking is discarded: in the first 12 h run ~19% of summaries were lost
+# there and ~18% of summary turns were answered with an action), and states the budget: keep the
+# 32,768 below equal to summary_tokens. The example uses coordinates no real game copies by chance.
+env.player.segments.summary_prompt = '''
+STOP: this reply is not a game turn. The game is paused and your context is about to be reset. The "Choose the next action" line above does not apply to this reply. Do not write an <action>.
+
+Write a handoff summary for the version of you that continues this game. After the reset you keep only the system prompt, this summary and the current observation; everything else in this conversation is gone. Make it complete and specific, but do not pad it.
+
+Budget: this reply can use at most 32,768 tokens in total, and your thinking and the summary share that budget. If the reply runs past it, it is cut off and the whole summary is lost, so keep your thinking short and leave room for the summary. The summary is placed in your system prompt for the whole next segment, about 98,000 tokens of play, until you write the next one.
+
+Write the summary in your reply, not in your thinking (thinking is discarded), between <summary> and </summary>, with exactly these sections:
+
+<summary>
+STATUS: step <n> · position (<x>, <y>) facing <dir> · health <h> food <f> drink <d> energy <e>
+INVENTORY: <item=count, ...> or none
+ACHIEVEMENTS (<k>/22): <the unlocked list, copied from the observation>
+NEXT ACHIEVEMENTS: <the 2-3 you will go for next, and what each one needs>
+LOCATIONS: <one line per place you have seen: what, (x, y), a short note>
+DANGERS: <what hurt or killed you, and where>
+WHAT FAILED: <attempts that did not work, and why>
+WHAT WORKED: <things that did work>
+PLAN: <numbered next steps>
+</summary>
+
+Coordinates: x grows to the east, y grows to the south. On the local map you are the @ at the centre; the cell r rows below and c columns right of @ is at (x + c, y + r), with r and c negative above and to the left. Only write locations you actually saw; write "unknown" rather than guess.
+
+Example from a different game (its values are not yours, do not copy them):
+<summary>
+STATUS: step 1840 · position (17, 45) facing west · health 6 food 5 drink 8 energy 7
+INVENTORY: wood=3, stone=2, wood_pickaxe=1
+ACHIEVEMENTS (6/22): collect_drink, collect_stone, collect_wood, make_wood_pickaxe, place_table, wake_up
+NEXT ACHIEVEMENTS: make_stone_pickaxe (wood and stone, at a table); place_furnace (stone, next to a table); eat_cow (cows graze near (21, 50))
+LOCATIONS:
+- table: (15, 44), two steps west of the stone
+- water: lake along x 10-13, y 40-48
+- stone: outcrop at (16-19, 41-43), reachable from the south side
+- trees: forest around (22-26, 46-52)
+- coal: (18, 40), not mined yet
+DANGERS: zombies on the grass south of y 50 at night, died twice there near (20, 53); lava at (19, 39) next to the coal
+WHAT FAILED: crafting away from the table; fighting two zombies at once with health 3
+WHAT WORKED: sleeping in a nook walled by stone at (16, 42); drinking at the lake whenever drink < 5
+PLAN: 1. mine more stone at (17, 42). 2. make_stone_pickaxe at the table (15, 44). 3. place a furnace next to the table. 4. mine the coal at (18, 40), keeping away from the lava. 5. go east to the forest for wood.
+</summary>'''
 env.player.harness.id = "inline-chat"
 env.player.runtime.type = "subprocess"
 serve.pool.type = "elastic"
