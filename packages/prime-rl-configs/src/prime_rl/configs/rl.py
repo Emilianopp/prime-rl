@@ -471,18 +471,22 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_segment_budgets(self):
-        """A segment is one training sample and one engine session: its token budget
-        must fit the trainer's sequence and the engine's context."""
+        """A segment is one training sample and one engine session: its trace (the system
+        prompt, the inherited summary of up to `summary_tokens`, then up to `new_tokens`)
+        must fit the trainer's sequence and the engine's context. The task's own system
+        prompt is not known here; keep headroom for it."""
         limits = {"trainer.model.seq_len": self.trainer.model.seq_len}
         if self.inference is not None and self.inference.vllm.max_model_len is not None:
             limits["inference.vllm.max_model_len"] = self.inference.vllm.max_model_len
         for source in self.orchestrator.train.source:
             for name, agent in agent_config_fields(source.env).items():
                 for limit_name, limit in limits.items():
-                    if agent.segments is not None and agent.segments.budget_tokens > limit:
+                    segments = agent.segments
+                    if segments is not None and segments.new_tokens + segments.summary_tokens > limit:
                         raise ValueError(
-                            f"Source '{source.resolved_name}' agent '{name}': segments.budget_tokens "
-                            f"({agent.segments.budget_tokens}) exceeds {limit_name} ({limit})"
+                            f"Source '{source.resolved_name}' agent '{name}': segments.new_tokens "
+                            f"({segments.new_tokens}) + segments.summary_tokens ({segments.summary_tokens}, "
+                            f"the inherited summary) exceeds {limit_name} ({limit})"
                         )
         return self
 
