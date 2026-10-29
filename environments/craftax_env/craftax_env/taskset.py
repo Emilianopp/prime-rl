@@ -56,6 +56,10 @@ class CraftaxConfig(vf.TasksetConfig):
     None: "no explicit cap")."""
     forfeit_mode: Literal["freeze", "noop"] = "freeze"
     """What a reply without a valid action does, as the system prompt states (match the env's)."""
+    max_actions_per_turn: int = Field(1, ge=1)
+    """Actions the model may chain in one reply (1: GlyphBench's single final action tag).
+    Above 1 the system prompt explains it and the env plays the reply's final run of
+    <action> tags in order; turns (replies) and actions (game steps) are counted apart."""
     respawn: bool = False
     """State GlyphBench's TASK block for continuous play: a death respawns the player and
     there is no turn limit (match the env's ``on_death`` and ``max_episode_steps = 0``)."""
@@ -87,6 +91,10 @@ class CraftaxEnvConfig(vf.EnvConfig):
     reward: Literal["return", "achievements"] = "return"
     """`return`: Craftax return / 226, GlyphBench's metric. `achievements`: the unlocked
     achievements' reward / 226, without the health term (use with respawn)."""
+    action_feedback: bool = False
+    """Say in the [Message] block what each action did (moved or blocked by what, what DO
+    collected or what tool the block needs, what a craft or placement changed, vitals that
+    moved) and when a reply was forfeited. Off: GlyphBench's message (reward only)."""
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, return, achievements) to this file."""
 
@@ -99,13 +107,17 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
     async def run(self, task, agents):
         seed = int(task.data.info["seed"])
         reasoning = bool(task.data.info.get("reasoning", True))
+        max_actions = int(task.data.info.get("max_actions", 1))
+        feedback = self.config.action_feedback
         started = time.time()
         deadline = started + self.config.max_episode_seconds if self.config.max_episode_seconds else None
         game = await asyncio.to_thread(_new_game, seed, self.config.max_episode_steps or None)
-        opening = await asyncio.to_thread(glyph.user_turn, game, reasoning)
+        opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions)
         total, done, end = 0.0, False, "terminated"  # terminated: the run stopped answering
         forfeits: Counter[str] = Counter()
         actions: Counter[str] = Counter()
+        turns = 0  # model replies; each plays up to max_actions actions (game steps)
+        per_turn: Counter[int] = Counter()  # actions played per reply
         unlocked_at: dict[str, int] = {}
         deaths: list[dict] = []  # one entry per respawned death: turn, floor, position, where it came back
         max_floor = 0
@@ -115,24 +127,52 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 if deadline is not None and time.time() >= deadline:
                     end = "time_limit"
                     break
-                index, failure = glyph.parse_action(segment.last_reply)
-                if index is None:
+                turns += 1
+                indices, failure, dropped = glyph.parse_actions(segment.last_reply, max_actions)
+                if not indices:
                     forfeits[failure] += 1
-                if index is None and self.config.forfeit_mode == "freeze":
+                if not indices and self.config.forfeit_mode == "freeze":
                     done = game.forfeit()
+                    per_turn[0] += 1
+                    if feedback:
+                        why = "no <action> tag" if failure == "no_action_tag" else "an unknown action name"
+                        game.message = f"Your last reply had {why}, so the turn was forfeited: the world did not move."
                 else:
-                    index = glyph.NOOP if index is None else index
-                    actions[glyph.ACTION_NAMES[index]] += 1
-                    try:
-                        step = await asyncio.to_thread(game.step, index)
-                    except Exception as exc:  # a broken step must not kill the rollout
-                        logger.warning("Craftax step error: %s", exc)
-                        step = glyph.Step(0.0, False, [], 0)
-                    total += step.reward
-                    done = step.done
-                    for name in step.unlocked:
-                        unlocked_at.setdefault(name, game.turn)
-                    max_floor = max(max_floor, game.floor)
+                    indices = indices or [glyph.NOOP]
+                    lines, reward_sum, unlocked, played = [], 0.0, [], 0
+                    for index in indices:
+                        played += 1
+                        actions[glyph.ACTION_NAMES[index]] += 1
+                        before = game.snapshot() if feedback else None
+                        try:
+                            step = await asyncio.to_thread(game.step, index)
+                        except Exception as exc:  # a broken step must not kill the rollout
+                            logger.warning("Craftax step error: %s", exc)
+                            step = glyph.Step(0.0, False, [], 0)
+                        total += step.reward
+                        reward_sum += step.reward
+                        unlocked += step.unlocked
+                        done = step.done
+                        for name in step.unlocked:
+                            unlocked_at.setdefault(name, game.turn)
+                        max_floor = max(max_floor, game.floor)
+                        if feedback:
+                            note = f" Fast-forwarded {step.fast_forward_ticks} sleep/rest ticks." if step.fast_forward_ticks else ""
+                            lines.append(game.feedback(index, before, game.snapshot()) + note)
+                        if done:
+                            break
+                    per_turn[played] += 1
+                    if len(indices) > 1 or feedback or dropped:
+                        head = (f"Played {played} of {len(indices)} actions" if played < len(indices) else
+                                f"Played {played} action{'s' if played != 1 else ''}") + f", reward {reward_sum:+.3f}."
+                        body = " ".join(f"{k + 1}. {line}" for k, line in enumerate(lines)) if feedback else (
+                            "Actions: " + ", ".join(glyph.ACTION_NAMES[i] for i in indices[:played]) + ".")
+                        game.message = " ".join(filter(None, [
+                            head, body,
+                            f"New achievements: {', '.join(unlocked)}." if unlocked else "",
+                            f"{dropped} more action tag{'s were' if dropped != 1 else ' was'} not played "
+                            f"(at most {max_actions} per reply, and a run stops at an unknown name)." if dropped else "",
+                        ]))
                 died = game.health <= 0
                 if done and died and not game.out_of_turns and self.config.on_death == "respawn":
                     where = {"turn": game.turn, "floor": game.floor, "pos": list(game.position)}
@@ -157,7 +197,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     else:
                         end = "won"
                     break
-                observation = await asyncio.to_thread(glyph.user_turn, game, reasoning)
+                observation = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions)
                 segment = await interaction.turn(observation)
         trace = interaction.trace
         score = total if self.config.reward == "return" else game.achievement_score
@@ -173,13 +213,17 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "forfeits": float(sum(forfeits.values())),
                 "survived": 1.0 if game.health > 0 else 0.0,
                 "max_floor": float(max_floor),
-                "turns": float(game.turn),
+                "turns": float(turns),
+                "actions": float(sum(actions.values())),
+                "game_steps": float(game.turn),
             }
         )
         trace.info["craftax"] = {
             "achievements": achievements,
             "unlocked_at": unlocked_at,
-            "turns": game.turn,
+            "turns": turns,
+            "actions": sum(actions.values()),
+            "game_steps": game.turn,
             "ended_by": end,
             "seed": seed,
             "max_floor": max_floor,
@@ -195,7 +239,10 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "deaths": deaths,
                 "achievements": achievements,
                 "unlocked_at": unlocked_at,
-                "turns": game.turn,
+                "turns": turns,  # model replies
+                "game_steps": game.turn,  # actions played + forfeited turns; unlocked_at and deaths count these
+                "actions_played": sum(actions.values()),
+                "actions_per_turn": {str(k): v for k, v in sorted(per_turn.items())},
                 "forfeits": dict(forfeits),
                 "actions": dict(actions),
                 "ended_by": end,
@@ -213,7 +260,7 @@ class CraftaxTaskset(vf.Taskset[CraftaxTask, CraftaxConfig]):
     def load(self) -> Iterator[CraftaxTask]:
         cfg = self.config
         base = cfg.seed + (1_000_000 if cfg.split == "eval" else 0)
-        system = glyph.system_prompt(cfg.enable_reasoning, cfg.max_output_tokens, cfg.forfeit_mode, cfg.respawn)
+        system = glyph.system_prompt(cfg.enable_reasoning, cfg.max_output_tokens, cfg.forfeit_mode, cfg.respawn, cfg.max_actions_per_turn)
         for i in range(cfg.num_examples):
             # Prompt-less: the env opens the episode with the first observation of the
             # world it builds, so loading stays instant.
@@ -222,7 +269,10 @@ class CraftaxTaskset(vf.Taskset[CraftaxTask, CraftaxConfig]):
                     name=f"craftax#{cfg.split}{i}",
                     prompt=None,
                     system_prompt=system,
-                    info={"seed": base + i, "episode_idx": i, "split": cfg.split, "reasoning": cfg.enable_reasoning},
+                    info={
+                        "seed": base + i, "episode_idx": i, "split": cfg.split, "reasoning": cfg.enable_reasoning,
+                        "max_actions": cfg.max_actions_per_turn,
+                    },
                 ),
                 cfg.task,
             )

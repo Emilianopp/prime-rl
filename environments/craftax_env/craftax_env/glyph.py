@@ -76,6 +76,9 @@ def _load(max_timesteps: int) -> tuple[Any, Any, Any]:
             from craftax.craftax.world_gen.world_gen import get_new_empty_inventory
 
             blocked = [C.BlockType.WATER.value, C.BlockType.LAVA.value]
+            _runtime["block_names"] = {b.value: b.name.lower().replace("_", " ") for b in C.BlockType}
+            _runtime["directions"] = np.asarray(C.DIRECTIONS)
+            _runtime["table"], _runtime["furnace"] = C.BlockType.CRAFTING_TABLE.value, C.BlockType.FURNACE.value
             _runtime.update(
                 weights=np.asarray(C.ACHIEVEMENT_REWARD_MAP, dtype=float),
                 not_walkable=np.asarray(C.SOLID_BLOCK_MAPPING) | np.isin(np.arange(len(C.BlockType)), blocked),
@@ -229,7 +232,28 @@ _CONTINUOUS = (
 )
 
 
-def system_prompt(reasoning: bool, max_output_tokens: int | None, forfeit_mode: str, respawn: bool = False) -> str:
+_MULTI = (
+    "MULTIPLE ACTIONS (active for this run)\n"
+    "You may play up to {n} actions in one reply. This replaces the single final "
+    "action tag above: end your response with 1 to {n} action tags, one per line, "
+    "in the order to play them, for example:\n"
+    "  <action>MOVE_LEFT</action>\n"
+    "  <action>MOVE_LEFT</action>\n"
+    "  <action>DO</action>\n"
+    "The evaluator plays the final run of consecutive <action> tags in order (at most "
+    "{n}; any beyond that are dropped), then shows you the new observation. Each action "
+    "is one game step: mobs move, the day advances and food, drink and energy drain "
+    "after every one, and you do not see the grid in between. The sequence stops at "
+    "the first unknown action name and on death. Chain actions for routine work you "
+    "can plan from the current grid (walking a clear path, hitting the same tree or "
+    "rock, crafting at a table); act one step at a time near enemies, lava or deep "
+    "water. A reply with no valid action tag is forfeited as above."
+)
+
+
+def system_prompt(
+    reasoning: bool, max_output_tokens: int | None, forfeit_mode: str, respawn: bool = False, max_actions: int = 1
+) -> str:
     forfeit = _FORFEIT[forfeit_mode]
     if reasoning:
         if max_output_tokens is None:
@@ -257,7 +281,8 @@ def system_prompt(reasoning: bool, max_output_tokens: int | None, forfeit_mode: 
             )
         fmt = _ACTION_ONLY_FORMAT.format(valid=", ".join(ACTION_NAMES), budget=budget)
     game = GAME_PROMPT.replace(_TERMINATION, _CONTINUOUS) if respawn else GAME_PROMPT
-    return "\n\n---\n".join([game, OBSERVATION_CONVENTIONS, fmt])
+    blocks = [game, OBSERVATION_CONVENTIONS, fmt] + ([_MULTI.format(n=max_actions)] if max_actions > 1 else [])
+    return "\n\n---\n".join(blocks)
 
 
 # --- action parsing (GlyphBench's parse_action_response + ActionSpec.index_of) ---
@@ -294,6 +319,36 @@ def parse_action(reply: str) -> tuple[int | None, str | None]:
         return None, "no_action_tag"
     index = action_index(found[-1])
     return (index, None) if index is not None else (None, "unknown_name")
+
+
+def parse_actions(reply: str, max_actions: int) -> tuple[list[int], str | None, int]:
+    """Up to ``max_actions`` actions from the final run of consecutive <action> tags after
+    the last </think> (only whitespace between them): (indices, failure, dropped). The run
+    is cut at its first unknown name; with one action allowed this is ``parse_action``."""
+    if max_actions <= 1:
+        index, failure = parse_action(reply)
+        return ([index] if index is not None else []), failure, 0
+    text = reply or ""
+    closes = list(_THINK_CLOSE.finditer(text))
+    region = text[closes[-1].end() :] if closes else text
+    found = list(_XML_ACTION.finditer(region))
+    if not found or not found[-1].group(1).strip():
+        return [], "no_action_tag", 0
+    run = [found[-1]]
+    for m in reversed(found[:-1]):
+        if region[m.end() : run[0].start()].strip():
+            break
+        run.insert(0, m)
+    played, dropped = run[:max_actions], max(0, len(run) - max_actions)
+    indices = []
+    for m in played:
+        index = action_index(m.group(1))
+        if index is None:
+            break
+        indices.append(index)
+    if not indices:
+        return [], "unknown_name", 0
+    return indices, None, dropped + len(played) - len(indices)
 
 
 # --- the game (GlyphBench's CraftaxForkEnv) ---
@@ -411,6 +466,72 @@ class CraftaxGame:
                     if 0 <= r < level.shape[0] and 0 <= c < level.shape[1] and not blocked[r, c]:
                         return r, c
         return target
+
+    def snapshot(self) -> dict:
+        """What an action can change, for ``feedback``."""
+        st, rt = self.state, self._rt
+        inv = st.inventory
+        level = self.floor
+        r, c = self.position
+        dr, dc = rt["directions"][int(np.asarray(st.player_direction))]
+        tr, tc = r + int(dr), c + int(dc)
+        game_map = np.asarray(st.map[level])
+        inside = 0 <= tr < game_map.shape[0] and 0 <= tc < game_map.shape[1]
+        near = game_map[max(0, r - 1) : r + 2, max(0, c - 1) : c + 2]
+        return {
+            "items": {k: int(np.asarray(getattr(inv, k))) for k in (
+                "wood", "stone", "coal", "iron", "diamond", "sapphire", "ruby", "sapling",
+                "arrows", "torches", "books", "pickaxe", "sword", "bow",
+            )} | {"potions": int(np.asarray(inv.potions).sum()), "armour": int(np.asarray(inv.armour).sum())},
+            "vitals": {
+                "health": int(np.asarray(st.player_health)), "food": int(np.asarray(st.player_food)),
+                "drink": int(np.asarray(st.player_drink)), "energy": int(np.asarray(st.player_energy)),
+                "mana": int(np.asarray(st.player_mana)),
+            },
+            "pos": (r, c), "floor": level, "facing": int(np.asarray(st.player_direction)),
+            "ahead": rt["block_names"].get(int(game_map[tr, tc]), "?") if inside else "the map edge",
+            "mob_ahead": bool(np.asarray(st.mob_map[level, tr, tc])) if inside else False,
+            "near_table": bool((near == rt["table"]).any()), "near_furnace": bool((near == rt["furnace"]).any()),
+            "achievements": len(self.achievements),
+        }
+
+    def feedback(self, action: int, before: dict, after: dict) -> str:
+        """One sentence on what ``action`` did, from snapshots taken around it."""
+        name = ACTION_NAMES[action]
+        gained = {k: after["items"][k] - v for k, v in before["items"].items() if after["items"][k] != v}
+        changes = [f"{k} {'+' if d > 0 else ''}{d} (now {after['items'][k]})" for k, d in gained.items()]
+        vitals = [f"{k} {before['vitals'][k]}→{v}" for k, v in after["vitals"].items() if v != before["vitals"][k]]
+        facing = {1: "left", 2: "right", 3: "up", 4: "down"}.get(after["facing"], "?")
+        if after["floor"] != before["floor"]:
+            fl = after["floor"]
+            what = f"moved to floor {fl} ({FLOOR_NAMES[fl] if fl < len(FLOOR_NAMES) else fl})"
+        elif name.startswith("MOVE_"):
+            what = (f"moved to ({after['pos'][0]},{after['pos'][1]})" if after["pos"] != before["pos"]
+                    else f"blocked by {'a creature' if after['mob_ahead'] else after['ahead']}; now facing {facing}")
+        elif name == "DO":
+            target = "a creature" if before["mob_ahead"] else before["ahead"]
+            if changes:
+                what = f"used on {target}: " + ", ".join(changes)
+            elif before["mob_ahead"]:
+                what = "hit the creature in front of you"
+            else:
+                tool = {"stone": 1, "coal": 1, "iron": 2, "diamond": 3, "sapphire": 4, "ruby": 4}
+                need = {1: "a wood pickaxe", 2: "a stone pickaxe", 3: "an iron pickaxe", 4: "a diamond pickaxe"}
+                if before["ahead"] in tool and before["items"]["pickaxe"] < tool[before["ahead"]]:
+                    what = f"nothing collected: {before['ahead']} needs {need[tool[before['ahead']]]}"
+                elif before["ahead"] == "grass":
+                    what = "nothing collected from grass (it drops a sapling 10% of the time)"
+                else:
+                    what = f"no effect on {target}"
+        elif changes:
+            what = ", ".join(changes)
+        else:
+            what = (f"no effect (table nearby: {'yes' if before['near_table'] else 'no'}, "
+                    f"furnace nearby: {'yes' if before['near_furnace'] else 'no'})"
+                    if name.startswith(("MAKE_", "PLACE_", "ENCHANT_")) else "no visible effect")
+        if vitals:
+            what += "; " + ", ".join(vitals)
+        return f"{name}: {what}."
 
     def _achievement_names(self) -> set[str]:
         got = np.asarray(self.state.achievements)
@@ -537,7 +658,7 @@ class CraftaxGame:
 # --- the per-turn user message (GlyphBench's render_user_turn, no history frames) ---
 
 
-def user_turn(game: CraftaxGame, reasoning: bool) -> str:
+def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1) -> str:
     legend, grid, hud, message = game.render()
     parts = []
     if legend:
@@ -548,7 +669,12 @@ def user_turn(game: CraftaxGame, reasoning: bool) -> str:
     if message:
         current.append(f"[Message]\n{message.strip()}")
     parts.append("\n".join(current))
-    if reasoning:
+    if max_actions > 1:
+        parts.append(
+            f"Now reason as much as useful, then end with 1 to {max_actions} <action> tags, one per "
+            "line, each containing one action name from the system prompt's action list."
+        )
+    elif reasoning:
         parts.append(
             "Now reason as much as useful, then end with a final <action> tag containing "
             "exactly one action name from the system prompt's action list."
