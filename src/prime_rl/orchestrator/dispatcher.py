@@ -595,14 +595,17 @@ class Dispatcher:
             if (delta.get("set") or {}).get("is_completed"):
                 # A trace that finishes before its episode (e.g. a closed segment) releases its
                 # engine session now rather than holding its KV until the episode ends.
-                self._spawn(clients.finish_sessions([delta["trace"]]))
+                self._spawn(clients.finish_sessions([delta["trace"]]), f"Releasing the session of trace {delta['trace']}")
             if stream and "open" in delta:
                 segment_start[delta["trace"]] = self.policy.version
                 # The next segment opened (its re-prefill), so the closed ones are not the
                 # episode's last trace: ship them now rather than when the episode ends.
                 for trace in closed:
                     shipped.add(trace["id"])
-                    self._spawn(self.emit_segment(meta, trace, segment_start.get(trace["id"], meta.policy_version)))
+                    self._spawn(
+                        self.emit_segment(meta, trace, segment_start.get(trace["id"], meta.policy_version)),
+                        f"Shipping segment {trace['id']} of group {meta.group_id} ({meta.env_name})",
+                    )
                 closed.clear()
             first = not meta.live
             live.apply(meta, delta)
@@ -640,10 +643,18 @@ class Dispatcher:
         self.live_events.append(live.pending_event(meta))
         return True
 
-    def _spawn(self, coroutine) -> None:
+    def _spawn(self, coroutine, what: str) -> None:
+        """Run ``coroutine`` in the background. Nothing awaits it, so a failure is logged
+        here: a segment that never ships or a session never released must not pass silently."""
         task = asyncio.create_task(coroutine)
         self.side_tasks.add(task)
-        task.add_done_callback(self.side_tasks.discard)
+
+        def done(task: asyncio.Task) -> None:
+            self.side_tasks.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                get_logger().warning(f"{what} failed: {task.exception()!r}")
+
+        task.add_done_callback(done)
 
     async def emit_segment(self, meta: InflightEpisode, trace: dict, policy_start: int) -> None:
         """Ship one closed segment of a still-running episode (``stream_segments``) as

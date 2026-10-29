@@ -75,3 +75,25 @@ def test_emit_segment_keeps_a_failed_trace_failed():
 
     episode = asyncio.run(scenario())
     assert not episode.ok and not list(iter_trainable_traces([episode]))
+
+
+def test_a_failed_side_task_is_logged(monkeypatch):
+    """A segment shipped in the background that fails is logged, not lost silently."""
+    import prime_rl.orchestrator.dispatcher as dispatcher_module
+
+    warnings: list[str] = []
+    monkeypatch.setattr(dispatcher_module, "get_logger", lambda: SimpleNamespace(warning=warnings.append))
+    dispatcher = Dispatcher.__new__(Dispatcher)
+    dispatcher.side_tasks = set()
+
+    async def fails():
+        raise ValueError("bad segment")
+
+    async def scenario():
+        dispatcher._spawn(fails(), "Shipping segment s1")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert warnings == ["Shipping segment s1 failed: ValueError('bad segment')"]
+    assert not dispatcher.side_tasks
