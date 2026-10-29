@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -124,3 +125,69 @@ def test_respawn_continues_the_game(tmp_path, monkeypatch, death_inventory):
     assert ("Wood:0" in after) == (death_inventory == "drop_all")
     assert "Step: 5    Upstream timestep" in after  # no turn limit in the HUD
     assert interaction.trace.rewards["craftax_achievements"] == pytest.approx(line["achievement_score"] / 226 - 0.02)
+
+
+def test_parse_actions():
+    L, D = glyph.ACTION_NAMES.index("MOVE_LEFT"), glyph.ACTION_NAMES.index("DO")
+    reply = "<think>maybe <action>NOOP</action></think>plan: <action>DO</action> later.\n<action>MOVE_LEFT</action>\n<action>left</action>\n<action>DO</action>"
+    assert glyph.parse_actions(reply, 1) == ([D], None, 0)  # one allowed: the last tag, as GlyphBench
+    assert glyph.parse_actions(reply, 5) == ([L, L, D], None, 0)  # the final run only, not the tag in the prose
+    assert glyph.parse_actions(reply, 2) == ([L, L], None, 1)
+    assert glyph.parse_actions("<action>DO</action><action>JUMP</action><action>DO</action>", 5) == ([D], None, 2)
+    assert glyph.parse_actions("<action>JUMP</action>", 5) == ([], "unknown_name", 0)
+    assert glyph.parse_actions("no tags", 5) == ([], "no_action_tag", 0)
+
+
+def test_multi_action_prompt():
+    system = glyph.system_prompt(True, 2048, "freeze", max_actions=4)
+    assert "MULTIPLE ACTIONS (active for this run)" in system and "up to 4 actions" in system
+    assert "MULTIPLE ACTIONS" not in glyph.system_prompt(True, 2048, "freeze")
+
+
+def test_feedback_on_collecting():
+    game = glyph.CraftaxGame(1000042, 50)
+    # the player starts facing up; walk until it faces a tree, then chop it
+    for _ in range(40):
+        snap = game.snapshot()
+        if snap["ahead"] == "tree":
+            break
+        game.step(glyph.ACTION_NAMES.index(["MOVE_LEFT", "MOVE_UP", "MOVE_RIGHT", "MOVE_DOWN"][_ % 4]))
+    before = game.snapshot()
+    assert before["ahead"] == "tree"
+    do = glyph.ACTION_NAMES.index("DO")
+    game.step(do)
+    text = game.feedback(do, before, game.snapshot())
+    assert text.startswith("DO: used on tree: wood +1"), text
+    # a pickaxe craft with no table nearby says so
+    craft = glyph.ACTION_NAMES.index("MAKE_WOOD_PICKAXE")
+    before = game.snapshot()
+    game.step(craft)
+    assert "no effect (table nearby: no" in game.feedback(craft, before, game.snapshot())
+
+
+def test_multi_actions_and_feedback_in_a_run(tmp_path, monkeypatch):
+    replies = [
+        "<action>MOVE_LEFT</action>\n<action>MOVE_LEFT</action>\n<action>DO</action>",
+        "no tags",
+        "<action>DO</action>",
+    ]
+    monkeypatch.setattr(sys.modules[__name__], "REPLIES", replies)
+    task = next(iter(CraftaxTaskset(CraftaxConfig(num_examples=1, max_actions_per_turn=3)).load()))
+    assert "MULTIPLE ACTIONS" in task.data.system_prompt
+    interaction = ScriptedInteraction(turns=6)
+
+    @asynccontextmanager
+    async def open_interaction(_task):
+        yield interaction
+
+    log = tmp_path / "episodes.jsonl"
+    env = SimpleNamespace(config=CraftaxEnvConfig(episode_log=str(log), max_episode_steps=0, action_feedback=True))
+    asyncio.run(CraftaxEnv.run(env, task, SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))))
+    line = json.loads(log.read_text())
+    assert line["turns"] == 6 and line["actions_played"] == 2 * 3 + 2 * 1
+    assert line["game_steps"] == line["actions_played"] + 2  # two forfeited turns
+    assert line["actions_per_turn"] == {"0": 2, "1": 2, "3": 2}
+    after_multi, after_forfeit = interaction.received[1], interaction.received[2]
+    assert "Played 3 actions, reward" in after_multi and "1. MOVE_LEFT: " in after_multi and "3. DO: " in after_multi
+    assert "the turn was forfeited: the world did not move" in after_forfeit
+    assert "then end with 1 to 3 <action> tags" in after_multi

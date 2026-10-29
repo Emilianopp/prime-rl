@@ -44,7 +44,14 @@ rates = [counts.get(a, 0) / n for a in counts] + [0.0] * (N_ACHIEVEMENTS - len(c
 score = math.exp(sum(math.log(1 + 100 * r) for r in rates) / N_ACHIEVEMENTS) - 1
 print(f"Craftax score {score:.2f}%  (geometric mean of per-achievement success over {N_ACHIEVEMENTS}, Hafner 2021)")
 print(f"achievements per episode: mean {st.mean(ach):.2f}, p10 {q(ach, .1)} / p50 {q(ach, .5)} / p90 {q(ach, .9)} / max {max(ach)}")
-print(f"turns: p10 {q(turns, .1)} / p50 {q(turns, .5)} / p90 {q(turns, .9)} / max {max(turns)}")
+print(f"turns (model replies): p10 {q(turns, .1)} / p50 {q(turns, .5)} / p90 {q(turns, .9)} / max {max(turns)}")
+if all("actions_played" in e for e in eps):
+    played = [e["actions_played"] for e in eps]
+    print(f"actions played: p50 {q(played, .5)} / max {max(played)}; per reply {sum(played) / max(sum(turns), 1):.2f}")
+    per = Counter()
+    for e in eps:
+        per.update({int(k): v for k, v in e["actions_per_turn"].items()})
+    print("actions per reply:", dict(sorted(per.items())))
 print(f"trace tokens: p10 {q(tokens, .1)} / p50 {q(tokens, .5)} / p90 {q(tokens, .9)} / max {max(tokens)}")
 print("ended:", dict(Counter(e["ended_by"] for e in eps)))
 print("deepest floor:", {FLOORS[f] if f < len(FLOORS) else f: c for f, c in sorted(Counter(e["max_floor"] for e in eps).items())})
