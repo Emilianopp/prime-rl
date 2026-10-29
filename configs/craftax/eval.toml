@@ -1,0 +1,50 @@
+# Inference-only full Craftax (GlyphBench's glyph observations, craftax-env) under
+# KV-Streams: Qwen3.5-4B in thinking mode, the policy as it is. Episodes run until the
+# player dies, the boss falls, 10,000 turns (GlyphBench's craftaxfull horizon) or the
+# wall clock (max_episode_seconds, so a run inside a 3 h block records its episodes).
+# Long games run as segments: once a segment has added new_tokens, the model writes a
+# summary of at most summary_tokens and the next segment starts from the system
+# prompt, that summary and the current observation. Serve
+# configs/crafter/inference-kve.toml first (same model and server);
+# scripts/craftax/eval.sbatch runs both.
+#
+#   uv run eval @ configs/craftax/eval.toml
+
+model = "Qwen/Qwen3.5-4B"
+group_size = 1
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+# Any admin URL enables releasing each episode's session when it finishes.
+admin_base_url = ["http://localhost:8000/v1"]
+
+[renderer]  # token-in/out with the trace id as session id, as in training
+name = "qwen3.5"
+enable_thinking = true
+thinking_retention = "all"
+
+[concurrency]
+min_inflight = 64
+max_inflight = 64
+
+[select]
+limit = 64
+
+[sampling]
+max_completion_tokens = 2048
+temperature = 1.0
+
+[[source]]
+name = "craftax"
+env.taskset.id = "craftax-env"
+env.taskset.split = "eval"
+env.taskset.max_output_tokens = 2048  # the budget the system prompt states: keep = max_completion_tokens
+env.max_episode_steps = 10000
+env.max_episode_seconds = 9000  # 2.5 h: ends inside a 3 h block (~10 min to start, the rest to finish)
+env.player.segments.new_tokens = 131072
+env.player.segments.summary_tokens = 32768
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16
