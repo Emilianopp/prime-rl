@@ -1,0 +1,27 @@
+# ALFWorld inference: Qwen3.5-9B on SGLang, one node, 4 A100-80GB as 4 data-parallel
+# engines, KV-Streams eviction with an r10-1 turn window (v0's best truncation arm
+# kept 10 turns). Paired with configs/alfworld/eval.toml; ENV=alfworld scripts/kv_streams/eval.sbatch
+# runs both (KEEP=full drops [sglang.eviction]: plain SGLang, no sessions, full context;
+# sessions and the hybrid-model flags come with [sglang.eviction]).
+#
+#   uv run inference @ configs/alfworld/inference.toml --sglang.python <SGLang fork venv>/bin/python
+
+backend = "sglang"
+
+[server]
+port = 8000
+
+[vllm]  # engine-agnostic fields, translated for SGLang
+model = "Qwen/Qwen3.5-9B"
+data_parallel_size = 4
+# KV-Streams survivors keep their positions: this bounds the whole episode, not the live context.
+max_model_len = 131072
+gpu_memory_utilization = 0.9
+
+[sglang]
+max_mamba_cache_size = 200  # DeltaNet state slots per engine: >= 3 x episodes per engine
+mamba_ssm_dtype = "bfloat16"  # half the fp32 state per slot (the KV cache is bf16 already)
+
+[sglang.eviction]  # turn window r10-1: past 10 complete turns, evict the oldest
+max_turns = 10
+stride = 1

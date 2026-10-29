@@ -113,6 +113,8 @@ class TextWorldConfig(vf.TasksetConfig):
     split: Literal["train", "eval"] = "train"
     num_examples: int | None = None
     """First N rows of the split (all by default)."""
+    families: list[str] | None = None
+    """Only games of these families, e.g. ["tw-coin_collector"] (all by default)."""
     include_initial_obs_in_system: bool = True
     """Put the opening observation in the system prompt (the user turn is then "What do you do?")."""
 
@@ -158,7 +160,7 @@ class TextWorldEnv(vf.Env[TextWorldEnvConfig]):
         outcome = {"score": score, "max_score": info["max_score"], "won": won, "steps": steps, "done": done}
         trace.info["textworld"] = outcome
         if self.config.episode_log:
-            line = {"start": started, "end": time.time(), "reward": reward, "task": info["task"], **outcome}
+            line = {"start": started, "end": time.time(), "reward": reward, "task": info["task"], "game": info["game_idx"], **outcome}
             with open(self.config.episode_log, "a") as f:
                 f.write(json.dumps(line) + "\n")
 
@@ -170,6 +172,8 @@ class TextWorldTaskset(vf.Taskset[TextWorldTask, TextWorldConfig]):
         dataset = Path(self.config.dataset_path)
         meta = json.loads((dataset / "metadata.json").read_text())
         rows = load_from_disk(str(dataset / ("dataset" if self.config.split == "train" else "eval_dataset")))
+        if self.config.families is not None:
+            rows = rows.filter(lambda row: row["task"].split(":")[0] in self.config.families)
         if self.config.num_examples is not None:
             rows = rows.select(range(min(self.config.num_examples, len(rows))))
         for i, row in enumerate(rows):
