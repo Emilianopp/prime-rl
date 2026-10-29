@@ -182,6 +182,8 @@ class Dispatcher:
         self.min_burst = max((env.config.group_size for env in train_envs or ()), default=8)
 
         self.inflight: dict[asyncio.Task, InflightEpisode] = {}
+        # Fire-and-forget work spawned from the env stream (session releases, streamed segments).
+        self.side_tasks: set[asyncio.Task] = set()
         self.live_events: list[dict[str, Any]] = []
         self.live_dropped = False
         self.live_task: asyncio.Task | None = None
@@ -427,6 +429,8 @@ class Dispatcher:
             if group.kind == "train"
             and self.train_envs.get(group.env_name).uses_live_policy
             and group.policy_version_at_start < min_version
+            # a streaming episode may never end: its segments age from their own starts
+            and not self.train_envs.get(group.env_name).config.stream_segments
         ]
         cancelled = 0
         for gid in stale_groups:
@@ -579,9 +583,30 @@ class Dispatcher:
         )
 
         session_ids: set[str] = set()
+        # stream_segments: closed segments not yet shipped, the shipped ones, and the
+        # policy version each segment started under.
+        stream = group.kind == "train" and env.config.stream_segments
+        closed: list[dict] = []
+        shipped: set[str] = set()
+        segment_start: dict[str, int] = {}
 
         def on_delta(delta: dict) -> None:
             session_ids.add(delta["trace"])
+            if (delta.get("set") or {}).get("is_completed"):
+                # A trace that finishes before its episode (e.g. a closed segment) releases its
+                # engine session now rather than holding its KV until the episode ends.
+                self._spawn(clients.finish_sessions([delta["trace"]]), f"Releasing the session of trace {delta['trace']}")
+            if stream and "open" in delta:
+                segment_start[delta["trace"]] = self.policy.version
+                # The next segment opened (its re-prefill), so the closed ones are not the
+                # episode's last trace: ship them now rather than when the episode ends.
+                for trace in closed:
+                    shipped.add(trace["id"])
+                    self._spawn(
+                        self.emit_segment(meta, trace, segment_start.get(trace["id"], meta.policy_version)),
+                        f"Shipping segment {trace['id']} of group {meta.group_id} ({meta.env_name})",
+                    )
+                closed.clear()
             first = not meta.live
             live.apply(meta, delta)
             self.queue_live({"delta": delta, "dispatch": live.dispatch_info(meta)})
@@ -598,8 +623,12 @@ class Dispatcher:
                     cache_salt=cache_salt,
                     task_data=group.task.data.model_dump(mode="json"),
                     on_delta=on_delta,
+                    on_trace_complete=closed.append if stream else None,
                 )
                 session_ids.update(trace.id for trace in episode.traces)
+                if shipped:
+                    episode.traces = [trace for trace in episode.traces if trace.id not in shipped]
+                    meta.policy_version = min(segment_start.get(t.id, meta.policy_version) for t in episode.traces)
                 return episode
             finally:
                 cleanup = asyncio.create_task(clients.finish_sessions(sorted(session_ids)))
@@ -613,6 +642,33 @@ class Dispatcher:
         self.inflight[task] = meta
         self.live_events.append(live.pending_event(meta))
         return True
+
+    def _spawn(self, coroutine, what: str) -> None:
+        """Run ``coroutine`` in the background. Nothing awaits it, so a failure is logged
+        here: a segment that never ships or a session never released must not pass silently."""
+        task = asyncio.create_task(coroutine)
+        self.side_tasks.add(task)
+
+        def done(task: asyncio.Task) -> None:
+            self.side_tasks.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                get_logger().warning(f"{what} failed: {task.exception()!r}")
+
+        task.add_done_callback(done)
+
+    async def emit_segment(self, meta: InflightEpisode, trace: dict, policy_start: int) -> None:
+        """Ship one closed segment of a still-running episode (``stream_segments``) as
+        its own one-trace episode in its own group, aging from its own start. ``trace``
+        is the client's live assembled dict: read now, after its final ``ok`` landed."""
+        trace = {key: value for key, value in trace.items() if key != "pending"}
+        record = {"task": trace["task"], "traces": [trace], "ok": bool(trace.get("ok"))}
+        episode = await asyncio.to_thread(vf.WireEpisode.model_validate, record)
+        episode.env.name = meta.env_name
+        episode.group = vf.GroupInfo(id=uuid.uuid4().hex)
+        step = self.progress.step if self.progress is not None else meta.step
+        work = vf.TrainWorkInfo(step=step, policy=vf.PolicySpan(start=policy_start, end=self.policy.version))
+        episode.record_run(vf.TrainRunInfo(id=self.run_id, name=self.run_name, work=work))
+        await self.out_q.put(episode)
 
     async def acquire(self) -> None:
         """Reserve one permit + rate-limit it. Caller must precheck
@@ -710,6 +766,8 @@ class Dispatcher:
         """Stamp one completed episode with its dispatch provenance and emit it."""
         _validate_episode_task(episode, meta.task)
         policy_version = self.complete_group_member(meta, group)
+        if meta.kind == "train" and self.train_envs is not None and self.train_envs.get(meta.env_name).config.stream_segments:
+            policy_version = meta.policy_version  # a streaming episode keeps only its last segment
 
         episode.env.name = meta.env_name
         episode.group = vf.GroupInfo(id=str(meta.group_id))

@@ -122,16 +122,19 @@ class Env:
         cache_salt: str | None,
         task_data: dict,
         on_delta: Callable[[dict], None] | None = None,
+        on_trace_complete: Callable[[dict], None] | None = None,
     ) -> vf.WireEpisode:
         """Run and return the native typed episode.
         ``on_delta`` sees each delta of the env server's stream — a turn or a phase
-        change of one of the episode's traces — as it lands."""
+        change of one of the episode's traces — as it lands; ``on_trace_complete``
+        each trace, assembled, when it completes."""
         return await self.env_client.run(
             task_data=task_data,
             client=client,
             model=model_name,
             sampling=self._sampling(cache_salt),
             on_delta=on_delta,
+            on_trace_complete=on_trace_complete,
         )
 
 
