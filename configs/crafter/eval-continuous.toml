@@ -4,7 +4,8 @@
 # new_tokens, the model writes a summary of at most summary_tokens and the next segment
 # (a fresh trace and session) starts from the system prompt, that summary and the
 # current observation. Each segment is a trace of at most system prompt + summary +
-# new_tokens, which is also what one training sample would hold. Episodes end on the
+# new_tokens (~165k tokens here, under the server's max_model_len), which is also what
+# one training sample would hold. Episodes end on the
 # wall clock (max_episode_seconds), so a run inside a scheduler block still records
 # them; scripts/crafter/continuous_chain.sh chains such blocks. Serve
 # configs/crafter/inference-kve.toml first.
@@ -46,8 +47,8 @@ env.on_death = "respawn"
 env.respawn_at = "spawn"
 env.death_inventory = "drop_all"
 env.death_penalty = 0.05
-env.player.segments.new_tokens = 32768
-env.player.segments.summary_tokens = 4096
+env.player.segments.new_tokens = 131072
+env.player.segments.summary_tokens = 32768
 env.player.harness.id = "inline-chat"
 env.player.runtime.type = "subprocess"
 serve.pool.type = "elastic"
