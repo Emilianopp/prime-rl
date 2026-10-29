@@ -1260,9 +1260,40 @@ def test_custom_renderer_rejects_unknown_fields(tmp_path, custom_renderer_import
 def test_segments_require_episode_credit():
     from prime_rl.configs.orchestrator import TrainSourceConfig
 
-    segments = {"budget_tokens": 131072, "summary_tokens": 8192}
+    segments = {"new_tokens": 131072, "summary_tokens": 8192}
     source = {"env": {"taskset": {"id": "reverse-text"}, "agent": {"segments": segments}}}
     with pytest.raises(ValidationError, match="credit = 'episode'"):
         TrainSourceConfig.model_validate(source)
     episode = TrainSourceConfig.model_validate({**source, "algo": {"type": "grpo", "credit": "episode"}})
     assert episode.algo.credit == "episode"
+
+
+def test_segment_traces_fit_with_the_inherited_summary():
+    """A segment's trace holds the inherited summary on top of its new tokens."""
+    segments = {"new_tokens": 28672, "summary_tokens": 4096}
+    source = {
+        "env": {"taskset": {"id": "reverse-text"}, "agent": {"segments": segments}},
+        "algo": {"type": "grpo", "credit": "episode"},
+    }
+
+    def rl(seq_len):
+        return RLConfig.model_validate(
+            {"seq_len": seq_len, "trainer": {}, "orchestrator": {"renderer": {"name": "default"}, "train": {"source": [source]}}}
+        )
+
+    assert rl(32768).trainer.model.seq_len == 32768
+    with pytest.raises(ValidationError, match="inherited summary"):
+        rl(30000)  # fits new_tokens, not new_tokens + summary_tokens
+
+
+def test_stream_segments_needs_segments_and_one_trace_groups():
+    from prime_rl.configs.orchestrator import TrainSourceConfig
+
+    segments = {"new_tokens": 131072, "summary_tokens": 8192}
+    env = {"taskset": {"id": "reverse-text"}, "agent": {"segments": segments}}
+    with pytest.raises(ValidationError, match="needs an agent with segments"):
+        TrainSourceConfig.model_validate({"env": {"taskset": {"id": "reverse-text"}}, "stream_segments": True})
+    with pytest.raises(ValidationError, match="group_size = 1"):
+        TrainSourceConfig.model_validate({"env": env, "stream_segments": True, "group_size": 4})
+    source = TrainSourceConfig.model_validate({"env": env, "stream_segments": True, "algo": {"type": "debug"}})
+    assert source.stream_segments
