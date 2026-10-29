@@ -38,20 +38,23 @@
 # (game steps per episode instead of the world's 10,000), SAMPLING (extra sampling keys,
 # e.g. "top_k=40 presence_penalty=2.0": Qwen3.5's non-thinking reasoning settings),
 # THINKING (1: the renderer's thinking mode), TURN_TOKENS (max tokens per reply, default
-# 1024), REPO (prime-rl checkout; deps/ submodules checked out), VENV, SGLANG_VENV, OUT_ROOT.
+# 1024), CONTINUOUS (1: configs/crafter/eval-continuous.toml - endless world, respawn,
+# segments, episodes end on the wall clock; it sets RESPAWN/SEGMENTS/EPISODE_STEPS'
+# settings itself, so leave those unset), TIME_LIMIT (seconds per episode, with
+# CONTINUOUS: env.max_episode_seconds), REPO (prime-rl checkout; deps/ submodules checked out), VENV, SGLANG_VENV, OUT_ROOT.
 set -u
-KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-} MIN_TOKENS=${MIN_TOKENS:-} FP32_STATE=${FP32_STATE:-} WEIGHTS=${WEIGHTS:-} SKIP=${SKIP:-0} CONC_MIN=${CONC_MIN:-} MAX_TOKENS=${MAX_TOKENS:-} MAMBA_SLOTS=${MAMBA_SLOTS:-} SEGMENTS=${SEGMENTS:-} EPISODE_STEPS=${EPISODE_STEPS:-} SAMPLING=${SAMPLING:-} THINKING=${THINKING:-} TURN_TOKENS=${TURN_TOKENS:-}
+KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-} MIN_TOKENS=${MIN_TOKENS:-} FP32_STATE=${FP32_STATE:-} WEIGHTS=${WEIGHTS:-} SKIP=${SKIP:-0} CONC_MIN=${CONC_MIN:-} MAX_TOKENS=${MAX_TOKENS:-} MAMBA_SLOTS=${MAMBA_SLOTS:-} SEGMENTS=${SEGMENTS:-} EPISODE_STEPS=${EPISODE_STEPS:-} SAMPLING=${SAMPLING:-} THINKING=${THINKING:-} TURN_TOKENS=${TURN_TOKENS:-} CONTINUOUS=${CONTINUOUS:-} TIME_LIMIT=${TIME_LIMIT:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}${NOTEBOOK:+_notebook}${WORKSPACE:+_workspace-$WORKSPACE}${EXTRAS:+_extras}${EXTRAS:+${EXTRAS#1}}${REASONING:+_reasoning}${RELAXED:+_relaxed}${SILENT_MALFORMED:+_silent}${MIN_TOKENS:+_min$MIN_TOKENS}${FP32_STATE:+_fp32}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${EPISODE_STEPS:+_steps$EPISODE_STEPS}${SAMPLING:+_samp-${SAMPLING// /_}}${THINKING:+_thinking}${TURN_TOKENS:+_tt$TURN_TOKENS}_skip$SKIP${WEIGHTS:+_w-$(basename "$(dirname "$(dirname "$WEIGHTS")")")}/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}${NOTEBOOK:+_notebook}${WORKSPACE:+_workspace-$WORKSPACE}${EXTRAS:+_extras}${EXTRAS:+${EXTRAS#1}}${REASONING:+_reasoning}${RELAXED:+_relaxed}${SILENT_MALFORMED:+_silent}${MIN_TOKENS:+_min$MIN_TOKENS}${FP32_STATE:+_fp32}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${EPISODE_STEPS:+_steps$EPISODE_STEPS}${SAMPLING:+_samp-${SAMPLING// /_}}${THINKING:+_thinking}${TURN_TOKENS:+_tt$TURN_TOKENS}${CONTINUOUS:+_continuous}${TIME_LIMIT:+_tl$TIME_LIMIT}_skip$SKIP${WEIGHTS:+_w-$(basename "$(dirname "$(dirname "$WEIGHTS")")")}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/crafter_env:$REPO/deps/verifiers:$REPO/deps/renderers${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[crafter eval r$KEEP-1 n$N c$CONC respawn=${RESPAWN:-off} notebook=${NOTEBOOK:-off} workspace=${WORKSPACE:-off} extras=${EXTRAS:-off} reasoning=${REASONING:-off} relaxed=${RELAXED:-off} silent_malformed=${SILENT_MALFORMED:-off} min_tokens=${MIN_TOKENS:-off} fp32_state=${FP32_STATE:-off} segments=${SEGMENTS:-off} thinking=${THINKING:-off} weights=${WEIGHTS:-base}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[crafter eval r$KEEP-1 n$N c$CONC respawn=${RESPAWN:-off} notebook=${NOTEBOOK:-off} workspace=${WORKSPACE:-off} extras=${EXTRAS:-off} reasoning=${REASONING:-off} relaxed=${RELAXED:-off} silent_malformed=${SILENT_MALFORMED:-off} min_tokens=${MIN_TOKENS:-off} fp32_state=${FP32_STATE:-off} segments=${SEGMENTS:-off} thinking=${THINKING:-off} continuous=${CONTINUOUS:-off} weights=${WEIGHTS:-base}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
@@ -108,11 +111,14 @@ case $WORKSPACE in
   files) DEATH="$DEATH\nenv.taskset.workspace = true\nenv.taskset.workspace_ledger = false" ;;
   *) echo "unknown WORKSPACE $WORKSPACE"; exit 2 ;;
 esac
-sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"$DEATH|" configs/crafter/eval-kve.toml > "$OUT/eval.toml"
+EVAL_TOML=configs/crafter/eval-kve.toml
+[ -n "$CONTINUOUS" ] && EVAL_TOML=configs/crafter/eval-continuous.toml
+sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"$DEATH|" "$EVAL_TOML" > "$OUT/eval.toml"
 for kv in $SAMPLING; do sed -i "s|^\[sampling\]$|[sampling]\n${kv%%=*} = ${kv#*=}|" "$OUT/eval.toml"; done
 [ -n "$THINKING" ] && sed -i "s/^enable_thinking = false/enable_thinking = true/" "$OUT/eval.toml"
 [ -n "$TURN_TOKENS" ] && sed -i "s/^max_completion_tokens = .*/max_completion_tokens = $TURN_TOKENS/" "$OUT/eval.toml"
 [ -n "$EPISODE_STEPS" ] && sed -i "s/^env.max_episode_steps = .*/env.max_episode_steps = $EPISODE_STEPS/" "$OUT/eval.toml"
+[ -n "$TIME_LIMIT" ] && sed -i "s/^env.max_episode_seconds = .*/env.max_episode_seconds = $TIME_LIMIT/" "$OUT/eval.toml"
 [ -n "$MAX_TOKENS" ] && sed -i "s/^env.player.max_total_tokens = .*/env.player.max_total_tokens = $MAX_TOKENS/" "$OUT/eval.toml"
 [ -n "$MIN_TOKENS" ] && sed -i "s|^\[sampling\]$|[sampling]\nmin_tokens = $MIN_TOKENS|" "$OUT/eval.toml"
 uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false \

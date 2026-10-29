@@ -1,0 +1,54 @@
+# Inference-only continuous Crafter under KV-Streams: no trainer, the policy as it is.
+# The world never ends (max_episode_steps = 0) and a death respawns the player, so an
+# episode is one long life of play, run as segments: once a segment has added
+# new_tokens, the model writes a summary of at most summary_tokens and the next segment
+# (a fresh trace and session) starts from the system prompt, that summary and the
+# current observation. Each segment is a trace of at most system prompt + summary +
+# new_tokens, which is also what one training sample would hold. Episodes end on the
+# wall clock (max_episode_seconds), so a run inside a scheduler block still records
+# them; scripts/crafter/continuous_chain.sh chains such blocks. Serve
+# configs/crafter/inference-kve.toml first.
+#
+#   uv run eval @ configs/crafter/eval-continuous.toml
+
+model = "Qwen/Qwen3.5-4B"
+group_size = 1
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+# Any admin URL enables releasing each episode's session when it finishes.
+admin_base_url = ["http://localhost:8000/v1"]
+
+[renderer]  # token-in/out with the trace id as session id, as in training
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[concurrency]
+min_inflight = 64
+max_inflight = 64
+
+[select]
+limit = 64
+
+[sampling]
+max_completion_tokens = 1024
+temperature = 1.0
+
+[[source]]
+name = "crafter"
+env.taskset.id = "crafter-env"
+env.taskset.max_episode_steps = 0  # no world length in the observations
+env.max_episode_steps = 0  # an endless world
+env.max_episode_seconds = 9000  # 2.5 h: ends inside a 3 h block (~10 min to start, the rest to finish)
+env.on_death = "respawn"
+env.respawn_at = "spawn"
+env.death_inventory = "drop_all"
+env.death_penalty = 0.05
+env.player.segments.new_tokens = 32768
+env.player.segments.summary_tokens = 4096
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16
