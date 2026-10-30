@@ -93,6 +93,8 @@ def test_converter_writes_a_row_per_segment(tmp_path, monkeypatch):
     for row, nodes in zip(rows, [first, later]):
         stream_ids, _, calls, _ = converter.trace_calls({"nodes": nodes})
         assert row["input_ids"] == stream_ids
+        # Every sampled token is a target, although no reply holds an <action>.
+        assert sum(row["loss_mask"]) == 2 * sum(bool(node.get("sampled")) for node in nodes)
         assert row["kv_death"] == converter.evict(stream_ids, calls, window=2, stride=1, message_end_id=7)
     assert any(d >= 0 for d in rows[1]["kv_death"])  # three turns past an r2 window: the later segment evicts too
 
