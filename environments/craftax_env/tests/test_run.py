@@ -119,6 +119,7 @@ def test_respawn_continues_the_game(tmp_path, monkeypatch, death_inventory):
     assert line["ended_by"] == "terminated"  # the player stopped answering, not a death
     assert [d["turn"] for d in line["deaths"]] == [5, 10]  # the 3rd and 6th played actions; forfeits count as turns
     assert all(d["floor"] == 1 for d in line["deaths"])
+    assert all(isinstance(d["respawn_hostile"], bool) for d in line["deaths"])
     after = interaction.received[5]  # the observation after the first death
     assert "You died (death 1, on floor 1" in after and "You respawned on the Overworld" in after
     assert "Floor: 0 (Overworld)" in after and "HP: 9/9" in after
@@ -126,6 +127,47 @@ def test_respawn_continues_the_game(tmp_path, monkeypatch, death_inventory):
     assert "Step: 5    Upstream timestep" in after  # no turn limit in the HUD
     assert interaction.trace.rewards["craftax_achievements"] == pytest.approx(line["achievement_score"] / 226 - 0.02)
 
+
+
+def _with_zombie_at(game, cell):
+    """``game`` with melee mob slot 0 on the Overworld alive at ``cell``, the others dead."""
+    import numpy as np
+
+    mobs = game.state.melee_mobs
+    position = np.asarray(mobs.position).copy()
+    mask = np.zeros_like(np.asarray(mobs.mask))
+    position[0, 0] = cell
+    mask[0, 0] = True
+    jnp = game._rt["jax"].numpy
+    game.state = game.state.replace(melee_mobs=mobs.replace(position=jnp.asarray(position), mask=jnp.asarray(mask)))
+    for kind in ("ranged_mobs", "mob_projectiles"):
+        other = getattr(game.state, kind)
+        game.state = game.state.replace(**{kind: other.replace(mask=jnp.zeros_like(other.mask))})
+
+
+def test_safe_respawn_keeps_away_from_hostiles():
+    game = glyph.CraftaxGame(1000042, 50)
+    nearest = game._free_cell(game.spawn)
+    _with_zombie_at(game, nearest)  # a zombie on (well, at) the cell a plain respawn would pick
+    assert game.hostiles(0) == [tuple(nearest)]
+    assert game.hostile_near(nearest, 0) and not game.hostile_near((nearest[0] + 9, nearest[1]), 8)
+    safe = game._free_cell(game.spawn, safe_radius=4)
+    assert max(abs(safe[0] - nearest[0]), abs(safe[1] - nearest[1])) > 4
+    assert not game.hostile_near(safe, 4)
+    # Without safe_radius nothing changes but the mob map: the nearest free cell.
+    plain = game._free_cell(game.spawn)
+    assert max(abs(plain[0] - game.spawn[0]), abs(plain[1] - game.spawn[1])) <= max(abs(safe[0] - game.spawn[0]), abs(safe[1] - game.spawn[1]))
+    at = game.respawn("keep", safe_radius=4)
+    assert tuple(at) == tuple(safe) and tuple(int(v) for v in game.position) == tuple(safe)
+
+
+def test_safe_respawn_falls_back_to_the_nearest_free_cell():
+    game = glyph.CraftaxGame(1000042, 50)
+    nearest = game._free_cell(game.spawn)
+    _with_zombie_at(game, game.spawn)
+    # No cell within the search radius is 40 tiles from the zombie: the nearest free cell.
+    assert game._free_cell(game.spawn, radius=3, safe_radius=40) == game._free_cell(game.spawn, radius=3)
+    assert nearest is not None
 
 def test_parse_actions():
     L, D = glyph.ACTION_NAMES.index("MOVE_LEFT"), glyph.ACTION_NAMES.index("DO")

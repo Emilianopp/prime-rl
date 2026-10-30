@@ -18,7 +18,9 @@
 # 2048; also the budget the system prompt states), NO_THINKING (1: the renderer's
 # non-thinking mode and GlyphBench's action-only format), TIME_LIMIT (seconds per
 # episode, default the config's 9000), STEPS (turns per episode, default 10000),
-# SEGMENTS (B:BS, default the config's 131072:32768; "off": one trace per episode),
+# SEGMENTS (not on this branch: its verifiers has no segments; each episode is one trace
+# under a 256k token ceiling), SAFE_RADIUS (N: respawn at a free cell with no hostile mob
+# within N tiles, env.respawn_safe; with CONTINUOUS),
 # CONTINUOUS (1: configs/craftax/eval-continuous.toml - respawn on death, no turn limit,
 # achievement reward; STEPS then sets a turn limit again), FEEDBACK (1: env.action_feedback - the
 # message says what each action did), MAX_ACTIONS (N > 1: up to N actions per reply), REPO
@@ -26,18 +28,19 @@
 # --target dir with jax[cpu] and the Craftax fork, for a venv without them), OUT_ROOT.
 set -u
 KEEP=${KEEP:-50} N=${N:-64} CONC=${CONC:-64} SKIP=${SKIP:-0} TURN_TOKENS=${TURN_TOKENS:-2048} NO_THINKING=${NO_THINKING:-}
-TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-}
+TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} SAFE_RADIUS=${SAFE_RADIUS:-}
+[ -n "$SEGMENTS" ] && [ "$SEGMENTS" != off ] && { echo "SEGMENTS=$SEGMENTS: this branch's verifiers has no segments"; exit 2; }
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}_skip$SKIP/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${SAFE_RADIUS:+_safe$SAFE_RADIUS}_skip$SKIP/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY JAX_PLATFORMS=cpu
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/craftax_env:$REPO/deps/verifiers:$REPO/deps/renderers${CRAFTAX_PY:+:$CRAFTAX_PY}${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[craftax eval r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[craftax eval r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
@@ -71,12 +74,7 @@ sed -i "s/^max_completion_tokens = .*/max_completion_tokens = $TURN_TOKENS/; s/^
 [ -n "$NO_THINKING" ] && sed -i "s/^enable_thinking = true/enable_thinking = false/; s|^env.taskset.split = .*|&\nenv.taskset.enable_reasoning = false|" "$OUT/eval.toml"
 [ -n "$TIME_LIMIT" ] && sed -i "s/^env.max_episode_seconds = .*/env.max_episode_seconds = $TIME_LIMIT/" "$OUT/eval.toml"
 [ -n "$STEPS" ] && sed -i "s/^env.max_episode_steps = .*/env.max_episode_steps = $STEPS/" "$OUT/eval.toml"
-if [ "$SEGMENTS" = off ]; then
-  sed -i "/^env.player.segments/d; s|^env.player.harness.id = .*|env.player.max_total_tokens = 256000\n&|" "$OUT/eval.toml"
-elif [ -n "$SEGMENTS" ]; then
-  IFS=: read -r SEG_B SEG_S <<< "$SEGMENTS"
-  sed -i "s/^env.player.segments.new_tokens = .*/env.player.segments.new_tokens = $SEG_B/; s/^env.player.segments.summary_tokens = .*/env.player.segments.summary_tokens = $SEG_S/" "$OUT/eval.toml"
-fi
+[ -n "$SAFE_RADIUS" ] && sed -i "s|^env.max_episode_steps = .*|&\nenv.respawn_safe = true\nenv.respawn_safe_radius = $SAFE_RADIUS|" "$OUT/eval.toml"
 uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false \
   --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "$CONC" --concurrency.max-inflight "$CONC" \
   --concurrency.initial-inflight "$CONC" > "$OUT/eval.log" 2>&1

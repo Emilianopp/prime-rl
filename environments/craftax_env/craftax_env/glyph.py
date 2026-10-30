@@ -409,15 +409,17 @@ class CraftaxGame:
         got = np.asarray(self.state.achievements, dtype=bool)
         return float(self._rt["weights"][got].sum())
 
-    def respawn(self, death_inventory: str) -> tuple[int, int]:
+    def respawn(self, death_inventory: str, safe_radius: int | None = None) -> tuple[int, int]:
         """Undo a death: back on the Overworld at the free cell nearest the world's spawn
         point, vitals at their maximum, sleep/rest and the vitals' counters reset, the
         inventory per ``death_inventory`` ("drop_all": everything, enchantments included;
         "drop_materials": materials and consumables, tools and armour kept; "keep").
-        Achievements, XP, attributes, learned spells and the world itself stay."""
+        Achievements, XP, attributes, learned spells and the world itself stay. With
+        ``safe_radius``, the nearest free cell with no hostile mob or mob projectile within
+        that many tiles (a square around it), else the nearest free cell."""
         jnp = self._rt["jax"].numpy
         st, U = self.state, self._rt["max_vitals"]
-        at = self._free_cell(self.spawn)
+        at = self._free_cell(self.spawn, safe_radius=safe_radius)
         inventory, extra = st.inventory, {}
         if death_inventory == "drop_all":
             inventory = self._rt["empty_inventory"]()
@@ -452,20 +454,40 @@ class CraftaxGame:
         )
         return at
 
-    def _free_cell(self, target: tuple[int, int], radius: int = 16) -> tuple[int, int]:
-        """The walkable, mob-free Overworld cell nearest ``target`` (ring by ring)."""
+    def hostiles(self, floor: int = 0) -> list[tuple[int, int]]:
+        """Positions of the live hostile mobs (melee and ranged) and mob projectiles on
+        ``floor`` (0: the Overworld)."""
+        st, out = self.state, []
+        for mobs in (st.melee_mobs, st.ranged_mobs, st.mob_projectiles):
+            positions, alive = np.asarray(mobs.position[floor]), np.asarray(mobs.mask[floor])
+            out += [(int(p[0]), int(p[1])) for p, live in zip(positions, alive) if live]
+        return out
+
+    def hostile_near(self, cell: tuple[int, int], distance: int, floor: int = 0) -> bool:
+        """A hostile mob or mob projectile within ``distance`` tiles of ``cell`` (a square)."""
+        r0, c0 = cell
+        return any(max(abs(r - r0), abs(c - c0)) <= distance for r, c in self.hostiles(floor))
+
+    def _free_cell(self, target: tuple[int, int], radius: int = 16, safe_radius: int | None = None) -> tuple[int, int]:
+        """The walkable, mob-free Overworld cell nearest ``target`` (ring by ring). With
+        ``safe_radius``, the nearest such cell with no hostile within ``safe_radius`` tiles,
+        else the nearest free cell (as without it)."""
         level = np.asarray(self.state.map[0])
         mobs = np.asarray(self.state.mob_map[0])
         blocked = self._rt["not_walkable"][level] | mobs
+        hostiles = self.hostiles(0) if safe_radius else []
         r0, c0 = target
+        fallback = None
         for d in range(radius + 1):
             for r in range(r0 - d, r0 + d + 1):
                 for c in range(c0 - d, c0 + d + 1):
                     if max(abs(r - r0), abs(c - c0)) != d:
                         continue
                     if 0 <= r < level.shape[0] and 0 <= c < level.shape[1] and not blocked[r, c]:
-                        return r, c
-        return target
+                        if not hostiles or all(max(abs(r - hr), abs(c - hc)) > safe_radius for hr, hc in hostiles):
+                            return r, c
+                        fallback = fallback or (r, c)
+        return fallback or target
 
     def snapshot(self) -> dict:
         """What an action can change, for ``feedback``."""

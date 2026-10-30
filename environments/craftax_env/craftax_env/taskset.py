@@ -85,6 +85,12 @@ class CraftaxEnvConfig(vf.EnvConfig):
     death_inventory: Literal["drop_all", "drop_materials", "keep"] = "drop_all"
     """What a death takes: every item (enchantments too), the materials and consumables
     but not the tools and armour, or nothing."""
+    respawn_safe: bool = False
+    """Opt-in, as in crafter-env: respawn at the free cell nearest the spawn point with no
+    hostile mob or mob projectile within `respawn_safe_radius` tiles (else the nearest free
+    cell). Off: the nearest free cell, as upstream."""
+    respawn_safe_radius: int = Field(2, ge=1)
+    """With respawn_safe: how far (in tiles, a square around the cell) no hostile may be."""
     death_penalty: float = Field(0.0, ge=0.0)
     """Subtracted from the episode reward per death (the reward is out of 1: 1/226 is one
     tier-1 achievement)."""
@@ -176,8 +182,10 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 died = game.health <= 0
                 if done and died and not game.out_of_turns and self.config.on_death == "respawn":
                     where = {"turn": game.turn, "floor": game.floor, "pos": list(game.position)}
-                    at = await asyncio.to_thread(game.respawn, self.config.death_inventory)
-                    deaths.append({**where, "respawn": list(at)})
+                    safe_radius = self.config.respawn_safe_radius if self.config.respawn_safe else None
+                    at = await asyncio.to_thread(game.respawn, self.config.death_inventory, safe_radius)
+                    # a hostile within 8 tiles of the respawn cell, whatever the strategy (as crafter-env logs it)
+                    deaths.append({**where, "respawn": list(at), "respawn_hostile": game.hostile_near(at, 8)})
                     lost = {
                         "drop_all": "lost your inventory",
                         "drop_materials": "lost your materials (tools and armour kept)",
