@@ -147,8 +147,8 @@ def main():
                     first = min((d for d in death if d >= 0), default=None)
                     loss_tokens += sum(loss)
                     evicted_loss_tokens += sum(1 for i, m in enumerate(loss) if m and first is not None and i >= first)
-                    row = {"input_ids": stream, "loss_mask": loss, "kv_death": death, "window": window, "segment": segment}
-                    out.write(json.dumps(row) + "\n")
+                    row = {"input_ids": stream, "loss_mask": loss, "kv_death": death, "window": window}
+                    out.write(json.dumps(row | {"trace": trace.get("id"), "segment": segment}) + "\n")
                     rows += 1
                     length = min(len(stream) - 1, args.pack_seq_len)
                     if pack_fill and pack_fill + length > args.pack_seq_len:

@@ -79,14 +79,14 @@ def test_converter_writes_a_row_per_segment(tmp_path, monkeypatch):
     # A continuous episode streams one trace per segment, each its own engine session;
     # every segment must become a row, in play order, with its own eviction schedule.
     later, first = _r2_nodes(turns=3), _r2_nodes(turns=4)
-    episode = {"traces": [{"info": {"segment": 1}, "nodes": later}, {"info": {"segment": 0}, "nodes": first}]}
+    episode = {"traces": [{"id": "b", "info": {"segment": 1}, "nodes": later}, {"id": "a", "info": {"segment": 0}, "nodes": first}]}
     stream, out = tmp_path / "stream.jsonl", tmp_path / "rows.jsonl"
     stream.write_text(json.dumps(episode) + "\n")
     converter = _converter()
     monkeypatch.setattr(sys, "argv", ["traces_to_sft.py", str(stream), str(out), "--windows", "2", "--message-end-id", "7"])
     converter.main()
     rows = [json.loads(line) for line in out.read_text().splitlines()]
-    assert [row["segment"] for row in rows] == [0, 1]
+    assert [(row["segment"], row["trace"]) for row in rows] == [(0, "a"), (1, "b")]
     for row, nodes in zip(rows, [first, later]):
         stream_ids, _, calls, _ = converter.trace_calls({"nodes": nodes})
         assert row["input_ids"] == stream_ids
