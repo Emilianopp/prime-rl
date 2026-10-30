@@ -13,6 +13,9 @@ health term, which a respawning game would pay again on every death). Episodes e
 death (unless ``on_death = "respawn"``: continuous play, as crafter-env's), on the
 boss's defeat, at ``max_episode_steps`` model turns (0: none), on
 ``max_episode_seconds`` or at a turn/token limit of the player.
+
+With ``state_dir`` a game outlives its job: each job of a chain plays the same seeds
+on from where the last one stopped (``scripts/craftax/continuous_chain.sh``).
 """
 
 from __future__ import annotations
@@ -20,6 +23,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import pickle
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -97,10 +102,42 @@ class CraftaxEnvConfig(vf.EnvConfig):
     moved) and when a reply was forfeited. Off: GlyphBench's message (reward only)."""
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, return, achievements) to this file."""
+    state_dir: str | None = None
+    """Save each game to ``{state_dir}/{seed}.pkl`` (every ``save_every`` turns, and when
+    the episode ends) and resume it from there: a chain of jobs plays the same worlds
+    on. At ``max_episode_seconds`` the model first writes a handoff summary (the
+    player's segments' summary request), which opens the next job's first segment as a
+    segment switch would; a game cut off without one resumes with its last segment's
+    inherited summary. Counters (turns, deaths, achievements' turns, ...) carry over."""
+    save_every: int = Field(50, ge=1)
+    """Model turns between saves of a game with ``state_dir``."""
 
 
 def _new_game(seed: int, max_turns: int | None) -> glyph.CraftaxGame:
     return glyph.CraftaxGame(seed, max_turns)
+
+
+def _load_state(path: str) -> dict | None:
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        return None
+
+
+def _save_state(path: str, state: dict) -> None:
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "wb") as f:
+        pickle.dump(state, f)
+    os.replace(tmp, path)  # atomic: a job killed mid-save keeps the previous save
+
+
+def _inherited_summary(trace, header: str | None) -> str | None:
+    """The handoff summary the current segment opened with (its system prompt's tail)."""
+    if header is None or not trace.nodes or trace.nodes[0].message.role != "system":
+        return None
+    content = trace.nodes[0].message.content
+    return content.split(header, 1)[1].strip() if isinstance(content, str) and header in content else None
 
 
 class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
@@ -112,7 +149,6 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         started = time.time()
         deadline = started + self.config.max_episode_seconds if self.config.max_episode_seconds else None
         game = await asyncio.to_thread(_new_game, seed, self.config.max_episode_steps or None)
-        opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions)
         total, done, end = 0.0, False, "terminated"  # terminated: the run stopped answering
         forfeits: Counter[str] = Counter()
         actions: Counter[str] = Counter()
@@ -121,12 +157,42 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         unlocked_at: dict[str, int] = {}
         deaths: list[dict] = []  # one entry per respawned death: turn, floor, position, where it came back
         max_floor = 0
-        async with agents.player.interaction(task) as interaction:
+        segments = self.config.player.segments
+        header = segments.summary_header if segments is not None else None
+        path = os.path.join(self.config.state_dir, f"{seed}.pkl") if self.config.state_dir else None
+        saved = await asyncio.to_thread(_load_state, path) if path else None
+        block, played_before, summary = 0, 0.0, None
+        if saved is not None:
+            await asyncio.to_thread(game.restore, saved["game"])
+            total, turns, max_floor = saved["total"], saved["turns"], saved["max_floor"]
+            forfeits, actions, per_turn = Counter(saved["forfeits"]), Counter(saved["actions"]), Counter(saved["per_turn"])
+            unlocked_at, deaths = saved["unlocked_at"], saved["deaths"]
+            block, played_before = saved["block"] + 1, saved["played_seconds"]
+            summary = saved["summary"] or saved["last_summary"]  # an empty final summary hands over nothing
+            if segments is None:
+                summary = None
+
+        def save(summary_now: str | None, last_summary: str | None) -> dict:
+            return {
+                "version": 1, "seed": seed, "block": block, "game": game.dump(),
+                "total": total, "turns": turns, "max_floor": max_floor,
+                "forfeits": dict(forfeits), "actions": dict(actions), "per_turn": dict(per_turn),
+                "unlocked_at": unlocked_at, "deaths": deaths,
+                "played_seconds": played_before + time.time() - started,
+                "summary": summary_now, "last_summary": last_summary,
+            }
+
+        opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions)
+        kwargs = {"summary": summary or ""} if saved is not None and segments is not None else {}
+        async with agents.player.interaction(task, **kwargs) as interaction:
             segment = await interaction.turn(opening)
             while not segment.terminated:
                 if deadline is not None and time.time() >= deadline:
                     end = "time_limit"
                     break
+                if path and turns and turns % self.config.save_every == 0:
+                    state = save(None, _inherited_summary(interaction.trace, header))
+                    await asyncio.to_thread(_save_state, path, state)
                 turns += 1
                 indices, failure, dropped = glyph.parse_actions(segment.last_reply, max_actions)
                 if not indices:
@@ -199,6 +265,16 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     break
                 observation = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions)
                 segment = await interaction.turn(observation)
+            if path:
+                handoff = None
+                if end == "time_limit" and hasattr(interaction, "summarize"):
+                    # The game pauses here: the model writes the summary the next job opens with,
+                    # over the observation it will be shown again (the cut-off reply's actions
+                    # were not played).
+                    pending = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions)
+                    handoff = await interaction.summarize(pending)
+                state = save(handoff, _inherited_summary(interaction.trace, header))
+                await asyncio.to_thread(_save_state, path, state)
         trace = interaction.trace
         score = total if self.config.reward == "return" else game.achievement_score
         reward = score / glyph.MAX_RETURN - self.config.death_penalty * len(deaths)
@@ -249,6 +325,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "survived": game.health > 0,
                 "max_floor": max_floor,
                 "seed": seed,
+                "block": block,  # jobs this game has run in before this one (state_dir)
+                "played_seconds": played_before + time.time() - started,
                 "trace_tokens": trace.num_total_tokens,
                 "task": "craftax",
             }
