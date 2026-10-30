@@ -48,20 +48,37 @@ def sglang_server_args(config: InferenceConfig) -> dict[str, Any]:
     return args
 
 
-def eviction_launch_args(config: InferenceConfig, token_id=None) -> dict[str, Any] | None:
-    """The server's turn-window schedule, with the message-end token resolved to
-    its id here (the SGLang server runs without a tokenizer)."""
+def hf_model_type(model: str) -> str | None:
+    """The ``model_type`` of a model's HF config (hub id or local path)."""
+    from transformers import PretrainedConfig
+
+    return PretrainedConfig.get_config_dict(model)[0].get("model_type")
+
+
+def eviction_launch_args(config: InferenceConfig, token_id=None, encode=None, model_type=None) -> dict[str, Any] | None:
+    """The server's turn-window schedule and the served model's eviction plan (by its
+    ``model_type``), with their marker tokens resolved to ids here (the SGLang server
+    runs without a tokenizer)."""
+    from prime_rl.inference.sglang.model_evictions import MODEL_TYPES, PLANS
+
     eviction = config.sglang.eviction
     if eviction is None:
         return None
-    if token_id is None:
+    plan = MODEL_TYPES.get(model_type or hf_model_type(config.vllm.model)) if eviction.model_plan else None
+    if token_id is None or (encode is None and plan is not None):
         from transformers import AutoTokenizer
 
-        token_id = AutoTokenizer.from_pretrained(config.vllm.model).convert_tokens_to_ids
+        tokenizer = AutoTokenizer.from_pretrained(config.vllm.model)
+        token_id = token_id or tokenizer.convert_tokens_to_ids
+        encode = encode or (lambda text: tokenizer.encode(text, add_special_tokens=False))
     message_end_id = token_id(eviction.message_end_token)
     if not isinstance(message_end_id, int) or message_end_id < 0:
         raise ValueError(f"{eviction.message_end_token!r} is not a single token of {config.vllm.model}")
-    return {"max_turns": eviction.max_turns, "stride": eviction.stride, "message_end_id": message_end_id}
+    args = {"max_turns": eviction.max_turns, "stride": eviction.stride, "message_end_id": message_end_id}
+    if plan is not None:
+        ids = {f"{name}_ids": list(encode(text)) for name, text in PLANS[plan].MARKERS.items()}
+        args["model_eviction"] = {"name": plan, "ids": ids}
+    return args
 
 
 def server(config: InferenceConfig) -> None:

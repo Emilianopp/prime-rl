@@ -11,8 +11,11 @@
 #
 #   sbatch kve_eval.sbatch
 #
-# Env: KEEP (eviction max_turns, default 50; "full": the same session path with
-# eviction off, i.e. full context), N (episodes, default 256), CONC
+# Env: KEEP (eviction max_turns, default 50, with the model's eviction plan, e.g. Qwen3.5's
+# empty think blocks; "full": the same session path with eviction off, i.e. full context,
+# no plan), MODEL_PLAN (0: the turn window alone, as before the model plans; default on),
+# THINKING (1: the renderer's thinking mode), TURN_TOKENS (max tokens per reply, default
+# 1024), N (episodes, default 256), CONC
 # (in-flight episodes, default 128), RESPAWN (unset: death ends the episode;
 # AT:INVENTORY:PENALTY[:safe], e.g. spawn:drop_all:0.05, respawns, see the env's
 # on_death / respawn_at / death_inventory / death_penalty; :safe sets respawn_safe), NOTEBOOK (1: the
@@ -49,18 +52,18 @@ SAFE_RADIUS=${SAFE_RADIUS:-} JUDGE_BACKEND=${JUDGE_BACKEND:-}  # tree runs: tile
 if [ "$TREE_DEPTH" -gt 0 ]; then N=$ROOTS CONC=${CONC:-$ROOTS} RESPAWN=${RESPAWN:-last_base:drop_materials:0.05:safe}; fi
 [ "$TREE_DEPTH" = 0 ] && TREE_DEPTH=
 [ -z "${GEMINI_API_KEY:-}" ] && [ -r "$HOME/.gemini_key" ] && export GEMINI_API_KEY=$(cat "$HOME/.gemini_key")
-KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-} MIN_TOKENS=${MIN_TOKENS:-} FP32_STATE=${FP32_STATE:-} WEIGHTS=${WEIGHTS:-} SKIP=${SKIP:-0} CONC_MIN=${CONC_MIN:-} MAX_TOKENS=${MAX_TOKENS:-} MAMBA_SLOTS=${MAMBA_SLOTS:-} EP_STEPS=${EP_STEPS:-}
+KEEP=${KEEP:-50} N=${N:-256} CONC=${CONC:-128} RESPAWN=${RESPAWN:-} NOTEBOOK=${NOTEBOOK:-} WORKSPACE=${WORKSPACE:-} EXTRAS=${EXTRAS:-} REASONING=${REASONING:-} RELAXED=${RELAXED:-} SILENT_MALFORMED=${SILENT_MALFORMED:-} MIN_TOKENS=${MIN_TOKENS:-} FP32_STATE=${FP32_STATE:-} WEIGHTS=${WEIGHTS:-} SKIP=${SKIP:-0} CONC_MIN=${CONC_MIN:-} MAX_TOKENS=${MAX_TOKENS:-} MAMBA_SLOTS=${MAMBA_SLOTS:-} EP_STEPS=${EP_STEPS:-} MODEL_PLAN=${MODEL_PLAN:-1} THINKING=${THINKING:-} TURN_TOKENS=${TURN_TOKENS:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/${TREE_DEPTH:+tree${TREE_DEPTH}_b${BRANCHES}k${KEEP_BRANCHES}_s${SEGMENT_TURNS}_}r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}${NOTEBOOK:+_notebook}${WORKSPACE:+_workspace-$WORKSPACE}${EXTRAS:+_extras}${EXTRAS:+${EXTRAS#1}}${REASONING:+_reasoning}${RELAXED:+_relaxed}${SILENT_MALFORMED:+_silent}${MIN_TOKENS:+_min$MIN_TOKENS}${FP32_STATE:+_fp32}_skip$SKIP${WEIGHTS:+_w-$(basename "$(dirname "$(dirname "$WEIGHTS")")")}/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/crafter_eval}/${TREE_DEPTH:+tree${TREE_DEPTH}_b${BRANCHES}k${KEEP_BRANCHES}_s${SEGMENT_TURNS}_}r${KEEP}-1_n${N}_c${CONC}${RESPAWN:+_respawn-${RESPAWN//:/-}}${NOTEBOOK:+_notebook}${WORKSPACE:+_workspace-$WORKSPACE}${EXTRAS:+_extras}${EXTRAS:+${EXTRAS#1}}${REASONING:+_reasoning}${RELAXED:+_relaxed}${SILENT_MALFORMED:+_silent}${MIN_TOKENS:+_min$MIN_TOKENS}${FP32_STATE:+_fp32}$([ "$MODEL_PLAN" = 0 ] && echo _noplan)${THINKING:+_thinking}${TURN_TOKENS:+_tt$TURN_TOKENS}_skip$SKIP${WEIGHTS:+_w-$(basename "$(dirname "$(dirname "$WEIGHTS")")")}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/crafter_env:$REPO/deps/verifiers:$REPO/deps/renderers${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[crafter eval ${TREE_DEPTH:+tree depth=$TREE_DEPTH branches=$BRANCHES keep=$KEEP_BRANCHES segment_turns=$SEGMENT_TURNS segment_tokens=$SEGMENT_TOKENS summary_tokens=$SUMMARY_TOKENS judge=${JUDGE_BACKEND:-openai}:${JUDGE_MODEL:-config} safe_radius=${SAFE_RADIUS:-config} key=$([ -n "${GEMINI_API_KEY:-}" ] && echo set || echo UNSET) }r$KEEP-1 n$N c$CONC ep_steps=${EP_STEPS:-10000} max_tokens=${MAX_TOKENS:-256000} respawn=${RESPAWN:-off} notebook=${NOTEBOOK:-off} workspace=${WORKSPACE:-off} extras=${EXTRAS:-off} reasoning=${REASONING:-off} relaxed=${RELAXED:-off} silent_malformed=${SILENT_MALFORMED:-off} min_tokens=${MIN_TOKENS:-off} fp32_state=${FP32_STATE:-off} weights=${WEIGHTS:-base}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[crafter eval ${TREE_DEPTH:+tree depth=$TREE_DEPTH branches=$BRANCHES keep=$KEEP_BRANCHES segment_turns=$SEGMENT_TURNS segment_tokens=$SEGMENT_TOKENS summary_tokens=$SUMMARY_TOKENS judge=${JUDGE_BACKEND:-openai}:${JUDGE_MODEL:-config} safe_radius=${SAFE_RADIUS:-config} key=$([ -n "${GEMINI_API_KEY:-}" ] && echo set || echo UNSET) }r$KEEP-1 n$N c$CONC ep_steps=${EP_STEPS:-10000} max_tokens=${MAX_TOKENS:-256000} respawn=${RESPAWN:-off} notebook=${NOTEBOOK:-off} workspace=${WORKSPACE:-off} extras=${EXTRAS:-off} reasoning=${REASONING:-off} relaxed=${RELAXED:-off} silent_malformed=${SILENT_MALFORMED:-off} min_tokens=${MIN_TOKENS:-off} fp32_state=${FP32_STATE:-off} model_plan=$MODEL_PLAN thinking=${THINKING:-off} turn_tokens=${TURN_TOKENS:-config} weights=${WEIGHTS:-base}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
@@ -73,6 +76,7 @@ if [ "$KEEP" = full ]; then
 else
   cp configs/crafter/inference-kve.toml "$OUT/inference.toml"
   EVICT=(--sglang.eviction.max-turns "$KEEP")
+  [ "$MODEL_PLAN" = 0 ] && EVICT+=(--sglang.eviction.model-plan false)
 fi
 [ -n "$FP32_STATE" ] && sed -i '/^mamba_ssm_dtype/d' "$OUT/inference.toml"
 [ -n "$MAMBA_SLOTS" ] && sed -i "s/^max_mamba_cache_size = .*/max_mamba_cache_size = $MAMBA_SLOTS/" "$OUT/inference.toml"
@@ -128,6 +132,8 @@ sed -e "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl
 # the strip above removes the config's respawn_safe_radius line too (prefix match): re-add it after respawn_safe
 [ -n "$SAFE_RADIUS" ] && sed -i -e "/^env.respawn_safe_radius = /d" -e "s|^env.respawn_safe = true|&\nenv.respawn_safe_radius = $SAFE_RADIUS|" "$OUT/eval.toml"
 [ -n "$JUDGE_BACKEND" ] && sed -i "s|^env.judge.model = .*|&\nenv.judge.backend = \"$JUDGE_BACKEND\"|" "$OUT/eval.toml"
+[ -n "$THINKING" ] && sed -i "s/^enable_thinking = false/enable_thinking = true/" "$OUT/eval.toml"
+[ -n "$TURN_TOKENS" ] && sed -i "s/^max_completion_tokens = .*/max_completion_tokens = $TURN_TOKENS/" "$OUT/eval.toml"
 [ -n "$EP_STEPS" ] && sed -i "s/^env.max_episode_steps = .*/env.max_episode_steps = $EP_STEPS/" "$OUT/eval.toml"
 [ -n "$MIN_TOKENS" ] && sed -i "s|^\[sampling\]$|[sampling]\nmin_tokens = $MIN_TOKENS|" "$OUT/eval.toml"
 uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false \

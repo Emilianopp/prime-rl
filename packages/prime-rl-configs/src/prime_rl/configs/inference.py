@@ -195,12 +195,20 @@ class SglangEvictionConfig(BaseConfig):
     The first message is protected; every two later message ends close a turn.
     Once ``max_turns`` turns are complete, the ``stride`` oldest live turns are
     evicted from the trace's session KV, again every ``stride`` turns after that.
-    Survivors keep their positions and are never recomputed."""
+    Survivors keep their positions and are never recomputed.
+
+    The served model's own eviction plan, if it has one, runs with the turn window
+    (``prime_rl.inference.sglang.model_evictions``, by the HF config's ``model_type``):
+    for Qwen3.5, earlier turns' empty think blocks."""
 
     max_turns: int = Field(8, ge=1)
     stride: int = Field(1, ge=1)
     message_end_token: str = "<|im_end|>"
     """The token that ends a chat message in the model's template."""
+    model_plan: bool = True
+    """Run the served model's own eviction plan with the turn window (Qwen3.5: earlier
+    turns' empty think blocks). False: the turn window alone, as before the plans existed
+    (for comparisons with runs made without them)."""
 
     @model_validator(mode="after")
     def validate_stride(self):

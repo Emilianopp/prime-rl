@@ -32,6 +32,13 @@ import numpy as np
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+try:
+    from . import model_evictions
+    from .eviction import CallView, EvictionPlan, TurnWindow, merge, subtract, survivor
+except ImportError:  # run as a script from the SGLang environment: siblings are on sys.path
+    import model_evictions
+    from eviction import CallView, EvictionPlan, TurnWindow, merge, subtract, survivor
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -236,46 +243,13 @@ def _aborted(ret: dict[str, Any]) -> bool:
 
 
 @dataclass
-class TurnWindow:
-    """The kv-eviction turn schedule (``r{max_turns}-{stride}``), on token ids.
-
-    The first message (through its end marker) is protected. Every two later
-    message ends close one turn. Once ``max_turns`` turns are complete, the
-    ``stride`` oldest live turns die, and again every ``stride`` turns after
-    that, so the live window saws between ``max_turns - stride`` and
-    ``max_turns - 1`` completed turns plus the turn in progress.
-    """
-
-    max_turns: int
-    stride: int
-    message_end_id: int
-    """Token id that ends a chat message (``<|im_end|>`` for Qwen)."""
-
-    def __post_init__(self):
-        if self.max_turns < 1 or not 1 <= self.stride <= self.max_turns:
-            raise ValueError(f"need max_turns >= 1 and 1 <= stride <= max_turns, got {self.max_turns}, {self.stride}")
-
-    def live_turns(self, completed: int) -> int:
-        if completed < self.max_turns:
-            return completed
-        return completed - ((completed - self.max_turns) // self.stride + 1) * self.stride
-
-    def message_ends(self, token_ids: list[int], offset: int = 0) -> list[int]:
-        """Positions just after each message end marker in ``token_ids``, which start at ``offset``."""
-        end = self.message_end_id
-        return [offset + i + 1 for i, token in enumerate(token_ids) if token == end]
-
-    def layout(self, token_ids: list[int]) -> tuple[int, int]:
-        """(protected prefix length, chronological tokens after it that are dead)."""
-        return self.layout_ends(self.message_ends(token_ids))
-
-    def layout_ends(self, ends: list[int]) -> tuple[int, int]:
-        """``layout`` from the prompt's message end positions."""
-        if not ends:
-            return 0, 0
-        protected, turn_ends = ends[0], ends[2::2]
-        dead_turns = len(turn_ends) - self.live_turns(len(turn_ends))
-        return protected, (turn_ends[dead_turns - 1] - protected if dead_turns else 0)
+class _CallEviction:
+    request: dict[str, Any]
+    """The call's ``kv_eviction`` object."""
+    dead: list[list[int]]
+    """The session's dead spans after the call, chronological."""
+    spans: list[list[int]]
+    """What the call evicts, chronological: the record for the trainer's mask."""
 
 
 @dataclass
@@ -285,18 +259,20 @@ class _TraceSession:
     # session holds, apart from the evicted tokens.
     resident: list[int] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # KV-Streams (eviction on): the session's call chain and how many
-    # chronological tokens right after the protected prefix are evicted.
+    # KV-Streams (eviction on): the session's call chain and what it evicted.
     finish_reason: Any = None  # of the last call, to explain a later reopen
     inflight_rid: str | None = None  # the session request in flight, for abort on finish
     finished: bool = False
     call_index: int = 0
     state_id: str | None = None
     protected: int = 0
-    evicted: int = 0
+    # Dead spans of the session (chronological ``[start, end)``, sorted, disjoint).
+    dead: list[list[int]] = field(default_factory=list)
     # Positions just after each message end in ``resident`` (eviction on), kept
     # incrementally so a turn scans only its new tokens.
     ends: list[int] = field(default_factory=list)
+    # Each eviction plan's own state for this session.
+    plan_states: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SessionDesyncError(Exception):
@@ -334,10 +310,14 @@ class SessionTable:
         timeout: float,
         eviction: TurnWindow | None = None,
         overlap_schedule: bool = False,
+        plans: list[EvictionPlan] = (),
     ):
         self.engine = engine
         self.timeout = timeout
+        # The turn window gives the session's message structure (the protected first
+        # message) and is the first eviction plan; ``plans`` add to it.
         self.eviction = eviction
+        self.plans: list[EvictionPlan] = [eviction, *plans] if eviction is not None else []
         # With overlap scheduling SGLang computes a call's last sampled token's KV before
         # the next call (while the evicted tokens are still resident); without it, that
         # token's KV is computed by the next call, after the eviction.
@@ -408,10 +388,11 @@ class SessionTable:
                         raise GenerateRequestError(f"trace {trace_id} finished while its session opened")
                     held = 0
                 prompt_ends: list[int] = []
-                call_kwargs, evict_to = dict(kwargs), trace.evicted
+                call_kwargs, plan = dict(kwargs), None
                 if self.eviction is not None:
                     prompt_ends = (trace.ends if extends else []) + self.eviction.message_ends(tail, held)
-                    call_kwargs["kv_eviction"], evict_to = self._eviction_call(trace, prompt_ends)
+                    plan = self._eviction_call(trace, prompt_ends, tail)
+                    call_kwargs["kv_eviction"] = plan.request
                     # SGLang requires a kv_eviction request's rid to be its call id.
                     call_kwargs["rid"] = call_kwargs["kv_eviction"]["call_id"]
                 else:
@@ -450,23 +431,20 @@ class SessionTable:
                 prompt_len = len(trace.resident)
                 trace.resident.extend(output)
                 trace.finish_reason = ret["meta_info"].get("finish_reason")
-                if self.eviction is not None:
+                if plan is not None:
                     trace.ends = prompt_ends + self.eviction.message_ends(output, prompt_len)
                     info = ret["meta_info"].get("kv_eviction") or {}
                     trace.state_id = (info.get("cache_state") or {}).get("state_id")
                     trace.call_index += 1
-                    if evict_to > trace.evicted:
+                    if plan.spans:
                         self.stats["evicting_calls"] += 1
-                        self.stats["evicted_tokens"] += evict_to - trace.evicted
+                        self.stats["evicted_tokens"] += sum(end - start for start, end in plan.spans)
                         # For the trainer, in chronological positions: the evicted tokens
                         # are unseen from the first token whose KV is computed after this
                         # eviction - the previous call's last sampled token, or (with
                         # overlap scheduling, which computes that one early) the new tail.
-                        ret["eviction"] = {
-                            "spans": [[trace.protected + trace.evicted, trace.protected + evict_to]],
-                            "at": held - (0 if self.overlap_schedule else 1),
-                        }
-                    trace.evicted = evict_to
+                        ret["eviction"] = {"spans": plan.spans, "at": held - (0 if self.overlap_schedule else 1)}
+                    trace.dead = plan.dead
                 ret["prompt_len"] = prompt_len
                 return ret
 
@@ -474,11 +452,10 @@ class SessionTable:
         """A fresh session holds the whole prompt again, evicted turns included, so
         this trace's earlier evictions no longer describe what later calls attend
         to and its training mask will be off. Expected to be rare; counted."""
-        if trace.evicted:
+        evicted = sum(end - start for start, end in trace.dead)
+        if evicted:
             self.stats["resurrected"] += 1
-            logger.warning(
-                "trace %s reopened after evicting %d tokens: they are attended again", trace_id, trace.evicted
-            )
+            logger.warning("trace %s reopened after evicting %d tokens: they are attended again", trace_id, evicted)
 
     @staticmethod
     def _log_rewrite(trace_id: str, trace: _TraceSession, token_ids: list[int]) -> None:
@@ -497,45 +474,55 @@ class SessionTable:
             trace.finish_reason,
         )
 
-    def _eviction_call(self, trace: _TraceSession, prompt_ends: list[int]) -> tuple[dict[str, Any], int]:
-        """This call's ``kv_eviction`` object and the evicted length it leaves.
+    def _eviction_call(self, trace: _TraceSession, prompt_ends: list[int], tail: list[int]) -> _CallEviction:
+        """This call's ``kv_eviction`` object and the dead spans it leaves.
 
-        Evicted turns are always the oldest live ones, right after the protected
-        prefix, so in the session's resident (survivor) coordinates the newly
-        retired turns are the one span starting at the protected length.
+        Every plan names the chronological spans that should be dead from this call
+        on; what is not dead yet dies now. The engine takes spans in the session's
+        resident (survivor) coordinates, where every dead token before a span shifts
+        it down, so adjacent survivor spans (a retired turn around a span that died
+        earlier) join into one.
         """
-        protected, dead = self.eviction.layout_ends(prompt_ends)
         cache_id = trace.engine_session
         if trace.call_index == 0:
-            trace.protected, trace.evicted = protected, 0
+            trace.protected = self.eviction.layout_ends(prompt_ends)[0]
+            trace.plan_states = [{} for _ in self.plans]
             # The first call claims the fresh session and cannot evict.
-            return {
+            request = {
                 "version": 1,
                 "cache_id": cache_id,
                 "call_id": f"{cache_id}.c0",
                 "call_index": 0,
                 "expected_state_id": None,
-                "protected_prefix_len": protected,
+                "protected_prefix_len": trace.protected,
                 "evict_spans": [],
-            }, 0
-        spans = []
+            }
+            return _CallEviction(request, dead=[], spans=[])
         # The last sampled token has no KV yet, so only the resident sequence
-        # before it can be evicted; a turn that ends later waits for the next call.
-        physical = len(trace.resident) - trace.evicted - 1
-        new = dead - trace.evicted
-        if new > 0 and trace.protected + new <= physical:
-            spans.append([trace.protected, trace.protected + new])
-        else:
-            dead = trace.evicted
-        return {
+        # before it can be evicted; a span that ends later waits for the next call.
+        limit = len(trace.resident) - 1
+        wanted = []
+        for plan, state in zip(self.plans, trace.plan_states):
+            view = CallView(trace.resident + tail, prompt_ends, trace.protected, limit, trace.dead, state)
+            wanted += [[max(start, trace.protected), min(end, limit)] for start, end in plan.evict(view)]
+        spans = subtract(merge([span for span in wanted if span[0] < span[1]]), trace.dead)
+        evict_spans: list[list[int]] = []
+        for chrono_start, chrono_end in spans:
+            span = [survivor(chrono_start, trace.dead), survivor(chrono_end, trace.dead)]
+            if evict_spans and evict_spans[-1][1] == span[0]:
+                evict_spans[-1][1] = span[1]
+            else:
+                evict_spans.append(span)
+        request = {
             "version": 1,
             "cache_id": cache_id,
             "call_id": f"{cache_id}.c{trace.call_index}",
             "call_index": trace.call_index,
             "expected_state_id": trace.state_id,
             "protected_prefix_len": trace.protected,
-            "evict_spans": spans,
-        }, dead
+            "evict_spans": evict_spans,
+        }
+        return _CallEviction(request, dead=merge(trace.dead + spans), spans=spans)
 
     async def finish(self, trace_id: str) -> None:
         """Release a finished or cancelled trace: abort its in-flight request, then
@@ -555,8 +542,8 @@ class SessionTable:
         if engine_session is not None:
             # SGLang defers the close until an in-flight request on it finishes.
             await self.engine.close_session(engine_session)
-        trace.resident, trace.ends = [], []
-        trace.call_index, trace.state_id, trace.protected, trace.evicted = 0, None, 0, 0
+        trace.resident, trace.ends, trace.dead, trace.plan_states = [], [], [], []
+        trace.call_index, trace.state_id, trace.protected = 0, None, 0
 
 
 class TraceAffinity:
@@ -799,7 +786,7 @@ def main(argv: list[str] | None = None) -> None:
         "--server-args-json",
         required=True,
         help='JSON file: {"server_args": {SGLang ServerArgs fields}, "sessions": bool, "session_timeout": seconds, '
-        '"eviction": {"max_turns", "stride", "message_end_id"} or null}',
+        '"eviction": {"max_turns", "stride", "message_end_id", "model_eviction"?: {"name", "ids"}} or null}',
     )
     args = parser.parse_args(argv)
     with open(args.server_args_json) as f:
@@ -810,18 +797,27 @@ def main(argv: list[str] | None = None) -> None:
 
     if launch.get("sessions"):
         # The engine binds lazily: the tokenizer manager exists only once the server starts.
-        eviction = TurnWindow(**launch["eviction"]) if launch.get("eviction") else None
+        schedule = dict(launch.get("eviction") or {})
+        model = schedule.pop("model_eviction", None)
         _STATE["sessions"] = SessionTable(
             engine=None,
             timeout=float(launch.get("session_timeout", 3600.0)),
-            eviction=eviction,
+            eviction=TurnWindow(**schedule) if schedule else None,
             overlap_schedule=not launch["server_args"].get("disable_overlap_schedule", False),
+            plans=[model_evictions.build(model["name"], model["ids"])] if model else [],
         )
     dp_size = int(launch["server_args"].get("dp_size") or 1)
     if dp_size > 1:
         _STATE["affinity"] = TraceAffinity(dp_size)
     app.include_router(router)
-    launch_server(ServerArgs(**launch["server_args"]), launch_callback=_tune_gc)  # after warmup
+
+    def started() -> None:  # after warmup, once SGLang has configured logging
+        if _STATE.get("sessions") is not None:
+            plans = [f"{type(p).__module__.rsplit('.', 1)[-1]}.{type(p).__name__}" for p in _STATE["sessions"].plans]
+            logger.info("KV-Streams eviction plans: %s", ", ".join(plans) or "none")
+        _tune_gc()
+
+    launch_server(ServerArgs(**launch["server_args"]), launch_callback=started)
 
 
 if __name__ == "__main__":
