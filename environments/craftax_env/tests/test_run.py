@@ -200,11 +200,33 @@ def test_feedback_on_collecting():
     game.step(do)
     text = game.feedback(do, before, game.snapshot())
     assert text.startswith("DO: used on tree: wood +1"), text
-    # a pickaxe craft with no table nearby says so
+    # a pickaxe craft with no table nearby says what is missing
     craft = glyph.ACTION_NAMES.index("MAKE_WOOD_PICKAXE")
     before = game.snapshot()
     game.step(craft)
-    assert "no effect (table nearby: no" in game.feedback(craft, before, game.snapshot())
+    text = game.feedback(craft, before, game.snapshot())
+    assert text == "MAKE_WOOD_PICKAXE: nothing made: needs a table within one step.", text
+    # so does a table placed with 1 wood (it costs 2)
+    place = glyph.ACTION_NAMES.index("PLACE_TABLE")
+    before = game.snapshot()
+    assert before["items"]["wood"] == 1
+    game.step(place)
+    text = game.feedback(place, before, game.snapshot())
+    assert text == "PLACE_TABLE: nothing placed: needs 2 wood (you have 1).", text
+
+
+def test_failed_build_reasons():
+    snap = {
+        "items": dict.fromkeys(["wood", "stone", "coal", "iron", "diamond", "sapling", "torches", "pickaxe", "sword"], 0),
+        "near_table": True, "near_furnace": False, "ahead": "water", "mob_ahead": False,
+    }
+    assert glyph._failed_build("MAKE_IRON_PICKAXE", snap) == (
+        "nothing made: needs 1 wood (you have 0), 1 stone (you have 0), 1 iron (you have 0), "
+        "1 coal (you have 0), a furnace within one step"
+    )
+    snap["items"] |= {"wood": 3, "pickaxe": 1}
+    assert glyph._failed_build("MAKE_WOOD_PICKAXE", snap) == "nothing made: you already have an equal or better pickaxe"
+    assert glyph._failed_build("PLACE_TABLE", snap) == "nothing placed: the cell ahead (water) can't take it"
 
 
 def test_multi_actions_and_feedback_in_a_run(tmp_path, monkeypatch):
