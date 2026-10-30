@@ -1,7 +1,7 @@
 """Per-training-step reply breakdown of a training run dir (buckets of N steps; uses reply_breakdown.category).
 usage: step_breakdown.py <run dir> [bucket=5]"""
 import collections, glob, io, json, os, subprocess, sys
-sys.path.insert(0, "/network/scratch/y/yuns/factory/agent-rl/prime-rl/scripts/crafter")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from reply_breakdown import category, text, CATS, A
 run, bucket = sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 5
 step_of = {}
