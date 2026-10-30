@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crafter Lineage Replay</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f25; --line: #2c3038; --text: #e4e6ea; --muted: #9aa1ad;
+    --accent: #6aa9ff; --good: #5fc27e; --bad: #ef6b6b; --warn: #e8b34d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
+  select, button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; }
+  button { cursor: pointer; } button:hover { border-color: var(--accent); }
+  #cell { color: var(--muted); font-size: 12px; flex: 1 1 100%; overflow-wrap: anywhere; }
+  main { display: grid; grid-template-columns: 260px minmax(0, 1fr) 420px; gap: 12px; padding: 12px 16px; }
+  @media (max-width: 1200px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-width: 0; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  #leaves { max-height: 420px; overflow: auto; display: flex; flex-direction: column; gap: 4px; }
+  .leaf { text-align: left; display: grid; grid-template-columns: 28px 1fr auto; gap: 6px; align-items: center; }
+  .leaf.active { border-color: var(--accent); background: #22324a; }
+  .badge { font-size: 11px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+  .badge.kept { color: var(--good); border-color: var(--good); }
+  #lineage { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 10px; }
+  .chip { width: 22px; height: 22px; border-radius: 4px; border: 1px solid var(--line); font-size: 10px; display: grid; place-items: center; cursor: pointer; color: #111; }
+  .chip.cur { outline: 2px solid var(--text); }
+  #mapwrap { display: flex; justify-content: center; }
+  canvas { width: 100%; max-width: 640px; aspect-ratio: 1; image-rendering: pixelated; border-radius: 6px; border: 1px solid var(--line); background: #0c0d10; }
+  #controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
+  #scrub { flex: 1 1 200px; }
+  #where { font-variant-numeric: tabular-nums; color: var(--muted); }
+  pre { white-space: pre-wrap; word-break: break-word; margin: 0; font: 12px/1.35 ui-monospace, Menlo, monospace; background: #111317; border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 330px; overflow: auto; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12px; margin-bottom: 8px; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .bars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 8px; }
+  .bar { font-size: 11px; color: var(--muted); }
+  .bar div { height: 6px; border-radius: 3px; background: #2a2e36; margin-top: 2px; overflow: hidden; }
+  .bar div i { display: block; height: 100%; }
+  .section { margin-top: 10px; }
+  .notes { border-color: var(--warn); }
+  #legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+  #legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; background: var(--c); }
+  .empty { color: var(--muted); padding: 30px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Crafter lineage replay</h1>
+  <label>chain <select id="chainSel"></select></label>
+  <label>seed <select id="seedSel"></select></label>
+  <span id="mode" class="badge"></span>
+  <div id="cell"></div>
+</header>
+<main>
+  <section class="panel">
+    <h2>Last-depth leaves</h2>
+    <div id="leaves"></div>
+    <h2 class="section">Lineage, root to leaf</h2>
+    <div id="lineage"></div>
+    <div class="section" style="color:var(--muted);font-size:11px">Chip colour is the judge score of that segment (red low, green high). A green border means the leaf survived the last cut.</div>
+  </section>
+  <section class="panel">
+    <div id="mapwrap"><canvas id="map" width="640" height="640"></canvas></div>
+    <div id="controls">
+      <button id="prev" title="step back (left arrow)">◀</button>
+      <button id="play" title="play or pause (space)">play</button>
+      <button id="next" title="step forward (right arrow)">▶</button>
+      <button id="prevSeg" title="previous segment">⏮ seg</button>
+      <button id="nextSeg" title="next segment">seg ⏭</button>
+      <label>view <select id="zoom"><option value="24" selected>follow player</option><option value="40">wide</option><option value="64">whole world</option></select></label>
+      <label>speed <select id="speed"><option>2</option><option selected>8</option><option>32</option><option>128</option></select>/s</label>
+      <input id="scrub" type="range" min="0" max="0" value="0">
+      <span id="where"></span>
+    </div>
+    <div id="note" style="margin-top:6px;color:var(--warn);font-size:12px"></div>
+    <div id="legend"></div>
+  </section>
+  <section class="panel">
+    <h2 id="segTitle">Segment</h2>
+    <div class="kv" id="segKv"></div>
+    <div class="bars" id="bars"></div>
+    <h2 class="section">Observation</h2>
+    <pre id="obs"></pre>
+    <h2 class="section">Reply</h2>
+    <pre id="reply"></pre>
+    <h2 class="section">Judge</h2>
+    <pre id="judge"></pre>
+  </section>
+</main>
+<script>
+const TILE = {
+  ".": "#4f8f39", "~": "#3672c4", "T": "#25602a", "s": "#8b8f96", "=": "#b5a684", ",": "#d8c886",
+  "c": "#2b2b2b", "i": "#c08756", "d": "#7ee3ec", "B": "#9a6735", "F": "#6d4b3a", "P": "#9ad66f", "^": "#ff5a1f",
+};
+const MOB = { "C": "#f2efe6", "Z": "#d23c3c", "S": "#e9e9f0", "*": "#ff9b9b" };
+const LEGEND = [["grass", "."], ["water", "~"], ["tree", "T"], ["stone", "s"], ["path", "="], ["sand", ","], ["coal", "c"], ["iron", "i"],
+  ["diamond", "d"], ["table", "B"], ["furnace", "F"], ["plant", "P"], ["lava", "^"]];
+const W = 64, CANVAS = 640;
+const $ = (id) => document.getElementById(id);
+let chains = [], data = null, leafId = null, frames = [], frame = 0, timer = null;
+let world = null, worldAt = -1, trail = [], deaths = [], respawns = [];
+const RESPAWN = /You died \(death (\d+)[^)]*?at \((-?\d+), (-?\d+)\)\)\. You respawned at \((-?\d+), (-?\d+)\)/;
+
+document.getElementById("legend").innerHTML = LEGEND.map(([n, c]) => `<span style="--c:${TILE[c]}">${n}</span>`).join("")
+  + `<span style="--c:${MOB.Z}">zombie</span><span style="--c:${MOB.S}">skeleton</span><span style="--c:${MOB.C}">cow</span><span style="--c:#ffd84a">player and trail</span>`;
+
+function scoreColor(s) {
+  if (s == null || isNaN(s)) return "#555";
+  const t = Math.max(0, Math.min(1, s));
+  return `hsl(${Math.round(t * 120)},60%,55%)`;
+}
+function parseObs(text) {
+  const o = {};
+  if (!text) return o;
+  let m = text.match(/Position: \((-?\d+), (-?\d+)\)(?:, facing (\w+))?/); if (m) { o.x = +m[1]; o.y = +m[2]; o.facing = m[3]; }
+  m = text.match(/Step: (\d+)/); if (m) o.step = +m[1];
+  m = text.match(/Segment turn: (\d+)(?:\/(\d+))?/); if (m) { o.segTurn = +m[1]; o.segTurns = m[2] ? +m[2] : null; }
+  m = text.match(/Vitals: health=(\d+), food=(\d+), drink=(\d+), energy=(\d+)/); if (m) o.vitals = m.slice(1, 5).map(Number);
+  m = text.match(/Inventory: ([^\n]*)/); if (m) o.inventory = m[1];
+  m = text.match(/Unlocked achievements \((\d+)\/22\)/); if (m) o.unlocked = +m[1];
+  const lines = text.split("\n"), i = lines.findIndex((l) => l.startsWith("Local map"));
+  if (i >= 0) {
+    const rows = [];
+    for (let k = i + 1; k < lines.length; k++) {
+      const l = lines[k];
+      if (!l.trim() || l.startsWith("Legend")) { if (rows.length) break; else continue; }
+      if (rows.length && l.length !== rows[0].length) break;
+      rows.push(l);
+    }
+    // a square window with the player at its centre (Crafter's local view); anything else is not drawn
+    if (rows.length % 2 === 1 && rows.length >= 3 && rows[(rows.length - 1) / 2][(rows[0].length - 1) / 2] === "@") o.map = rows;
+  }
+  return o;
+}
+function lineage() {
+  const nodes = data.nodes, path = [];
+  let id = leafId;
+  while (id && nodes[id]) { path.push(id); id = nodes[id].parent; }
+  return path.reverse();
+}
+function buildFrames() {
+  frames = [];
+  const path = lineage();
+  path.forEach((id, si) => {
+    const n = data.nodes[id];
+    if (n.turns && n.turns.length) n.turns.forEach((t, ti) => frames.push({ si, id, ti, obs: parseObs(t.obs) }));
+    else frames.push({ si, id, ti: -1, obs: { x: (n.position || [])[0], y: (n.position || [])[1], map: n.local_map ? n.local_map.split("\n") : null } });
+  });
+  // a frame without a position (a notes request quoting none) keeps the last one
+  let last = {};
+  for (const f of frames) { if (f.obs.x == null) { f.obs.x = last.x; f.obs.y = last.y; } else last = f.obs; }
+  return path;
+}
+function resetWorld() { world = Array.from({ length: W }, () => new Array(W).fill(null)); worldAt = -1; trail = []; deaths = []; respawns = []; }
+function absorb(k) {
+  const f = frames[k], o = f.obs;
+  if (o.map && o.x != null) {
+    const h = (o.map.length - 1) / 2, wdt = (o.map[0].length - 1) / 2;
+    o.map.forEach((row, r) => [...row].forEach((ch, c) => {
+      const X = o.x + c - wdt, Y = o.y + r - h;
+      if (!Number.isInteger(X) || !Number.isInteger(Y) || X < 0 || Y < 0 || X >= W || Y >= W) return;
+      if (TILE[ch]) world[Y][X] = ch; else if (world[Y][X] == null) world[Y][X] = ".";
+    }));
+  }
+  if (f.ti >= 0) {
+    const m = data.nodes[f.id].turns[f.ti].obs.match(RESPAWN);
+    if (m) {
+      f.respawn = { n: +m[1], from: [+m[2], +m[3]], to: [+m[4], +m[5]] };
+      deaths.push({ x: +m[2], y: +m[3], si: f.si, k });
+      respawns.push({ ...f.respawn, si: f.si, k });
+      trail.push(null);  // the trail breaks at a respawn
+    }
+  }
+  if (f.ti === -1) {  // a segment without saved turns: its start, its deaths, its end
+    const n = data.nodes[f.id];
+    trail.push(null);
+    if (n.position_before) trail.push([n.position_before[0], n.position_before[1], f.si]);
+    for (const d of n.deaths || []) if (d.pos) deaths.push({ x: d.pos[0], y: d.pos[1], si: f.si, k, step: d.step, cause: d.cause });
+  }
+  if (o.x != null) trail.push([o.x, o.y, f.si]);
+}
+function seek(k) {
+  k = Math.max(0, Math.min(frames.length - 1, k));
+  if (k < worldAt) resetWorld();
+  for (let i = worldAt + 1; i <= k; i++) absorb(i);
+  worldAt = k; frame = k; render();
+}
+function render() {
+  const cv = $("map"), g = cv.getContext("2d"), f = frames[frame], o = f.obs;
+  const V = +$("zoom").value, PX = CANVAS / V;
+  let ox = 0, oy = 0;
+  if (V < W && o.x != null) { ox = Math.max(0, Math.min(W - V, o.x - Math.floor(V / 2))); oy = Math.max(0, Math.min(W - V, o.y - Math.floor(V / 2))); }
+  const X = (x) => (x - ox) * PX, Y = (y) => (y - oy) * PX, C = (v) => v * PX + PX / 2;
+  g.fillStyle = "#0c0d10"; g.fillRect(0, 0, cv.width, cv.height);
+  for (let y = oy; y < oy + V; y++) for (let x = ox; x < ox + V; x++) { const ch = world[y] && world[y][x]; if (ch) { g.fillStyle = TILE[ch]; g.fillRect(X(x), Y(y), PX, PX); } }
+  if (V <= 40) { g.strokeStyle = "rgba(0,0,0,.18)"; g.lineWidth = 1; for (let i = 0; i <= V; i++) { g.beginPath(); g.moveTo(i * PX, 0); g.lineTo(i * PX, CANVAS); g.moveTo(0, i * PX); g.lineTo(CANVAS, i * PX); g.stroke(); } }
+  // deaths: this segment's bright, earlier ones faint
+  for (const d of deaths) {
+    g.strokeStyle = d.si === f.si ? "#ff3b3b" : "rgba(255,59,59,.4)"; g.lineWidth = Math.max(2, PX / 6);
+    const a = X(d.x) + PX * .2, b = Y(d.y) + PX * .2, e = PX * .6;
+    g.beginPath(); g.moveTo(a, b); g.lineTo(a + e, b + e); g.moveTo(a + e, b); g.lineTo(a, b + e); g.stroke();
+  }
+  // the last 300 trail points; nulls are breaks (respawns, segments without turns)
+  const tail = trail.slice(-300), seg = f.ti === -1;
+  g.lineWidth = Math.max(2, PX / 5); g.lineCap = "round";
+  for (let i = 1; i < tail.length; i++) {
+    const p = tail[i - 1], q = tail[i];
+    if (!p || !q) continue;
+    g.setLineDash(seg ? [6, 6] : []);
+    g.strokeStyle = `rgba(255,216,74,${0.15 + 0.8 * i / tail.length})`;
+    g.beginPath(); g.moveTo(C(p[0] - ox), C(p[1] - oy)); g.lineTo(C(q[0] - ox), C(q[1] - oy)); g.stroke();
+  }
+  // respawn jumps of the last 300 frames: dashed red, death site to respawn cell
+  g.setLineDash([5, 5]); g.lineWidth = 2;
+  for (const r of respawns) {
+    if (frame - r.k > 300) continue;
+    g.strokeStyle = r.k === frame ? "#ff6b6b" : "rgba(255,107,107,.45)";
+    g.beginPath(); g.moveTo(C(r.from[0] - ox), C(r.from[1] - oy)); g.lineTo(C(r.to[0] - ox), C(r.to[1] - oy)); g.stroke();
+  }
+  g.setLineDash([]);
+  if (o.map && o.x != null) {
+    const h = (o.map.length - 1) / 2, wdt = (o.map[0].length - 1) / 2;
+    o.map.forEach((row, r) => [...row].forEach((ch, c) => {
+      if (MOB[ch]) { g.fillStyle = MOB[ch]; g.beginPath(); g.arc(C(o.x + c - wdt - ox), C(o.y + r - h - oy), PX / (ch === "*" ? 5 : 2.6), 0, 7); g.fill(); }
+    }));
+    g.strokeStyle = "rgba(255,255,255,.6)"; g.lineWidth = 1;
+    g.strokeRect(X(o.x - wdt) + .5, Y(o.y - h) + .5, o.map[0].length * PX, o.map.length * PX);
+  }
+  if (o.x != null) {
+    g.fillStyle = "#ffd84a"; g.fillRect(X(o.x) + PX * .12, Y(o.y) + PX * .12, PX * .76, PX * .76);
+    g.strokeStyle = "#000"; g.lineWidth = 1.5; g.strokeRect(X(o.x) + PX * .12, Y(o.y) + PX * .12, PX * .76, PX * .76);
+    const dir = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }[o.facing];
+    if (dir) { g.strokeStyle = "#000"; g.lineWidth = 2; g.beginPath(); g.moveTo(C(o.x - ox), C(o.y - oy)); g.lineTo(C(o.x - ox) + dir[0] * PX * .45, C(o.y - oy) + dir[1] * PX * .45); g.stroke(); }
+  }
+  $("note").textContent = seg ? "This segment has no saved turns: the step jumps from the segment's start to its end (dashed), its deaths marked."
+    : f.respawn ? `Died at (${f.respawn.from}) and respawned at (${f.respawn.to}): the jump is the respawn.` : "";
+  panel();
+  $("scrub").value = frame;
+  $("where").textContent = `${frame + 1} / ${frames.length}`;
+  document.querySelectorAll(".chip").forEach((c) => c.classList.toggle("cur", +c.dataset.si === f.si));
+}
+function panel() {
+  const f = frames[frame], n = data.nodes[f.id], o = f.obs, j = n.judge || {};
+  $("segTitle").textContent = `Segment depth ${n.depth}, branch ${n.branch ?? "?"}`;
+  const kv = [
+    ["node", f.id.slice(0, 12)],
+    ["game step", o.step != null ? o.step : n.game_step],
+    ["segment turn", f.ti >= 0 ? `${f.ti + 1} / ${n.turns.length}` : "segment end (no saved turns)"],
+    ["ended by", n.ended_by], ["judge", j.judge_score != null ? (+j.judge_score).toFixed(3) : "n/a"],
+    ["segment unlocks", (n.segment_achievements || []).join(", ") || "none"],
+    ["deaths", (n.deaths || []).map((d) => `step ${d.step} ${d.cause || ""}`).join("; ") || "none"],
+    ["children kept", n.children],
+  ];
+  $("segKv").innerHTML = kv.map(([k, v]) => `<span>${k}</span><span>${v ?? ""}</span>`).join("");
+  const names = ["health", "food", "drink", "energy"], cols = ["#ef6b6b", "#e8b34d", "#6aa9ff", "#b58cff"];
+  $("bars").innerHTML = o.vitals ? o.vitals.map((v, i) => `<div class="bar">${names[i]} ${v}<div><i style="width:${v / 9 * 100}%;background:${cols[i]}"></i></div></div>`).join("") : "";
+  if (f.ti >= 0) {
+    const t = n.turns[f.ti];
+    $("obs").textContent = t.obs; $("reply").textContent = t.reply || "(no reply)";
+    const isNotes = /<notes>|END OF SEGMENT|MEMORY CHECK/.test(t.obs + t.reply);
+    $("reply").classList.toggle("notes", isNotes);
+  } else {
+    $("obs").textContent = [n.local_map ? `End-of-segment local map:\n${n.local_map}` : "", (n.events || []).length ? `\nEvents:\n${n.events.join("\n")}` : "",
+      n.inventory ? `\nInventory: ${JSON.stringify(n.inventory)}` : ""].join("\n").trim();
+    $("reply").textContent = n.summary ? `Notes written at the end of this segment:\n\n${n.summary}` : "(no notes)";
+    $("reply").classList.add("notes");
+  }
+  $("judge").textContent = j.rationale ? `${j.rationale}\n\nprogress ${j.progress ?? "-"}  plan ${j.plan ?? "-"}  consistency ${j.consistency ?? "-"}${j.tier != null ? "  tier " + j.tier : ""}` : "(no judge record)";
+}
+function lineageChips(path) {
+  $("lineage").innerHTML = path.map((id, si) => {
+    const n = data.nodes[id], s = n.judge && n.judge.judge_score != null ? +n.judge.judge_score : null;
+    return `<div class="chip" data-si="${si}" title="depth ${n.depth}, judge ${s != null ? s.toFixed(2) : "n/a"}, unlocks ${(n.segment_achievements || []).length}" style="background:${scoreColor(s)}">${n.depth}</div>`;
+  }).join("");
+  document.querySelectorAll(".chip").forEach((c) => c.onclick = () => { stop(); seek(frames.findIndex((f) => f.si === +c.dataset.si)); });
+}
+function selectLeaf(id) {
+  stop(); leafId = id;
+  document.querySelectorAll(".leaf").forEach((b) => b.classList.toggle("active", b.dataset.id === id));
+  const path = buildFrames(); lineageChips(path);
+  $("scrub").max = frames.length - 1; resetWorld(); seek(0);
+}
+function renderLeaves() {
+  $("leaves").innerHTML = data.leaves.map((l, i) => {
+    const n = data.nodes[l.id], s = n.judge && n.judge.judge_score != null ? (+n.judge.judge_score).toFixed(2) : "n/a";
+    return `<button class="leaf" data-id="${l.id}"><span>#${i + 1}</span><span>${l.id.slice(0, 8)} · judge ${s} · ach ${n.achievements ?? "?"}</span>${l.survivor ? '<span class="badge kept">kept</span>' : '<span class="badge">cut</span>'}</button>`;
+  }).join("");
+  document.querySelectorAll(".leaf").forEach((b) => b.onclick = () => selectLeaf(b.dataset.id));
+}
+async function loadSeed() {
+  const chain = $("chainSel").value, seed = $("seedSel").value;
+  data = await (await fetch(`data/${chain}/${seed}.json`)).json();
+  $("mode").textContent = data.has_turns ? "turn by turn" : "segment by segment (no saved traces)";
+  $("cell").textContent = data.cell;
+  renderLeaves(); selectLeaf(data.leaves[0].id);
+}
+function fillSeeds() {
+  const c = chains.find((x) => x.chain === $("chainSel").value);
+  $("seedSel").innerHTML = c.seeds.map((s) => `<option value="${s.seed}">${s.seed} (depth ${s.max_depth}, ${s.leaves} leaves)</option>`).join("");
+  return loadSeed();
+}
+function stop() { if (timer) clearInterval(timer); timer = null; $("play").textContent = "play"; }
+function play() {
+  if (timer) return stop();
+  $("play").textContent = "pause";
+  timer = setInterval(() => { if (frame >= frames.length - 1) return stop(); seek(frame + 1); }, 1000 / +$("speed").value);
+}
+$("play").onclick = play; $("prev").onclick = () => { stop(); seek(frame - 1); }; $("next").onclick = () => { stop(); seek(frame + 1); };
+$("prevSeg").onclick = () => { stop(); const si = frames[frame].si; const k = frames.findIndex((f) => f.si === (frames[frame].ti > 0 ? si : si - 1)); seek(k < 0 ? 0 : k); };
+$("nextSeg").onclick = () => { stop(); const k = frames.findIndex((f) => f.si === frames[frame].si + 1); if (k >= 0) seek(k); };
+$("zoom").onchange = () => render();
+$("speed").onchange = () => { if (timer) { stop(); play(); } };
+$("scrub").oninput = (e) => { stop(); seek(+e.target.value); };
+$("chainSel").onchange = fillSeeds; $("seedSel").onchange = loadSeed;
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+  if (e.key === " ") { e.preventDefault(); play(); } else if (e.key === "ArrowRight") { stop(); seek(frame + 1); } else if (e.key === "ArrowLeft") { stop(); seek(frame - 1); }
+});
+(async () => {
+  try { chains = await (await fetch("data/chains.json")).json(); } catch { chains = []; }
+  if (!chains.length) { document.querySelector("main").innerHTML = '<div class="empty">No data: run scripts/crafter/lineage_replay.py on a beam chain first.</div>'; return; }
+  const coverage = (c) => {
+    const segs = c.seeds.reduce((a, x) => a + (x.segments || 0), 0), withTurns = c.seeds.reduce((a, x) => a + (x.segments_with_turns || 0), 0);
+    return segs ? withTurns / segs : (c.seeds.some((x) => x.has_turns) ? 1 : 0);
+  };
+  chains.sort((a, b) => coverage(b) - coverage(a) || a.chain.localeCompare(b.chain));
+  $("chainSel").innerHTML = chains.map((c) => {
+    const v = coverage(c), tag = v >= 0.99 ? "every turn" : v > 0 ? `turns on ${Math.round(v * 100)}% of segments` : "segment ends only";
+    return `<option value="${c.chain}">${c.chain}: ${tag}</option>`;
+  }).join("");
+  fillSeeds();
+})();
+</script>
+</body>
+</html>
