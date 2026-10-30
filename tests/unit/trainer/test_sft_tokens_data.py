@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import sys
 from pathlib import Path
 
 from datasets import Dataset
@@ -46,16 +48,22 @@ def _converter():
     return module
 
 
-def test_converter_replays_the_engines_eviction_schedule():
+def _r2_nodes(turns: int = 4) -> list[dict]:
     # The r2-1 example of test_sglang_sessions: system, then turns of
     # user + generation prompt + a reply ending in the message end id (7).
     E = 7
     system, user, gen, bridge = [1, 2, E], [3, E], [4], [5]
     nodes = [{"token_ids": system + user, "sampled": False}]
-    for turn in range(4):
+    for turn in range(turns):
         if turn:
             nodes.append({"token_ids": bridge + user, "sampled": False})
         nodes.append({"token_ids": gen + [90, E], "sampled": True, "mask": [False, True, True]})
+    return nodes
+
+
+def test_converter_replays_the_engines_eviction_schedule():
+    E = 7
+    nodes = _r2_nodes()
     converter = _converter()
     stream, loss, calls, dropped = converter.trace_calls({"nodes": nodes})
     assert sum(loss) == 8 and len(calls) == 4 and dropped == 0
@@ -65,6 +73,25 @@ def test_converter_replays_the_engines_eviction_schedule():
     assert death[:3] == [-1] * 3
     assert death[3:8] == [13] * 5 and death[8:14] == [19] * 6
     assert all(d == -1 for d in death[14:])
+
+
+def test_converter_writes_a_row_per_segment(tmp_path, monkeypatch):
+    # A continuous episode streams one trace per segment, each its own engine session;
+    # every segment must become a row, in play order, with its own eviction schedule.
+    later, first = _r2_nodes(turns=3), _r2_nodes(turns=4)
+    episode = {"traces": [{"info": {"segment": 1}, "nodes": later}, {"info": {"segment": 0}, "nodes": first}]}
+    stream, out = tmp_path / "stream.jsonl", tmp_path / "rows.jsonl"
+    stream.write_text(json.dumps(episode) + "\n")
+    converter = _converter()
+    monkeypatch.setattr(sys, "argv", ["traces_to_sft.py", str(stream), str(out), "--windows", "2", "--message-end-id", "7"])
+    converter.main()
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [row["segment"] for row in rows] == [0, 1]
+    for row, nodes in zip(rows, [first, later]):
+        stream_ids, _, calls, _ = converter.trace_calls({"nodes": nodes})
+        assert row["input_ids"] == stream_ids
+        assert row["kv_death"] == converter.evict(stream_ids, calls, window=2, stride=1, message_end_id=7)
+    assert any(d >= 0 for d in rows[1]["kv_death"])  # three turns past an r2 window: the later segment evicts too
 
 
 
