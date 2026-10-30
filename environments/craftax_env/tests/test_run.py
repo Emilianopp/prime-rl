@@ -261,3 +261,51 @@ def test_a_game_resumes_from_its_saved_state(tmp_path, monkeypatch):
     assert second.received[0] == first.received[-1]  # the same observation opens the next job
     assert line2["block"] == 1 and line2["turns"] > line1["turns"]
     assert line2["game_steps"] > line1["game_steps"] and line2["played_seconds"] > line1["played_seconds"]
+
+
+def test_the_player_memory_is_saved_and_resumed(tmp_path, monkeypatch):
+    """With player.memory, each job hands the interaction the game's Memory (fresh, then
+    the saved one), and the episode log reports its entries and edits."""
+    import craftax_env.taskset as taskset
+    import verifiers.v1 as vf
+    from verifiers.v1.configs.agent import MemoryConfig, SegmentsConfig
+
+    clock = iter(range(10**6))
+    monkeypatch.setattr(taskset, "time", SimpleNamespace(time=lambda: float(next(clock))))
+    task = next(iter(CraftaxTaskset(CraftaxConfig(num_examples=1, respawn=True)).load()))
+    player = vf.AgentConfig(
+        harness={"id": "inline-chat"}, memory=MemoryConfig(),
+        segments=SegmentsConfig(new_tokens=1000, summary_tokens=100),
+    )
+    memories = []
+
+    class Resumable(ScriptedInteraction):
+        def __init__(self):
+            super().__init__()
+            self.trace.nodes = []
+
+        async def summarize(self, message):
+            return "s"
+
+    def job(log):
+        interaction = Resumable()
+
+        @asynccontextmanager
+        async def open_interaction(_task, **kwargs):
+            memory = kwargs["memory"]
+            memories.append(dict(memory.entries))
+            memory.apply(f'<write key="map">job {len(memories)}</write>')
+            yield interaction
+
+        env = SimpleNamespace(config=CraftaxEnvConfig(
+            player=player, episode_log=str(log), state_dir=str(tmp_path), save_every=2,
+            max_episode_steps=0, max_episode_seconds=12, on_death="respawn",
+        ))
+        asyncio.run(CraftaxEnv.run(env, task, SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))))
+        return json.loads(log.read_text())
+
+    line1 = job(tmp_path / "a.jsonl")
+    line2 = job(tmp_path / "b.jsonl")
+    assert memories == [{}, {"map": "job 1"}]
+    assert line1["memory"] == {"tokens": {"map": 2}, "ops": {"write ok": 1}}
+    assert line2["memory"]["tokens"] == {"map": 3}  # "job 1\njob 2"
