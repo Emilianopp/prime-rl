@@ -4,8 +4,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from crafter_env.taskset import CrafterEnv as _CrafterEnv
 from crafter_env.taskset import CrafterConfig, CrafterEnv, CrafterEnvConfig, CrafterTaskset
 from crafter_env.workspace import Workspace
+
+
+def fake_env(config):
+    """A CrafterEnv without its __init__ (no taskset or harness to load): the methods on a bare config."""
+    env = _CrafterEnv.__new__(_CrafterEnv)
+    env.config = config
+    return env
 
 
 def test_write_append_read_and_search():
@@ -71,7 +79,7 @@ def _play(config, replies, monkeypatch=None, kill_at=None, **env):
         yield Interaction()
 
     agents = SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))
-    asyncio.run(CrafterEnv.run(SimpleNamespace(config=CrafterEnvConfig(**env)), task, agents))
+    asyncio.run(CrafterEnv.run(fake_env(CrafterEnvConfig(**env)), task, agents))
     return task, received, trace
 
 

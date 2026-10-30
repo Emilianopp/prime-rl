@@ -6,6 +6,7 @@ import verifiers.v1 as vf
 
 from prime_rl.configs.algorithm import AlgoConfig, FrozenModelConfig
 from prime_rl.orchestrator.clients import InferenceClient, connect_frozen_client
+from prime_rl.orchestrator.algo.routing import apply_loss_mask_overrides
 
 
 def iter_trainable_traces(episodes: list[vf.Episode]):
@@ -14,6 +15,7 @@ def iter_trainable_traces(episodes: list[vf.Episode]):
         for trace in episode.traces:
             if not episode.ok or trace.has_error or not trace.agent.trainable or trace.num_turns == 0:
                 continue
+            apply_loss_mask_overrides(trace)  # the env's `info["loss_mask"]` request, before anything reads the masks
             if any(any(node.mask) for node in trace.nodes):
                 yield episode, trace
 

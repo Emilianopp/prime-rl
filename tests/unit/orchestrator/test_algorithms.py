@@ -499,3 +499,29 @@ def test_echo_filter_narrows_selection():
     episode = _two_turn_episode()
     with pytest.raises(ValueError, match="span the branch's tokens"):
         asyncio.run(_echo_algorithm(filter_fn=lambda trace: [[True] * 6]).score_episode(episode))
+
+
+def test_env_loss_mask_request_blanks_nodes_before_scoring():
+    """An env's `info["loss_mask"]["drop_nodes"]` (its own node edits never cross the wire)
+    blanks those nodes' masks on the orchestrator's copy before any algorithm reads them."""
+    from prime_rl.orchestrator.algo.routing import apply_loss_mask_overrides, trainable_nodes
+
+    episode = _make_episode()
+    trace = episode.traces[0]
+    sampled = [i for i, node in enumerate(trace.nodes) if node.sampled]
+    assert len(sampled) == 2
+    trace.info = {"loss_mask": {"drop_nodes": [sampled[-1]]}}
+    assert [t.id for _, t in iter_trainable_traces([episode])] == [trace.id]  # still trainable: one sampled node left
+    assert trace.nodes[sampled[-1]].mask == [False] and trace.nodes[sampled[0]].mask == [True, True]
+    assert [id(n) for n in trainable_nodes(trace)] == [id(trace.nodes[sampled[0]])]
+    assert apply_loss_mask_overrides(trace) == 0  # idempotent
+    samples = trace_to_samples(trace)
+    assert len(samples) == 1 and sum(samples[0].mask) == 2
+    # dropping every sampled node leaves nothing to train on: the trace is not yielded
+    trace.info = {"loss_mask": {"drop_nodes": sampled}}
+    assert list(iter_trainable_traces([episode])) == []
+    # a bad index is an error, not a silent no-op
+    bad = _make_episode().traces[0]
+    bad.info = {"loss_mask": {"drop_nodes": [99]}}
+    with pytest.raises(ValueError):
+        apply_loss_mask_overrides(bad)

@@ -1,0 +1,79 @@
+# KV-Streams RL on Crafter with Qwen3.5-4B: configs/crafter/rl.toml plus the
+# sessions / eviction / hybrid-model flags of configs/textworld-grid/kve-qwen35.toml.
+# 2 trainer + 2 inference GPUs (A100-80GB), one node. Text Crafter: one episode per
+# rollout (100 game steps, ~180-token observation per turn), reward = achievements
+# unlocked / 22.
+#
+#   rl @ configs/crafter/kve-qwen35.toml --inference.sglang.python <SGLang fork venv>/bin/python
+#
+# Full-context control: configs/crafter/rl.toml (same file minus the lines marked
+# KV-Streams / hybrid below).
+
+max_steps = 100
+seq_len = 32768
+
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 2
+
+[weight_broadcast]
+type = "filesystem"  # the SGLang backend supports filesystem weight updates only
+
+[model]
+name = "Qwen/Qwen3.5-4B"
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.01
+max_norm = 1.0
+
+[orchestrator]
+batch_size = 512
+
+[orchestrator.train]
+group_size = 4
+
+[orchestrator.concurrency]
+# The controller starts at the ceiling (256 episodes per inference GPU) and trims
+# to what the KV pool holds. Past c256 the DeltaNet state pool (sized from the
+# ceiling, below) eats KV and gains nothing.
+initial_inflight = 512
+max_inflight = 512
+min_inflight = 4
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = false
+# Bridge each turn on the sampled tokens: a re-rendered history breaks a
+# session's continuity (and a KV-Streams trace's single stream).
+thinking_retention = "all"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 1024
+temperature = 1.0
+
+[[orchestrator.train.source]]
+name = "crafter"
+env.taskset.id = "crafter-env"
+env.max_episode_steps = 100
+env.player.harness.id = "inline-chat"  # in-process chat call: no subprocess per turn
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16  # one env worker per 16 in-flight episodes
+
+[inference]
+backend = "sglang"
+
+[inference.vllm]  # engine-agnostic fields, translated for SGLang
+max_model_len = 32768
+gpu_memory_utilization = 0.9
+
+[inference.sglang]
+sessions = true  # KV-Streams: one streaming session per trace
+max_mamba_cache_size = 840  # DeltaNet state slots per engine: >= 3 x 256 sessions
+mamba_radix_cache_strategy = "no_buffer"  # hybrid models: required for eviction
+disable_overlap_schedule = true  # hybrid models: required for eviction
+
+[inference.sglang.eviction]  # turn window r8-1: past 8 complete turns, evict the oldest
+max_turns = 8
+stride = 1

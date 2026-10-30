@@ -1,0 +1,23 @@
+backend = "sglang"
+
+[server]
+port = 8000
+
+[vllm]
+model = "Qwen/Qwen3.5-4B"
+tensor_parallel_size = 1
+data_parallel_size = 2
+# This non-thinking smoke does not need the cookbook's long reasoning context.
+max_model_len = 32768
+gpu_memory_utilization = 0.75
+
+[sglang]
+sessions = true
+max_mamba_cache_size = 16
+mamba_ssm_dtype = "bfloat16"
+mamba_radix_cache_strategy = "no_buffer"
+disable_overlap_schedule = true
+
+[sglang.eviction]
+max_turns = 8
+stride = 1

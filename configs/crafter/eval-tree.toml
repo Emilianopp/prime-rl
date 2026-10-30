@@ -1,0 +1,68 @@
+# Inference-only Crafter under KV-Streams with summary segments and the in-env beam
+# (arm A of docs/crafter-kv-streams-summary-segments.md): no trainer, the policy as
+# it is. Each task (a root seed) is one episode that plays the whole tree inside
+# CrafterEnv.run: `branches` segments per node, judged by Gemini as each closes,
+# `keep` per depth, down to `tree_depth`. Saved worlds stay in memory (one process
+# plays the tree). Serve configs/crafter/inference-kve.toml with max_turns 50 first.
+#
+#   GEMINI_API_KEY=... uv run eval @ configs/crafter/eval-tree.toml
+
+model = "Qwen/Qwen3.5-4B"
+group_size = 1
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+# Any admin URL enables releasing each segment's session when it finishes.
+admin_base_url = ["http://localhost:8000/v1"]
+
+[renderer]  # token-in/out with the trace id as session id, as in training
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[concurrency]  # episodes = roots in flight; sessions = episodes x env.max_concurrent_agents
+initial_inflight = 8
+min_inflight = 8
+max_inflight = 8
+
+[select]
+limit = 8  # roots
+
+[sampling]
+max_completion_tokens = 1024
+temperature = 1.0
+
+[[source]]
+name = "crafter"
+env.taskset.id = "crafter-env"
+env.taskset.max_episode_steps = 10000
+env.max_episode_steps = 10000  # Crafter's own world length; the cut is the segment
+env.segment_turns = 400
+env.segment_tokens = 96000
+env.summary_max_tokens = 32768
+env.notes_warning_turns = 0  # no "segment ends in N turns" line: the observation stays as Crafter renders it
+env.on_death = "respawn"
+env.respawn_at = "last_base"  # the most recent of the last sleep and the last placed table; the spawn until then
+env.respawn_safe = true  # respawn away from zombies and skeletons (off: the nearest free cell, as upstream)
+env.respawn_safe_radius = 2  # tiles around the respawn cell with no hostile (8: out of every zombie chase)
+env.death_inventory = "drop_materials"
+env.death_penalty = 0.05
+env.cut_on_death = false  # true: a death ends the segment after the respawn (summary, state, judge)
+env.tree_depth = 10
+env.branches = 4
+env.keep = 1
+env.max_concurrent_agents = 4  # a node's branches play together (branches x keep)
+env.judge.base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+env.judge.api_key_var = "GEMINI_API_KEY"
+env.judge.model = "gemini-3.8-flash"  # gemini-2.5-flash is retired for new keys (404, 2026-10-25)
+env.judge.sampling.temperature = 0.0
+env.judge_concurrency = 8
+env.judge_mode = "single"  # "group": the branches of a node in one comparative call, once the last ends
+env.judge_group_size = 4  # = env.branches
+env.judge_group_timeout_s = 1800  # a finished branch waits this long for its siblings, then is judged alone
+env.player.max_total_tokens = 131072  # per segment (one trace each), under max_model_len
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 4

@@ -191,8 +191,39 @@ class DifficultyPoolSamplerConfig(BaseConfig):
         return self
 
 
+class TreeSamplerConfig(BaseConfig):
+    """Tree search over a segment env (`prime_rl.orchestrator.curriculum.samplers.tree`):
+    each task is a node (a seed, or a saved world plus the summary that ended the
+    parent segment); its `group_size` episodes are the branches; per root and depth
+    the `keep` best branches continue."""
+
+    type: Literal["tree"] = "tree"
+
+    keep: int = Field(1, ge=1)
+    """Beam width per root and depth: how many of a depth's branches are expanded."""
+
+    max_depth: int = Field(10, ge=1)
+    """Segments per lineage; a branch at this depth is a leaf."""
+
+    info_key: str = "crafter"
+    """The `trace.info` entry the env fills with `continues`, `state_path`, `summary`, ..."""
+
+    state_dir: str | None = None
+    """The env's state directory, for the sweep of files nothing references any more
+    (stale-cancelled groups never report); unset: no sweep."""
+
+    sweep_after_s: float = Field(7200.0, gt=0)
+
+    summary_header: str = (
+        "You are continuing a game already in progress. Below are the notes you wrote at the end "
+        "of the previous segment of this same game; the world, your inventory and your achievements "
+        "are exactly as you left them."
+    )
+    """Introduces the summary in a child's system prompt (the env's CONTINUATION_HEADER)."""
+
+
 TaskSamplerConfig: TypeAlias = Annotated[
-    StandardSamplerConfig | DifficultyPoolSamplerConfig,
+    StandardSamplerConfig | DifficultyPoolSamplerConfig | TreeSamplerConfig,
     Field(discriminator="type"),
 ]
 

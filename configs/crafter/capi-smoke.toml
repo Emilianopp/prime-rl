@@ -1,0 +1,55 @@
+model = "Qwen/Qwen3.5-4B"
+group_size = 1
+dashboard = false
+
+[client]
+base_url = "http://127.0.0.1:8000/v1"
+api_key_var = "VLLM_API_KEY"
+admin_base_url = ["http://127.0.0.1:8000/v1"]
+
+[renderer]
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[concurrency]
+initial_inflight = 1
+min_inflight = 1
+max_inflight = 1
+
+[select]
+limit = 1
+
+[sampling]
+max_completion_tokens = 128
+temperature = 1.0
+
+[[source]]
+name = "crafter"
+env.taskset.id = "crafter-env"
+env.taskset.max_episode_steps = 10000
+env.max_episode_steps = 10000
+env.segment_turns = 32
+env.segment_tokens = 12000
+env.summary_max_tokens = 512
+env.notes_warning_turns = 0
+env.on_death = "respawn"
+env.respawn_at = "last_base"
+env.respawn_safe = true
+env.respawn_safe_radius = 2
+env.death_inventory = "drop_materials"
+env.death_penalty = 0.05
+env.tree_depth = 1
+env.branches = 2
+env.keep = 1
+env.max_concurrent_agents = 2
+env.judge.backend = "capi"
+env.judge.model = "gpt-4.1"
+env.judge.sampling.temperature = 0.0
+env.judge_concurrency = 2
+env.judge_mode = "single"
+env.player.max_total_tokens = 16384
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 2

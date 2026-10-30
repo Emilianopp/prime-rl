@@ -1,0 +1,108 @@
+# Crafter, KV-Streams + summary segments + judge + tree search (arm B of
+# docs/crafter-kv-streams-summary-segments.md): configs/crafter/kve-qwen35.toml with a
+# 50-turn window, 131k positions, and one segment per episode. The tree sampler
+# hands out nodes (a seed, or a saved world plus the summary that ended the parent
+# segment); the 4 episodes of a node are its branches (group_size), judged by Gemini
+# in finalize, GRPO-baselined against each other; the best branch per root and depth
+# continues. Saved worlds live under env.state_dir (the job script points both the
+# env and the sampler at $RUN/states).
+#
+#   GEMINI_API_KEY=... rl @ configs/crafter/kve-summary.toml --inference.sglang.python <SGLang fork venv>/bin/python
+#
+# Smoke shape (jobs/crafter.sbatch kve-summary 2 16 8 with SEGMENT_TURNS=30 TREE_DEPTH=3):
+
+max_steps = 100
+seq_len = 131072
+
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 2
+
+[weight_broadcast]
+type = "filesystem"  # the SGLang backend supports filesystem weight updates only
+
+[model]
+name = "Qwen/Qwen3.5-4B"
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.01
+max_norm = 1.0
+
+[orchestrator]
+batch_size = 64  # 16 nodes of 4 branches per trainer step
+max_off_policy_steps = 8
+
+[orchestrator.train]
+group_size = 4  # the branches of one node
+
+[orchestrator.concurrency]
+# One session per segment. The controller starts from initial_inflight (its own
+# estimate, KV capacity / max_model_len, is 13 per engine at 131k) and never trims
+# under a fixed live window; 64 fits the two-engine split with a 32k summary cap.
+initial_inflight = 64
+max_inflight = 64
+min_inflight = 4
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 1024  # per turn; the summary turn raises its own cap (env.summary_max_tokens)
+temperature = 1.0
+
+[[orchestrator.train.source]]
+name = "crafter"
+env.taskset.id = "crafter-env"
+env.taskset.max_episode_steps = 10000  # the world's length, shown to the model
+env.max_episode_steps = 10000  # Crafter's own world length; the cut is the segment
+env.segment_turns = 400
+env.segment_tokens = 96000  # logical positions, evicted tokens included: 32k left for the summary under 131072
+env.summary_max_tokens = 32768
+env.notes_warning_turns = 0  # no "segment ends in N turns" line: the observation stays as Crafter renders it
+env.on_death = "respawn"
+env.respawn_at = "last_base"  # the most recent of the last sleep and the last placed table; the spawn until then
+env.respawn_safe = true  # respawn away from zombies and skeletons (off: the nearest free cell, as upstream)
+env.respawn_safe_radius = 2  # tiles around the respawn cell with no hostile (8: out of every zombie chase)
+env.death_inventory = "drop_materials"
+env.death_penalty = 0.05
+env.cut_on_death = false  # true: a death ends the segment after the respawn (summary, state, judge)
+env.achievement_weight = 1.0  # segment achievement delta / 22, next to the judge
+env.judge.base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+env.judge.api_key_var = "GEMINI_API_KEY"
+env.judge.model = "gemini-3.8-flash"  # gemini-2.5-flash is retired for new keys (404, 2026-10-25)
+env.judge.sampling.temperature = 0.0
+env.judge_weight = 1.0
+env.judge_concurrency = 8
+env.judge_mode = "single"  # "group": the branches of a node in one comparative call, once the last ends
+env.judge_group_size = 4  # = orchestrator.train.group_size
+env.judge_group_timeout_s = 1800  # a finished branch waits this long for its siblings, then is judged alone
+env.state_dir = "states"  # the job script sets the absolute path under the run dir
+env.player.harness.id = "inline-chat"  # in-process chat call: no subprocess per turn
+env.player.runtime.type = "subprocess"
+env.player.max_total_tokens = 131072  # the hard ceiling; the env cuts at segment_tokens
+curriculum.sampler.type = "tree"
+curriculum.sampler.keep = 1
+curriculum.sampler.max_depth = 10
+curriculum.sampler.state_dir = "states"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16  # one env worker per 16 in-flight segments
+
+[inference]
+backend = "sglang"
+
+[inference.vllm]  # engine-agnostic fields, translated for SGLang
+max_model_len = 131072
+gpu_memory_utilization = 0.9
+
+[inference.sglang]
+sessions = true  # KV-Streams: one streaming session per trace
+max_mamba_cache_size = 840  # DeltaNet state slots per engine: >= 3 x in-flight sessions
+mamba_radix_cache_strategy = "no_buffer"  # hybrid models: required for eviction
+disable_overlap_schedule = true  # hybrid models: required for eviction
+
+[inference.sglang.eviction]  # turn window r50-1: past 50 complete turns, evict the oldest
+max_turns = 50
+stride = 1

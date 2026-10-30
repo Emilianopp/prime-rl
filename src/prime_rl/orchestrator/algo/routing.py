@@ -8,6 +8,27 @@ from prime_rl.configs.algorithm import ActionLossType
 from prime_rl.transports.batch import TrainingSample
 
 
+def apply_loss_mask_overrides(trace: vf.Trace) -> int:
+    """Honour an env's request to drop sampled nodes from the loss: ``trace.info["loss_mask"]
+    = {"drop_nodes": [node index, ...]}``. Nodes cross the wire once, when they are committed,
+    so an env that edits ``node.mask`` after the fact changes only its own copy; ``info`` is
+    re-sent whenever it changes, so the request rides along with the rewards. The dropped
+    nodes keep their tokens as context and get ``mask`` False, hence no advantage, no rl
+    weight and no place in the loss denominator. Idempotent. Returns how many nodes it blanked."""
+    request = (trace.info or {}).get("loss_mask") if isinstance(trace.info, dict) else None
+    if not isinstance(request, dict):
+        return 0
+    blanked = 0
+    for index in request.get("drop_nodes") or []:
+        if not isinstance(index, int) or not 0 <= index < len(trace.nodes):
+            raise ValueError(f"loss_mask.drop_nodes of trace {trace.id!r} names node {index!r}; the trace has {len(trace.nodes)} nodes")
+        node = trace.nodes[index]
+        if any(node.mask):
+            node.mask = [False] * len(node.mask)
+            blanked += 1
+    return blanked
+
+
 def trainable_nodes(trace: vf.Trace) -> list[vf.MessageNode]:
     """Nodes with sampled (mask-True) tokens on the trace's trainable branches, in graph order."""
     on_trainable_branch = {id(node) for branch in trace.branches if branch.trainable for node in branch.nodes}

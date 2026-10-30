@@ -9,7 +9,7 @@ import math
 import statistics
 import sys
 
-from summarize_episodes import ACHIEVEMENTS
+from report_episodes import ACHIEVEMENTS
 
 
 def load(path: str) -> dict[int, dict]:

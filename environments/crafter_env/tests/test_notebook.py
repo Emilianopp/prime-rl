@@ -3,7 +3,15 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 from crafter_env.notebook import Notebook
+from crafter_env.taskset import CrafterEnv as _CrafterEnv
 from crafter_env.taskset import CrafterConfig, CrafterEnv, CrafterEnvConfig, CrafterTaskset
+
+
+def fake_env(config):
+    """A CrafterEnv without its __init__ (no taskset or harness to load): the methods on a bare config."""
+    env = _CrafterEnv.__new__(_CrafterEnv)
+    env.config = config
+    return env
 
 
 def test_remember_forget_and_scratchpad():
@@ -52,7 +60,7 @@ def test_notebook_is_explained_and_shown_every_turn():
         yield Interaction()
 
     agents = SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))
-    asyncio.run(CrafterEnv.run(SimpleNamespace(config=CrafterEnvConfig(max_episode_steps=6)), task, agents))
+    asyncio.run(CrafterEnv.run(fake_env(CrafterEnvConfig(max_episode_steps=6)), task, agents))
     assert received[0].startswith("Memories (0/10):\n  (none)\nScratchpad: (empty)")
     assert all("Reply only as" not in m and "write to your notebook" in m for m in received)
     assert "Saved memory 1." in received[1] and "1. spawn has water to the east" in received[1]
