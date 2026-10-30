@@ -33,6 +33,7 @@ from typing import Literal
 from pydantic import Field
 
 import verifiers.v1 as vf
+from verifiers.v1.memory import Memory, tokens
 
 from craftax_env import glyph
 
@@ -171,6 +172,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             summary = saved["summary"] or saved["last_summary"]  # an empty final summary hands over nothing
             if segments is None:
                 summary = None
+        # The player's own memory (player.memory): saved and resumed with the game.
+        memory = Memory((saved or {}).get("memory")) if self.config.player.memory is not None else None
 
         def save(summary_now: str | None, last_summary: str | None) -> dict:
             return {
@@ -180,10 +183,13 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "unlocked_at": unlocked_at, "deaths": deaths,
                 "played_seconds": played_before + time.time() - started,
                 "summary": summary_now, "last_summary": last_summary,
+                "memory": dict(memory.entries) if memory is not None else None,
             }
 
         opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions)
         kwargs = {"summary": summary or ""} if saved is not None and segments is not None else {}
+        if memory is not None:
+            kwargs["memory"] = memory
         async with agents.player.interaction(task, **kwargs) as interaction:
             segment = await interaction.turn(opening)
             while not segment.terminated:
@@ -328,6 +334,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "block": block,  # jobs this game has run in before this one (state_dir)
                 "played_seconds": played_before + time.time() - started,
                 "trace_tokens": trace.num_total_tokens,
+                **({"memory": {"tokens": {k: tokens(v) for k, v in memory.entries.items()}, "ops": dict(memory.stats)}} if memory is not None else {}),
                 "task": "craftax",
             }
             with open(self.config.episode_log, "a") as f:
