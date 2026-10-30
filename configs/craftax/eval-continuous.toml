@@ -48,8 +48,10 @@ env.on_death = "respawn"
 env.death_inventory = "drop_all"
 env.reward = "achievements"
 env.max_episode_seconds = 9000  # 2.5 h: ends inside a 3 h block (~10 min to start, the rest to finish)
-env.player.segments.new_tokens = 131072
-env.player.segments.summary_tokens = 32768
+# Upstream plays long games as segments (env.player.segments.new_tokens = 131072,
+# summary_tokens = 32768). This branch's verifiers has no segments yet, so a game
+# ends at the token ceiling below instead (the Crafter eval's 256k).
+env.player.max_total_tokens = 256000
 env.player.harness.id = "inline-chat"
 env.player.runtime.type = "subprocess"
 serve.pool.type = "elastic"
