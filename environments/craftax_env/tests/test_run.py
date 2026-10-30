@@ -213,3 +213,51 @@ def test_multi_actions_and_feedback_in_a_run(tmp_path, monkeypatch):
     assert "Played 3 actions, reward" in after_multi and "1. MOVE_LEFT: " in after_multi and "3. DO: " in after_multi
     assert "the turn was forfeited: the world did not move" in after_forfeit
     assert "then end with 1 to 3 <action> tags" in after_multi
+
+
+def test_a_game_resumes_from_its_saved_state(tmp_path, monkeypatch):
+    """Two jobs of a chain: the first stops at its time limit after asking for a handoff
+    summary and saves the game; the second opens with that summary and plays on."""
+    import craftax_env.taskset as taskset
+    import verifiers.v1 as vf
+    from verifiers.v1.configs.agent import SegmentsConfig
+
+    clock = iter(range(10**6))  # one second per reading
+    monkeypatch.setattr(taskset, "time", SimpleNamespace(time=lambda: float(next(clock))))
+    task = next(iter(CraftaxTaskset(CraftaxConfig(num_examples=1, respawn=True)).load()))
+    player = vf.AgentConfig(harness={"id": "inline-chat"}, segments=SegmentsConfig(new_tokens=1000, summary_tokens=100))
+    opened, asked = [], []
+
+    class Resumable(ScriptedInteraction):
+        def __init__(self):
+            super().__init__()
+            self.trace.nodes = []
+
+        async def summarize(self, message):
+            asked.append(message)
+            return f"summary after {len(self.received)} replies"
+
+    def job(log):
+        interaction = Resumable()
+
+        @asynccontextmanager
+        async def open_interaction(_task, **kwargs):
+            opened.append(kwargs)
+            yield interaction
+
+        env = SimpleNamespace(config=CraftaxEnvConfig(
+            player=player, episode_log=str(log), state_dir=str(tmp_path), save_every=2,
+            max_episode_steps=0, max_episode_seconds=12, on_death="respawn",
+        ))
+        asyncio.run(CraftaxEnv.run(env, task, SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))))
+        return interaction, json.loads(log.read_text())
+
+    first, line1 = job(tmp_path / "a.jsonl")
+    assert line1["ended_by"] == "time_limit" and line1["block"] == 0 and line1["turns"] > 0
+    assert opened[0] == {} and len(asked) == 1
+    assert asked[0].startswith(first.received[-1])  # the pending observation, shown again
+    second, line2 = job(tmp_path / "b.jsonl")
+    assert opened[1] == {"summary": f"summary after {len(first.received)} replies"}
+    assert second.received[0] == first.received[-1]  # the same observation opens the next job
+    assert line2["block"] == 1 and line2["turns"] > line1["turns"]
+    assert line2["game_steps"] > line1["game_steps"] and line2["played_seconds"] > line1["played_seconds"]

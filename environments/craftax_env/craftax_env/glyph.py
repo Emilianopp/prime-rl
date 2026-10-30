@@ -424,6 +424,28 @@ class CraftaxGame:
         self.achievements = self._achievement_names()
         self.spawn = self.position
 
+    def dump(self) -> dict[str, Any]:
+        """Everything ``restore`` needs to continue this game in another process: the
+        upstream state (numpy leaves), the RNG key, the turn count, the pending message."""
+        jax = self._rt["jax"]
+        return {
+            "state": jax.tree_util.tree_map(np.asarray, self.state),
+            "key": np.asarray(self._key),
+            "turn": self.turn,
+            "message": self.message,
+            "spawn": self.spawn,
+        }
+
+    def restore(self, saved: dict[str, Any]) -> None:
+        """Continue the game ``dump`` saved (a game built with the same seed and turn limit)."""
+        jax = self._rt["jax"]
+        self.state = jax.tree_util.tree_map(jax.numpy.asarray, saved["state"])
+        self._key = jax.numpy.asarray(saved["key"])
+        self.turn = int(saved["turn"])
+        self.message = saved["message"]
+        self.spawn = tuple(saved["spawn"])
+        self.achievements = self._achievement_names()
+
     # state accessors
     @property
     def health(self) -> float:
