@@ -168,7 +168,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             forfeits, actions, per_turn = Counter(saved["forfeits"]), Counter(saved["actions"]), Counter(saved["per_turn"])
             unlocked_at, deaths = saved["unlocked_at"], saved["deaths"]
             block, played_before = saved["block"] + 1, saved["played_seconds"]
-            summary = saved["summary"] if saved["summary"] is not None else saved["last_summary"]
+            summary = saved["summary"] or saved["last_summary"]  # an empty final summary hands over nothing
             if segments is None:
                 summary = None
 
