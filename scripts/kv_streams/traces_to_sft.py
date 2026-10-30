@@ -3,7 +3,7 @@
 Each trace of an eval/rollout trace stream becomes one row: an episode has one trace,
 or one per segment when it is a continuous episode (each segment is its own engine
 session with fresh positions, so its own row). A row holds the chronological token ids
-exactly as sampled (no re-rendering), a loss mask on the model's sampled reply tokens,
+exactly as sampled (no re-rendering), a loss mask on every token the model sampled,
 and `kv_death` - the position from which each token's KV is evicted - for a turn window
 r{window}-{stride} drawn per row. The eviction
 schedule comes from replaying the episode's calls through the server's own
@@ -143,9 +143,10 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--pack-seq-len", type=int, default=65536, help="the SFT data.seq_len, to count packed rows")
     ap.add_argument(
-        "--keep-malformed",
+        "--only-action-replies",
         action="store_true",
-        help="also learn replies without a complete <action>...</action> (default: they stay in the context, not in the loss)",
+        help="a data-curation choice, not the default: learn only replies with a complete <action>...</action> "
+        "(Crafter/Craftax format); the others (summaries, malformed replies) stay in the context, out of the loss",
     )
     args = ap.parse_args()
     rng = random.Random(args.seed)
@@ -154,7 +155,7 @@ def main():
     rows = loss_tokens = evicted_loss_tokens = skipped = dropped = 0
     # The env's own action pattern: a reply it would play (not repeat the last action for).
     action = re.compile(r"<action>\s*(.*?)\s*</action>", re.DOTALL)
-    keep_reply = (lambda content: True) if args.keep_malformed else (lambda content: bool(action.search(content)))
+    keep_reply = (lambda content: bool(action.search(content))) if args.only_action_replies else (lambda content: True)
     packs, pack_fill = 0, 0  # greedy packing as the SFT dataloader does (CatDataset)
     with open(args.stream) as f, open(args.out, "w") as out:
         for line in f:
@@ -185,7 +186,7 @@ def main():
     print(f"eviction plans: turn window r{args.windows}-{args.stride}" + "".join(f", {type(p).__module__}" for p in plans))
     print(f"{packs} packed rows of up to {args.pack_seq_len} tokens: one epoch = ceil({packs} / batch_size) steps")
     print(
-        f"{rows} rows ({skipped} skipped); {dropped} malformed replies left out of the loss; {loss_tokens} loss tokens, "
+        f"{rows} rows ({skipped} skipped); {dropped} replies left out of the loss; {loss_tokens} loss tokens, "
         f"{100 * evicted_loss_tokens / max(1, loss_tokens):.0f}% of them after the first eviction"
     )
 
