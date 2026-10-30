@@ -106,6 +106,18 @@ def test_respawn_keeps_playing_the_same_world(monkeypatch):
 
 
 
+def test_an_endless_world_runs_until_the_time_limit(monkeypatch):
+    import crafter_env.taskset as ts
+
+    clock = iter(range(1_000_000))  # one second per reading
+    monkeypatch.setattr(ts, "time", SimpleNamespace(time=lambda: float(next(clock))))
+    interaction = play(CrafterEnvConfig(max_episode_steps=0, max_episode_seconds=5))
+    info = interaction.trace.info["crafter"]
+    # Read at the start, then once per turn: the fifth turn's reading is 5 seconds on.
+    assert info["ended_by"] == "time_limit" and info["steps"] == 5
+    assert interaction.received[0].startswith("Step: 0\n")  # no world length to show
+
+
 def test_a_reply_without_an_action_tag_repeats_the_last_action_and_says_so(monkeypatch):
     monkeypatch.setattr(__import__(__name__), "REPLIES", ["<action>do</action>", "<", "<action>noop</action>"])
     interaction = play(CrafterEnvConfig(max_episode_steps=6))

@@ -5,7 +5,8 @@ same prompts, observation rendering, action parsing and reward, so results are
 comparable. The env plays the user: the model's ``<action>`` is stepped in the
 game and the rendered observation (vitals, inventory, achievements, a local map)
 comes back as the next user turn, until the episode ends or ``max_episode_steps``
-model turns have been taken. Reward: achievements unlocked / 22.
+model turns have been taken (0: an endless world, for continuous play). Reward:
+achievements unlocked / 22.
 
 Uses the lightweight ``crafter`` package directly (no BALROG: its full install
 pulls in NLE/MiniHack native builds Crafter does not need).
@@ -401,7 +402,7 @@ def _format_observation(
         pos = [0, 0]
 
     lines = [
-        f"Step: {step}/{max_steps}",
+        f"Step: {step}/{max_steps}" if max_steps else f"Step: {step}",
         f"Position: ({int(pos[0])}, {int(pos[1])}), facing {facing}",
         f"Ahead: {_describe_ahead(env)}" + (_ahead_requirement(env) if extras else ""),
         f"Vitals: {vitals}",
@@ -461,8 +462,8 @@ class CrafterConfig(vf.TasksetConfig):
     num_examples: int = Field(5000, ge=1)
     seed: int = 42
     """Episode i of the train split uses world seed ``seed + i`` (eval: ``seed + 1_000_000 + i``)."""
-    max_episode_steps: int = Field(100, ge=1)
-    """Game length; shown to the model in every observation (match the env's cap)."""
+    max_episode_steps: int = Field(100, ge=0)
+    """Game length; shown to the model in every observation (match the env's cap; 0: no length)."""
     view_radius: int = Field(4, ge=1)
     include_initial_obs_in_system: bool = False
     """Put the opening observation in the system prompt (the user turn is then "What action do you take?")."""
@@ -491,8 +492,14 @@ class CrafterConfig(vf.TasksetConfig):
 
 class CrafterEnvConfig(vf.EnvConfig):
     player: vf.AgentConfig = vf.AgentConfig(harness={"id": "inline-chat"})
-    max_episode_steps: int = Field(100, ge=1)
-    """Model turns (game actions) before the episode is cut off; also the world's length."""
+    max_episode_steps: int = Field(100, ge=0)
+    """Model turns (game actions) before the episode is cut off; also the world's length.
+    0: an endless world (continuous play), cut off only by `max_episode_seconds`, a
+    death without respawn, or a turn/token limit of the player."""
+    max_episode_seconds: float | None = Field(None, gt=0)
+    """Wall-clock budget per episode: the episode ends (``ended_by`` = ``time_limit``) at
+    the first turn after this many seconds, the capped turn's action not played. Lets a
+    scheduler-limited run end its endless episodes in time to record them."""
     view_radius: int = Field(4, ge=1)
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, reward, achievements) to this file."""
@@ -619,7 +626,7 @@ def _ledger_death(env: crafter.Env, step: int, current: dict[str, Any]) -> str:
 def _initial_observation(
     seed: int, max_steps: int, view_radius: int, tools: str | None = None, reasoning: bool = False
 ) -> str:
-    env = crafter.Env(seed=seed, length=max_steps)
+    env = crafter.Env(seed=seed, length=max_steps or None)
     env.reset()
     return _format_observation(
         env=env, info=_player_info(env), step=0, max_steps=max_steps, view_radius=view_radius, tools=tools,
@@ -652,8 +659,9 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
         seed = int(task.data.info["seed"])
         max_steps = self.config.max_episode_steps
         started = time.time()
-        env = crafter.Env(seed=seed, length=max_steps)
+        env = crafter.Env(seed=seed, length=max_steps or None)
         await asyncio.to_thread(env.reset)
+        deadline = started + self.config.max_episode_seconds if self.config.max_episode_seconds else None
         book = nb.Notebook(**task.data.info["notebook"]) if task.data.info.get("notebook") else None
         space = ws.Workspace(**task.data.info["workspace"]) if task.data.info.get("workspace") else None
         tools = "notebook" if book is not None else "workspace" if space is not None else None
@@ -697,9 +705,12 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 segment = await interaction.turn(opening)
                 while not segment.terminated:
                     steps += 1
-                    if steps >= max_steps:
+                    if max_steps and steps >= max_steps:
                         end = "max_episode_steps"
                         break  # as in v0: the capped turn's action is not played
+                    if deadline is not None and time.time() >= deadline:
+                        end = "time_limit"
+                        break
                     notes = book.apply(segment.last_reply) if book is not None else []
                     results = space.apply(segment.last_reply, steps) if space is not None else []
                     before = dict(current["achievements"])
@@ -739,7 +750,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                     if env._player.sleeping:
                         last_sleep = tuple(int(x) for x in env._player.pos)
                     died = current["inventory"].get("health", 0) <= 0
-                    world_over = env._step >= env._length
+                    world_over = bool(env._length) and env._step >= env._length
                     if died and space is not None:
                         space.log(_ledger_death(env, steps, current))
                     if died and not world_over and self.config.on_death == "respawn":
