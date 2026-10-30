@@ -5,6 +5,7 @@ from pathlib import Path
 
 from datasets import Dataset
 
+from prime_rl.inference.sglang.model_evictions import qwen35
 from prime_rl.trainer.sft.data import CatDataset, TokensDataset, cat_collate
 
 
@@ -83,7 +84,9 @@ def test_converter_writes_a_row_per_segment(tmp_path, monkeypatch):
     stream, out = tmp_path / "stream.jsonl", tmp_path / "rows.jsonl"
     stream.write_text(json.dumps(episode) + "\n")
     converter = _converter()
-    monkeypatch.setattr(sys, "argv", ["traces_to_sft.py", str(stream), str(out), "--windows", "2", "--message-end-id", "7"])
+    monkeypatch.setattr(converter, "model_plans", lambda model: [])
+    argv = ["traces_to_sft.py", str(stream), str(out), "--model", "m", "--windows", "2", "--message-end-id", "7"]
+    monkeypatch.setattr(sys, "argv", argv)
     converter.main()
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     assert [(row["segment"], row["trace"]) for row in rows] == [(0, "a"), (1, "b")]
@@ -106,3 +109,23 @@ def test_converter_leaves_malformed_replies_out_of_the_loss():
     stream, loss, calls, dropped = converter.trace_calls({"nodes": nodes}, lambda content: "<action>" in content)
     assert dropped == 1 and len(calls) == 2  # still replayed and kept in the context
     assert loss == [False, False, False, False, True, True, False, False, False, False, False, False]
+
+
+def test_converter_applies_the_models_eviction_plan():
+    # As the server does for Qwen3.5: a reply's empty think block dies once a later
+    # user query arrives, long before the turn window would drop the turn.
+    E, think = 7, [60, 62, 61, 62]
+    nodes = [{"token_ids": [1, 2, E, 3, E], "sampled": False}]
+    for turn in range(3):
+        if turn:
+            nodes.append({"token_ids": [5, 3, E], "sampled": False})
+        nodes.append({"token_ids": [4, *think, 90, E], "sampled": True, "mask": [False] + [True] * 6})
+    converter = _converter()
+    stream, _, calls, _ = converter.trace_calls({"nodes": nodes})
+    assert converter.evict(stream, calls, window=100, stride=1, message_end_id=E) == [-1] * len(stream)
+    plan = qwen35.Plan(empty_think_ids=think, user_ids=[3], tool_response_ids=[66])
+    death = converter.evict(stream, calls, window=100, stride=1, message_end_id=E, plans=[plan])
+    # Reply 1's block is [6, 10), reply 2's [16, 20); calls 2 and 3 start at 15 and 25.
+    assert len(set(death[6:10])) == 1 and 10 <= death[6] < 15
+    assert len(set(death[16:20])) == 1 and 20 <= death[16] < 25
+    assert all(d == -1 for j, d in enumerate(death) if not (6 <= j < 10 or 16 <= j < 20))  # reply 3's block: no later query
