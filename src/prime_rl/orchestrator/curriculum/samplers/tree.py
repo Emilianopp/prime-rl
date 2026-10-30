@@ -128,8 +128,7 @@ class TreeSampler(TaskSampler):
         root = self.root_tasks[node["root"]]
         info = _data_info(root.data)
         base = info.get("base_system_prompt") or root.data.system_prompt or ""
-        public = {k: v for k, v in node.items() if k != "lineage"}
-        update: dict[str, Any] = {"info": {**info, "base_system_prompt": base, "root_name": info.get("root_name") or root.data.name, "node": public}}
+        update: dict[str, Any] = {"info": {**info, "base_system_prompt": base, "root_name": info.get("root_name") or root.data.name, "node": dict(node)}}
         if node["depth"] > 0:
             notes = (node.get("summary") or "").strip() or "(no notes were written)"
             update["system_prompt"] = f"{base}\n\n{self.config.summary_header}\n\n{notes}"

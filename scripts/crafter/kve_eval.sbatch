@@ -122,7 +122,7 @@ EVAL_CONFIG=configs/crafter/eval-kve.toml
 if [ -n "$TREE_DEPTH" ]; then
   EVAL_CONFIG=configs/crafter/eval-tree.toml
   # the knobs below replace the config's own lines (the second sed strips them)
-  DEATH="$DEATH\nenv.tree_depth = $TREE_DEPTH\nenv.branches = $BRANCHES\nenv.keep = $KEEP_BRANCHES\nenv.max_concurrent_agents = $((BRANCHES * KEEP_BRANCHES))\nenv.segment_turns = $SEGMENT_TURNS\nenv.segment_tokens = $SEGMENT_TOKENS\nenv.summary_max_tokens = $SUMMARY_TOKENS${JUDGE_MODEL:+\nenv.judge.model = \"$JUDGE_MODEL\"}${CUT_ON_DEATH:+\nenv.cut_on_death = true}${JUDGE_MODE:+\nenv.judge_mode = \"$JUDGE_MODE\"}"
+  DEATH="$DEATH\nenv.tree_depth = $TREE_DEPTH\nenv.branches = $BRANCHES\nenv.keep = $KEEP_BRANCHES\nenv.max_concurrent_agents = $((BRANCHES * KEEP_BRANCHES))\nenv.segment_turns = $SEGMENT_TURNS\nenv.segment_tokens = $SEGMENT_TOKENS\nenv.summary_max_tokens = $SUMMARY_TOKENS${CUT_ON_DEATH:+\nenv.cut_on_death = true}${JUDGE_MODE:+\nenv.judge_mode = \"$JUDGE_MODE\"}"
 fi
 sed -e "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"$DEATH|" \
     ${TREE_DEPTH:+-e '/^env\.tree_depth/d; /^env\.branches/d; /^env\.keep/d; /^env\.max_concurrent_agents/d; /^env\.segment_turns/d; /^env\.segment_tokens/d; /^env\.summary_max_tokens/d; /^env\.cut_on_death/d; /^env\.on_death/d; /^env\.respawn_at/d; /^env\.respawn_safe/d; /^env\.death_inventory/d; /^env\.death_penalty/d'} \
@@ -131,6 +131,7 @@ sed -e "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl
 [ -n "$MAX_TOKENS" ] && sed -i "s/^env.player.max_total_tokens = .*/env.player.max_total_tokens = $MAX_TOKENS/" "$OUT/eval.toml"
 # the strip above removes the config's respawn_safe_radius line too (prefix match): re-add it after respawn_safe
 [ -n "$SAFE_RADIUS" ] && sed -i -e "/^env.respawn_safe_radius = /d" -e "s|^env.respawn_safe = true|&\nenv.respawn_safe_radius = $SAFE_RADIUS|" "$OUT/eval.toml"
+[ -n "$JUDGE_MODEL" ] && sed -i "s|^env.judge.model = .*|env.judge.model = \"$JUDGE_MODEL\"|" "$OUT/eval.toml"
 [ -n "$JUDGE_BACKEND" ] && sed -i "s|^env.judge.model = .*|&\nenv.judge.backend = \"$JUDGE_BACKEND\"|" "$OUT/eval.toml"
 [ -n "$THINKING" ] && sed -i "s/^enable_thinking = false/enable_thinking = true/" "$OUT/eval.toml"
 [ -n "$TURN_TOKENS" ] && sed -i "s/^max_completion_tokens = .*/max_completion_tokens = $TURN_TOKENS/" "$OUT/eval.toml"

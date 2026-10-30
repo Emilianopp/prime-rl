@@ -69,7 +69,7 @@ def test_beam_keep_two_waits_for_the_depth_then_releases_greedily(tmp_path):
     sampler.observe([branch(root, tmp_path, score=s) for s in (0.2, 0.9, 0.4, 0.6)])
     a, b = next(sampler), next(sampler)  # the depth's two best, ranked
     assert [a.data.info["node"]["score"], b.data.info["node"]["score"]] == [0.9, 0.6]
-    assert a.data.info["node"]["lineage"] if "lineage" in a.data.info["node"] else True
+    assert a.data.info["node"]["lineage"] == [root.data.info["node"]["id"], a.data.info["node"]["id"]]
     # Depth 2 expects two groups. The first arrives; nothing is closed yet, so a request is served greedily.
     sampler.observe([branch(a, tmp_path, score=s) for s in (0.3, 0.8, 0.1, 0.5)])
     assert sampler.frontier == [] and sampler.levels[(a.data.info["node"]["root"], 2)]["observed"] == 1
@@ -87,6 +87,21 @@ def test_final_goal_stops_the_lineage_and_is_recorded(tmp_path):
     assert sampler.frontier == [] and len(sampler.found) == 1 and sampler.found[0]["depth"] == 1
     assert sampler.metrics()["deepest_tier"] == 9.0 and not list(tmp_path.glob("*.pkl"))
     assert next(sampler).data.info["seed"] == 43  # the next root
+
+
+def test_final_goal_at_depth_three_records_the_full_lineage(tmp_path):
+    sampler = TreeSampler(TreeSamplerConfig(keep=1, max_depth=10, state_dir=str(tmp_path)), [make_root(0)])
+    task = next(sampler)
+    path = [task.data.info["node"]["id"]]
+    for _ in range(2):
+        sampler.observe([branch(task, tmp_path, score=0.2), branch(task, tmp_path, score=0.8)])
+        task = next(sampler)
+        path.append(task.data.info["node"]["id"])
+        assert task.data.info["node"]["lineage"] == path
+    final = branch(task, tmp_path, score=1.0, final=True)
+    sampler.observe([branch(task, tmp_path, score=0.3), final])
+    assert len(sampler.found) == 1 and sampler.found[0]["depth"] == 3
+    assert sampler.found[0]["lineage"] == [*path, final.traces[0].info["crafter"]["node_id"]]
 
 
 def test_max_depth_leaves_and_errored_branches(tmp_path):
