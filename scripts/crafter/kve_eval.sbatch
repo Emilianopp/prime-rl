@@ -78,6 +78,9 @@ else
   EVICT=(--sglang.eviction.max-turns "$KEEP")
   [ "$MODEL_PLAN" = 0 ] && EVICT+=(--sglang.eviction.model-plan false)
 fi
+# One data-parallel engine per GPU of the allocation (the config says 4; main gives 2, unkillable 1).
+GPUS=${GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}; [ "$GPUS" -ge 1 ] || GPUS=1
+sed -i "s/^data_parallel_size = .*/data_parallel_size = $GPUS/" "$OUT/inference.toml"
 [ -n "$FP32_STATE" ] && sed -i '/^mamba_ssm_dtype/d' "$OUT/inference.toml"
 [ -n "$MAMBA_SLOTS" ] && sed -i "s/^max_mamba_cache_size = .*/max_mamba_cache_size = $MAMBA_SLOTS/" "$OUT/inference.toml"
 uv run inference @ "$OUT/inference.toml" --sglang.python "$SGL_PY" "${EVICT[@]}" > "$OUT/inference.log" 2>&1 &

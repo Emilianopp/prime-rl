@@ -53,6 +53,9 @@ else
   cp configs/crafter/inference-kve.toml "$OUT/inference.toml"
   EVICT=(--sglang.eviction.max-turns "$KEEP")
 fi
+# One data-parallel engine per GPU of the allocation (the config says 4; main gives 2, unkillable 1).
+GPUS=${GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}; [ "$GPUS" -ge 1 ] || GPUS=1
+sed -i "s/^data_parallel_size = .*/data_parallel_size = $GPUS/" "$OUT/inference.toml"
 uv run inference @ "$OUT/inference.toml" --sglang.python "$SGL_PY" "${EVICT[@]}" > "$OUT/inference.log" 2>&1 &
 INFER=$!
 for _ in $(seq 120); do
