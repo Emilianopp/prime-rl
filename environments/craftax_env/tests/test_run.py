@@ -158,11 +158,33 @@ def test_feedback_on_collecting():
     game.step(do)
     text = game.feedback(do, before, game.snapshot())
     assert text.startswith("DO: used on tree: wood +1"), text
-    # a pickaxe craft with no table nearby says so
+    # a pickaxe craft with no table nearby says what is missing
     craft = glyph.ACTION_NAMES.index("MAKE_WOOD_PICKAXE")
     before = game.snapshot()
     game.step(craft)
-    assert "no effect (table nearby: no" in game.feedback(craft, before, game.snapshot())
+    text = game.feedback(craft, before, game.snapshot())
+    assert text == "MAKE_WOOD_PICKAXE: nothing made: needs a table within one step.", text
+    # so does a table placed with 1 wood (it costs 2)
+    place = glyph.ACTION_NAMES.index("PLACE_TABLE")
+    before = game.snapshot()
+    assert before["items"]["wood"] == 1
+    game.step(place)
+    text = game.feedback(place, before, game.snapshot())
+    assert text == "PLACE_TABLE: nothing placed: needs 2 wood (you have 1).", text
+
+
+def test_failed_build_reasons():
+    snap = {
+        "items": dict.fromkeys(["wood", "stone", "coal", "iron", "diamond", "sapling", "torches", "pickaxe", "sword"], 0),
+        "near_table": True, "near_furnace": False, "ahead": "water", "mob_ahead": False,
+    }
+    assert glyph._failed_build("MAKE_IRON_PICKAXE", snap) == (
+        "nothing made: needs 1 wood (you have 0), 1 stone (you have 0), 1 iron (you have 0), "
+        "1 coal (you have 0), a furnace within one step"
+    )
+    snap["items"] |= {"wood": 3, "pickaxe": 1}
+    assert glyph._failed_build("MAKE_WOOD_PICKAXE", snap) == "nothing made: you already have an equal or better pickaxe"
+    assert glyph._failed_build("PLACE_TABLE", snap) == "nothing placed: the cell ahead (water) can't take it"
 
 
 def test_multi_actions_and_feedback_in_a_run(tmp_path, monkeypatch):
@@ -191,3 +213,51 @@ def test_multi_actions_and_feedback_in_a_run(tmp_path, monkeypatch):
     assert "Played 3 actions, reward" in after_multi and "1. MOVE_LEFT: " in after_multi and "3. DO: " in after_multi
     assert "the turn was forfeited: the world did not move" in after_forfeit
     assert "then end with 1 to 3 <action> tags" in after_multi
+
+
+def test_a_game_resumes_from_its_saved_state(tmp_path, monkeypatch):
+    """Two jobs of a chain: the first stops at its time limit after asking for a handoff
+    summary and saves the game; the second opens with that summary and plays on."""
+    import craftax_env.taskset as taskset
+    import verifiers.v1 as vf
+    from verifiers.v1.configs.agent import SegmentsConfig
+
+    clock = iter(range(10**6))  # one second per reading
+    monkeypatch.setattr(taskset, "time", SimpleNamespace(time=lambda: float(next(clock))))
+    task = next(iter(CraftaxTaskset(CraftaxConfig(num_examples=1, respawn=True)).load()))
+    player = vf.AgentConfig(harness={"id": "inline-chat"}, segments=SegmentsConfig(new_tokens=1000, summary_tokens=100))
+    opened, asked = [], []
+
+    class Resumable(ScriptedInteraction):
+        def __init__(self):
+            super().__init__()
+            self.trace.nodes = []
+
+        async def summarize(self, message):
+            asked.append(message)
+            return f"summary after {len(self.received)} replies"
+
+    def job(log):
+        interaction = Resumable()
+
+        @asynccontextmanager
+        async def open_interaction(_task, **kwargs):
+            opened.append(kwargs)
+            yield interaction
+
+        env = SimpleNamespace(config=CraftaxEnvConfig(
+            player=player, episode_log=str(log), state_dir=str(tmp_path), save_every=2,
+            max_episode_steps=0, max_episode_seconds=12, on_death="respawn",
+        ))
+        asyncio.run(CraftaxEnv.run(env, task, SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))))
+        return interaction, json.loads(log.read_text())
+
+    first, line1 = job(tmp_path / "a.jsonl")
+    assert line1["ended_by"] == "time_limit" and line1["block"] == 0 and line1["turns"] > 0
+    assert opened[0] == {} and len(asked) == 1
+    assert asked[0].startswith(first.received[-1])  # the pending observation, shown again
+    second, line2 = job(tmp_path / "b.jsonl")
+    assert opened[1] == {"summary": f"summary after {len(first.received)} replies"}
+    assert second.received[0] == first.received[-1]  # the same observation opens the next job
+    assert line2["block"] == 1 and line2["turns"] > line1["turns"]
+    assert line2["game_steps"] > line1["game_steps"] and line2["played_seconds"] > line1["played_seconds"]

@@ -35,6 +35,31 @@ MAX_RETURN = 226.0
 """Sum of Craftax's per-achievement rewards (1/3/5/8 by tier, 67 achievements):
 GlyphBench's "% of max reward" is 100 * return / 226."""
 FAST_FORWARD_MAX_TICKS = 10000
+RECIPES: dict[str, tuple[dict[str, int], tuple[str, ...], tuple[str, int] | None]] = {
+    "MAKE_WOOD_PICKAXE": ({"wood": 1}, ("table",), ("pickaxe", 1)),
+    "MAKE_STONE_PICKAXE": ({"wood": 1, "stone": 1}, ("table",), ("pickaxe", 2)),
+    "MAKE_IRON_PICKAXE": ({"wood": 1, "stone": 1, "iron": 1, "coal": 1}, ("table", "furnace"), ("pickaxe", 3)),
+    "MAKE_DIAMOND_PICKAXE": ({"wood": 1, "diamond": 3}, ("table",), ("pickaxe", 4)),
+    "MAKE_WOOD_SWORD": ({"wood": 1}, ("table",), ("sword", 1)),
+    "MAKE_STONE_SWORD": ({"wood": 1, "stone": 1}, ("table",), ("sword", 2)),
+    "MAKE_IRON_SWORD": ({"wood": 1, "stone": 1, "iron": 1, "coal": 1}, ("table", "furnace"), ("sword", 3)),
+    "MAKE_DIAMOND_SWORD": ({"wood": 1, "diamond": 2}, ("table",), ("sword", 4)),
+    "MAKE_IRON_ARMOUR": ({"iron": 3, "coal": 3}, ("table", "furnace"), None),
+    "MAKE_DIAMOND_ARMOUR": ({"diamond": 3}, ("table",), None),
+    "MAKE_ARROW": ({"wood": 1, "stone": 1}, ("table",), None),
+    "MAKE_TORCH": ({"wood": 1, "coal": 1}, ("table",), None),
+}
+"""Craftax's ``do_crafting``: item costs, stations within one step (8 neighbours), and the
+tool level a craft only upgrades to. Feeds the action feedback for a craft that failed."""
+PLACEMENTS: dict[str, dict[str, int]] = {
+    "PLACE_TABLE": {"wood": 2},
+    "PLACE_FURNACE": {"stone": 1},
+    "PLACE_STONE": {"stone": 1},
+    "PLACE_TORCH": {"torches": 1},
+    "PLACE_PLANT": {"sapling": 1},
+}
+"""Craftax's ``place_block`` costs. A placement with them also needs a free cell ahead (grass
+for a sapling; water also takes stone)."""
 ENDLESS_TIMESTEPS = 1_000_000_000
 """The game's own time limit when a game has no turn limit (int32, out of reach)."""
 FLOOR_NAMES = (
@@ -362,6 +387,25 @@ class Step:
     fast_forward_ticks: int
 
 
+def _failed_build(name: str, before: dict) -> str:
+    """Why a craft or placement changed nothing, from the game's own rules."""
+    items = before["items"]
+    if name in RECIPES:
+        cost, stations, upgrade = RECIPES[name]
+        needs = [f"{n} {k} (you have {items[k]})" for k, n in cost.items() if items[k] < n]
+        needs += [f"a {s} within one step" for s in stations if not before[f"near_{s}"]]
+        if needs:
+            return "nothing made: needs " + ", ".join(needs)
+        if upgrade is not None and items[upgrade[0]] >= upgrade[1]:
+            return f"nothing made: you already have an equal or better {upgrade[0]}"
+        return "nothing made"
+    needs = [f"{n} {k} (you have {items[k]})" for k, n in PLACEMENTS[name].items() if items[k] < n]
+    if needs:
+        return "nothing placed: needs " + ", ".join(needs)
+    target = "a creature" if before["mob_ahead"] else before["ahead"]
+    return f"nothing placed: the cell ahead ({target}) can't take it"
+
+
 class CraftaxGame:
     """Full Craftax from the pinned fork, with GlyphBench's HUD, message and
     sleep/rest fast-forward. ``turn`` counts model turns (forfeits included);
@@ -379,6 +423,28 @@ class CraftaxGame:
         self.message = ""
         self.achievements = self._achievement_names()
         self.spawn = self.position
+
+    def dump(self) -> dict[str, Any]:
+        """Everything ``restore`` needs to continue this game in another process: the
+        upstream state (numpy leaves), the RNG key, the turn count, the pending message."""
+        jax = self._rt["jax"]
+        return {
+            "state": jax.tree_util.tree_map(np.asarray, self.state),
+            "key": np.asarray(self._key),
+            "turn": self.turn,
+            "message": self.message,
+            "spawn": self.spawn,
+        }
+
+    def restore(self, saved: dict[str, Any]) -> None:
+        """Continue the game ``dump`` saved (a game built with the same seed and turn limit)."""
+        jax = self._rt["jax"]
+        self.state = jax.tree_util.tree_map(jax.numpy.asarray, saved["state"])
+        self._key = jax.numpy.asarray(saved["key"])
+        self.turn = int(saved["turn"])
+        self.message = saved["message"]
+        self.spawn = tuple(saved["spawn"])
+        self.achievements = self._achievement_names()
 
     # state accessors
     @property
@@ -525,6 +591,8 @@ class CraftaxGame:
                     what = f"no effect on {target}"
         elif changes:
             what = ", ".join(changes)
+        elif name in RECIPES or name in PLACEMENTS:
+            what = _failed_build(name, before)
         else:
             what = (f"no effect (table nearby: {'yes' if before['near_table'] else 'no'}, "
                     f"furnace nearby: {'yes' if before['near_furnace'] else 'no'})"
