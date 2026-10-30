@@ -239,6 +239,12 @@ class SglangConfig(BaseConfig):
     session_timeout: float = Field(3600.0, gt=0)
     """Idle seconds after which SGLang closes a session the orchestrator never finished."""
 
+    allow_session_rewrite: bool = False
+    """KV-Streams: let a trace's prompt rewrite the history its session holds, reopening
+    the session on the full prompt (a re-prefill that brings evicted turns back). Off,
+    such a request fails with an error: an append-only client never sends one, so it
+    means a client bug (e.g. a re-tokenized history) that would corrupt the trace."""
+
     @property
     def sessions(self) -> bool:
         """Streaming sessions run only with KV-Streams eviction: full context needs

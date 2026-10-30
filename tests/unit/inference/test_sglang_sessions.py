@@ -8,6 +8,7 @@ from prime_rl.inference.sglang.model_evictions import qwen35
 from prime_rl.inference.sglang.server import (
     GenerateRequestError,
     SessionDesyncError,
+    SessionRewriteError,
     SessionTable,
     TraceAffinity,
     TurnWindow,
@@ -104,7 +105,7 @@ def test_append_only_turns_send_only_the_new_tail():
 def test_rewritten_history_reopens_the_session_on_the_full_prompt():
     async def scenario():
         engine = FakeEngine()
-        table = SessionTable(engine, timeout=60)
+        table = SessionTable(engine, timeout=60, allow_rewrite=True)
         await generate_sglang(engine, [1, 2, 3], {}, sessions=table, trace_id="t")
         await generate_sglang(engine, [1, 5, 6], {}, sessions=table, trace_id="t")
         return engine
@@ -112,6 +113,22 @@ def test_rewritten_history_reopens_the_session_on_the_full_prompt():
     engine = run(scenario())
     assert engine.calls[-3:] == [("close", "t.0"), ("open", "t.1"), ("generate", "t.1", [1, 5, 6])]
     assert engine.open == {"t.1"}
+
+
+def test_rewritten_history_is_refused_by_default():
+    async def scenario():
+        engine = FakeEngine()
+        table = SessionTable(engine, timeout=60)
+        await generate_sglang(engine, [1, 2, 3], {}, sessions=table, trace_id="t")
+        with pytest.raises(SessionRewriteError, match="diverging at token 1"):
+            await generate_sglang(engine, [1, 5, 6], {}, sessions=table, trace_id="t")
+        # the session is untouched: a prompt that extends it still runs on it
+        await generate_sglang(engine, [1, 2, 3, 90, 91, 7], {}, sessions=table, trace_id="t")
+        return engine, table
+
+    engine, table = run(scenario())
+    assert engine.calls[-1] == ("generate", "t.0", [7])
+    assert table.stats["rewrites_refused"] == 1 and table.stats["reopened"] == 0
 
 
 def test_concurrent_branch_runs_stateless():
@@ -436,7 +453,7 @@ def test_qwen_reasoning_survives_tool_results_until_the_next_user_query():
 def test_reopening_an_evicting_trace_is_counted():
     async def scenario():
         engine = FakeEngine(completion=(90, E))
-        table = SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E))
+        table = SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E), allow_rewrite=True)
         prompt = SYSTEM + USER + GEN
         for _ in range(3):
             await table.generate("t", prompt, {})

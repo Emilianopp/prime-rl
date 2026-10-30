@@ -280,6 +280,11 @@ class SessionDesyncError(Exception):
     resends the full prompt."""
 
 
+class SessionRewriteError(GenerateRequestError):
+    """A prompt that does not extend its trace's live session. Reopening would re-prefill
+    the whole history, evicted turns included, so it is refused unless the table allows it."""
+
+
 class SessionTable:
     """One SGLang streaming session per trace (keyed by ``X-Session-ID``).
 
@@ -311,9 +316,13 @@ class SessionTable:
         eviction: TurnWindow | None = None,
         overlap_schedule: bool = False,
         plans: list[EvictionPlan] = (),
+        allow_rewrite: bool = False,
     ):
         self.engine = engine
         self.timeout = timeout
+        # A rewritten history raises SessionRewriteError unless allowed: a client bug
+        # (a re-tokenized prompt) must fail loudly, not resurrect evicted turns.
+        self.allow_rewrite = allow_rewrite
         # The turn window gives the session's message structure (the protected first
         # message) and is the first eviction plan; ``plans`` add to it.
         self.eviction = eviction
@@ -332,6 +341,7 @@ class SessionTable:
             "evicted_tokens": 0,
             "failed_calls": 0,
             "resurrected": 0,
+            "rewrites_refused": 0,
         }
 
     async def generate(
@@ -370,10 +380,19 @@ class SessionTable:
                     tail = token_ids[held:] if extends else token_ids
                 prior = resident  # _close() swaps in a fresh list: this one stays intact
                 if not extends:
+                    rewrite = trace.engine_session is not None and attempt == 0
+                    if rewrite:
+                        at = self._log_rewrite(trace_id, trace, token_ids)
+                        if not self.allow_rewrite:
+                            self.stats["rewrites_refused"] += 1
+                            raise SessionRewriteError(
+                                f"trace {trace_id}: the prompt ({len(token_ids)} tokens) does not extend "
+                                f"its session ({len(trace.resident)} tokens), diverging at token {at}; "
+                                "reopening would re-prefill evicted turns "
+                                "(inference.sglang.allow_session_rewrite = true to allow it)"
+                            )
                     self._note_resurrection(trace_id, trace)
                     reopen = trace.engine_session is not None or attempt > 0
-                    if trace.engine_session is not None and attempt == 0:
-                        self._log_rewrite(trace_id, trace, token_ids)
                     await self._close(trace)
                     engine_session = f"{_SESSION_UNSAFE.sub('-', trace_id)[:200]}.{next(self._incarnation)}"
                     if not await self.engine.open_session(engine_session, self.timeout):
@@ -458,8 +477,8 @@ class SessionTable:
             logger.warning("trace %s reopened after evicting %d tokens: they are attended again", trace_id, evicted)
 
     @staticmethod
-    def _log_rewrite(trace_id: str, trace: _TraceSession, token_ids: list[int]) -> None:
-        """Why a trace's prompt stopped extending its session: where it diverges."""
+    def _log_rewrite(trace_id: str, trace: _TraceSession, token_ids: list[int]) -> int:
+        """Why a trace's prompt stopped extending its session: where it diverges (returned)."""
         resident = trace.resident
         at = next((i for i, (a, b) in enumerate(zip(resident, token_ids)) if a != b), min(len(resident), len(token_ids)))
         logger.warning(
@@ -473,6 +492,7 @@ class SessionTable:
             token_ids[max(0, at - 4) : at + 4],
             trace.finish_reason,
         )
+        return at
 
     def _eviction_call(self, trace: _TraceSession, prompt_ends: list[int], tail: list[int]) -> _CallEviction:
         """This call's ``kv_eviction`` object and the dead spans it leaves.
@@ -785,7 +805,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--server-args-json",
         required=True,
-        help='JSON file: {"server_args": {SGLang ServerArgs fields}, "sessions": bool, "session_timeout": seconds, '
+        help='JSON file: {"server_args": {SGLang ServerArgs fields}, "sessions": bool, "session_timeout": seconds, "allow_session_rewrite": bool, '
         '"eviction": {"max_turns", "stride", "message_end_id", "model_eviction"?: {"name", "ids"}} or null}',
     )
     args = parser.parse_args(argv)
@@ -805,6 +825,7 @@ def main(argv: list[str] | None = None) -> None:
             eviction=TurnWindow(**schedule) if schedule else None,
             overlap_schedule=not launch["server_args"].get("disable_overlap_schedule", False),
             plans=[model_evictions.build(model["name"], model["ids"])] if model else [],
+            allow_rewrite=bool(launch.get("allow_session_rewrite", False)),
         )
     dp_size = int(launch["server_args"].get("dp_size") or 1)
     if dp_size > 1:
