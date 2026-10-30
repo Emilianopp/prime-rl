@@ -11,7 +11,7 @@ from prime_rl.configs.inference import InferenceConfig
 SERVER_SCRIPT = Path(__file__).with_name("server.py")
 
 # [inference.sglang] fields prime-rl reads itself; everything else is a ServerArgs field.
-PRIME_RL_FIELDS = {"python", "sessions", "session_timeout", "eviction"}
+PRIME_RL_FIELDS = {"python", "sessions", "session_timeout", "allow_session_rewrite", "eviction"}
 
 
 def sglang_server_args(config: InferenceConfig) -> dict[str, Any]:
@@ -89,6 +89,7 @@ def server(config: InferenceConfig) -> None:
         "server_args": sglang_server_args(config),
         "sessions": config.sglang.sessions,
         "session_timeout": config.sglang.session_timeout,
+        "allow_session_rewrite": config.sglang.allow_session_rewrite,
         "eviction": eviction_launch_args(config),
     }
     args_path.write_text(json.dumps(launch, indent=2))
