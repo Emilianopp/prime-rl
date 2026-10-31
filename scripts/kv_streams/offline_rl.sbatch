@@ -3,7 +3,7 @@
 #SBATCH --partition=short-unkillable
 #SBATCH --gres=gpu:a100l:4
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=256G
+#SBATCH --mem=512G
 #SBATCH --time=2:59:00
 #SBATCH --output=%x-%j.out
 # Off-policy RL on stored rollouts: an RL trainer on every GPU, fed by offline_rl.py
@@ -14,7 +14,8 @@
 #     SCORER_ARGS='{"max_actions": 4}' STEPS=10 sbatch offline_rl.sbatch
 #
 # Env: STREAMS, SCORER, SCORER_ARGS, STEPS, BATCH (segments per step, 32), LR (1e-6),
-# SEQ_LEN (131072: one segment per micro batch), MODEL, ENVS (environments/ packages on
+# SEQ_LEN (131072: one segment per micro batch; with the optimizer and activations offloaded
+# the 4 ranks reach ~250 GB of host memory, hence --mem=512G), MODEL, ENVS (environments/ packages on
 # PYTHONPATH), EXTRA_PY (more PYTHONPATH, e.g. the Craftax overlay), REPO, VENV,
 # VERIFIERS / RENDERERS (default $REPO/deps/...), OUT_ROOT.
 set -u
@@ -62,7 +63,9 @@ torchrun --role=trainer --rdzv-endpoint=localhost:29517 --rdzv-id=$RANDOM --log-
   --local-ranks-filter=0 --redirect=3 --tee=3 --nproc-per-node="$GPUS" \
   -m prime_rl.trainer.rl.train @ "$OUT/trainer.toml" > "$OUT/trainer.log" 2>&1
 echo "trainer exit $?"
-wait $FEEDER; echo "feeder exit $?"
+# The feeder's job ends with the trainer's: a trainer that died never writes the final
+# broadcast the feeder waits for, and would hold the GPUs to the time limit.
+kill $FEEDER 2>/dev/null; wait $FEEDER; echo "feeder exit $?"
 
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 echo "== trainer steps"; grep -a -E "Step [0-9]+ \|" "$OUT/trainer.log" | strip | cut -c1-300 | tee "$OUT/trainer_steps.txt"
