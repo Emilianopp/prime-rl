@@ -12,7 +12,13 @@ the reasoning, reading an entry that does not exist, creating more than
 `max_new_keys` entries in one segment, and a summary turn without a `<summary>` in the
 reply. Bonuses, at most once per segment: reading an existing entry in the first
 `read_window` turns of a segment that opened with memory, and the first saved edit
-(write, rewrite or replace). Any other reply scores 0.
+(write, rewrite or replace). Any other reply scores 0 by default.
+
+Penalties alone only push mass away from the failures in the data: an off-policy round on
+them moved it onto a failure the data never showed (`<action>` tags followed by a stray
+`</think>`, reported as `think_tag_in_reply`) and doubled the reply length. Two optional
+terms give every game turn a pull: `valid_action` for a turn that plays, and `long_reply`
+per 1,000 sampled tokens beyond `free_tokens`.
 
     scores = turn_rewards(trace)   # [(node index, reward, [reasons])] for scored replies
 """
@@ -49,6 +55,11 @@ class TurnRewardConfig:
     read_window: int = 3
     """Game turns at the start of a segment in which a read earns `read_after_reset`."""
     first_write: float = 0.5
+    valid_action: float = 0.0
+    """A game turn that plays at least one action."""
+    long_reply: float = 0.0
+    """Per 1,000 sampled tokens a game turn spends beyond `free_tokens`."""
+    free_tokens: int = 512
     max_actions: int | None = None
     """Actions a reply may play, as the env parsed them; None reads the task's info (a
     trace loaded back from a stream keeps only the base task fields: pass it then)."""
@@ -114,10 +125,18 @@ def turn_rewards(trace: vf.Trace, config: TurnRewardConfig | None = None, **over
                 score.add(config.missing_summary, "missing_summary")
             continue  # its memory results land in the next segment
         game_turns += 1
+        tokens = sum(node.mask)
+        if tokens > config.free_tokens:
+            score.add(config.long_reply * (tokens - config.free_tokens) / 1000, "long_reply")
         indices, failure, _ = glyph.parse_actions(reply, max_actions)
-        if not indices:
+        if indices:
+            score.add(config.valid_action, "valid_action")
+        else:
             in_reasoning = failure == "no_action_tag" and glyph.parse_actions(reasoning, max_actions)[0]
-            score.add(config.forfeit, "action_in_reasoning" if in_reasoning else failure or "forfeit")
+            reason = "action_in_reasoning" if in_reasoning else failure or "forfeit"
+            if reason == "no_action_tag" and "</think>" in reply:
+                reason = "think_tag_in_reply"  # tags before a stray close: the parser reads after it
+            score.add(config.forfeit, reason)
         if after is None:
             continue
         if MEMORY_IN_REASONING in after:

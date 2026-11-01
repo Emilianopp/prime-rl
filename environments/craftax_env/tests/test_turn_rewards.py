@@ -93,3 +93,14 @@ def test_summary_turns():
     assert rewards(t) == [(0.0, []), (-1.0, ["missing_summary"])]
     ok = trace((ask, "", "<summary>STATUS: alive</summary>"))
     assert rewards(ok) == [(0.0, [])]
+
+
+def test_valid_action_and_long_reply():
+    t = trace(
+        (OBS, "", "<action>DO</action>"),
+        (OBS, "", "<action>DO</action>\n</think>"),
+        (OBS, "", "no tag at all"),
+    )
+    assert rewards(t, valid_action=0.25) == [(0.25, ["valid_action"]), (-1.0, ["think_tag_in_reply"]), (-1.0, ["no_action_tag"])]
+    # the test replies sample 2 tokens: 1 over a free budget of 1
+    assert [r for r, _ in rewards(t, valid_action=0.25, long_reply=-1000.0, free_tokens=1)] == [-0.75, -2.0, -2.0]
