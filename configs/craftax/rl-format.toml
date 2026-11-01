@@ -1,0 +1,100 @@
+# On-policy format RL on continuous Craftax under KV-Streams, Qwen3.5-4B in thinking
+# mode: the eval setting of configs/craftax/eval-continuous.toml (r50-1 turn window, up
+# to 4 actions per reply, action feedback, the player's memory) on the train seeds, with
+# per-reply credit from craftax_env.turn_rewards and nothing else. A game turn that
+# forfeits (no playable <action> tag, whatever the shape) scores -1, a summary turn
+# without <summary> -1, memory tags left in the reasoning -0.5, a turn that plays +0.25;
+# the memory bonuses and penalties are off, and there is no length or game-reward term,
+# so only the format is trained. 2 trainer + 2 inference GPUs (A100-80GB), one node.
+#
+# Episodes stop at 120 turns: the base model forfeits 11% of turns 1-40 but 15-29% from
+# turn 41 on, once the r50 window evicts, so shorter games would miss most failures.
+#
+#   CONFIG=configs/craftax/rl-format.toml ENVS=craftax_env \
+#     ARGS='--orchestrator.train.algo.log-path $OUT/format.jsonl' \
+#     WATCH='python scripts/kv_streams/format_guard.py --log $OUT/format.jsonl --out $OUT --runs $OUT/run' \
+#     sbatch scripts/kv_streams/rl.sbatch
+
+max_steps = 20
+seq_len = 98304  # a 120-turn stream runs ~70k tokens; longer ones are cut
+
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 2
+
+[weight_broadcast]
+type = "filesystem"  # the SGLang backend supports filesystem weight updates only
+
+[model]
+name = "Qwen/Qwen3.5-4B"
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.0
+max_norm = 1.0
+
+[orchestrator]
+batch_size = 16  # episodes per step: ~1,900 replies
+
+[orchestrator.train]
+group_size = 1  # per-reply credit needs no group baseline
+
+[orchestrator.train.algo]
+type = "turn_credit"
+scorer = "craftax_env.turn_rewards:turn_rewards"
+scorer_args = { max_actions = 4, valid_action = 0.25, read_after_reset = 0.0, first_write = 0.0, read_missing = 0.0, key_spam = 0.0 }
+
+[orchestrator.concurrency]
+# 16 episodes per engine, as in the eval; two batches in flight keeps rollouts <= 2 steps stale.
+initial_inflight = 32
+max_inflight = 32
+min_inflight = 4
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = true
+# Bridge each turn on the sampled tokens: a re-rendered history breaks a
+# session's continuity (and a KV-Streams trace's single stream).
+thinking_retention = "all"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 2048
+temperature = 1.0
+
+[[orchestrator.train.source]]
+name = "craftax"
+env.taskset.id = "craftax-env"
+env.taskset.split = "train"
+env.taskset.max_output_tokens = 2048  # the budget the system prompt states: keep = max_completion_tokens
+env.taskset.max_actions_per_turn = 4
+env.taskset.respawn = true
+env.max_episode_steps = 120
+env.max_episode_seconds = 3600
+env.on_death = "respawn"
+env.death_inventory = "drop_all"
+env.reward = "achievements"
+env.action_feedback = true
+env.player.segments.new_tokens = 65536  # the eval runs 131072; a segment plus its summary must fit seq_len
+env.player.segments.summary_tokens = 32768
+env.player.harness.id = "inline-chat"
+env.player.memory.max_key_tokens = 4096
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16
+
+[inference]
+backend = "sglang"
+
+[inference.vllm]  # engine-agnostic fields, translated for SGLang
+# KV-Streams survivors keep their positions, so a trace's positions grow with every
+# token it ever wrote: this bounds the whole episode, not the live context.
+max_model_len = 262144
+gpu_memory_utilization = 0.9
+
+[inference.sglang]
+max_mamba_cache_size = 400
+mamba_ssm_dtype = "bfloat16"
+
+[compaction]  # KV-Streams turn window r50-1, as in the eval
+max_turns = 50
+stride = 1

@@ -16,9 +16,10 @@ reply. Bonuses, at most once per segment: reading an existing entry in the first
 
 Penalties alone only push mass away from the failures in the data: an off-policy round on
 them moved it onto a failure the data never showed (`<action>` tags followed by a stray
-`</think>`, reported as `think_tag_in_reply`) and doubled the reply length. Two optional
-terms give every game turn a pull: `valid_action` for a turn that plays, and `long_reply`
-per 1,000 sampled tokens beyond `free_tokens`.
+`</think>`, reported as `think_tag_in_reply`). The optional `valid_action` bonus for a
+turn that plays gives every game turn a pull toward the format. Forfeits are named by
+their shape (`think_tag_in_reply`, `unclosed_action_tag` for a reply that stops inside
+a tag) so a run can watch for new ones; they all score `forfeit`.
 
     scores = turn_rewards(trace)   # [(node index, reward, [reasons])] for scored replies
 """
@@ -40,6 +41,7 @@ INDEX_KEY = re.compile(r"(.+?) \([\d,]+ tok\)$")
 RESULT = re.compile(r'^(write|rewrite|replace|delete|read) "(.+?)": (.*)$', re.MULTILINE)
 READ_BLOCK = re.compile(r'^\[Memory "(.+?)"\]$', re.MULTILINE)
 MEMORY_IN_REASONING = "memory tags inside your reasoning were ignored"
+UNCLOSED_TAG = re.compile(r"(<action[^<]*|<)\s*$")
 
 
 @dataclass
@@ -57,9 +59,6 @@ class TurnRewardConfig:
     first_write: float = 0.5
     valid_action: float = 0.0
     """A game turn that plays at least one action."""
-    long_reply: float = 0.0
-    """Per 1,000 sampled tokens a game turn spends beyond `free_tokens`."""
-    free_tokens: int = 512
     max_actions: int | None = None
     """Actions a reply may play, as the env parsed them; None reads the task's info (a
     trace loaded back from a stream keeps only the base task fields: pass it then)."""
@@ -125,9 +124,6 @@ def turn_rewards(trace: vf.Trace, config: TurnRewardConfig | None = None, **over
                 score.add(config.missing_summary, "missing_summary")
             continue  # its memory results land in the next segment
         game_turns += 1
-        tokens = sum(node.mask)
-        if tokens > config.free_tokens:
-            score.add(config.long_reply * (tokens - config.free_tokens) / 1000, "long_reply")
         indices, failure, _ = glyph.parse_actions(reply, max_actions)
         if indices:
             score.add(config.valid_action, "valid_action")
@@ -136,6 +132,8 @@ def turn_rewards(trace: vf.Trace, config: TurnRewardConfig | None = None, **over
             reason = "action_in_reasoning" if in_reasoning else failure or "forfeit"
             if reason == "no_action_tag" and "</think>" in reply:
                 reason = "think_tag_in_reply"  # tags before a stray close: the parser reads after it
+            elif reason == "no_action_tag" and UNCLOSED_TAG.search(reply):
+                reason = "unclosed_action_tag"
             score.add(config.forfeit, reason)
         if after is None:
             continue

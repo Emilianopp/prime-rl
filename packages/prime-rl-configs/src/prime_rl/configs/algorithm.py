@@ -2,7 +2,7 @@
 
 An algorithm is a named, self-contained config — a discriminated union keyed
 on ``type`` (``grpo``, ``max_rl``, ``rae``, ``hierarchical_grpo``, ``opd``,
-``opsd``, ``sft``, ``echo``, ``debug``).
+``opsd``, ``sft``, ``echo``, ``debug``, ``turn_credit``).
 The bundle *is* the algorithm: each variant carries
 its sampling component and its credit-assignment / loss-routing parameters,
 and its class defaults are the vetted setting — ``type = "opd"`` with a
@@ -34,6 +34,7 @@ count; per-token component weights ship on the wire and the trainer just
 executes them.
 """
 
+from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 import verifiers.v1 as vf
@@ -399,6 +400,30 @@ class DebugAlgoConfig(BaseAlgoConfig):
         return self
 
 
+class TurnCreditAlgoConfig(BaseAlgoConfig):
+    type: Literal["turn_credit"] = "turn_credit"
+    """Per-reply credit from an env's own scorer: each sampled reply's tokens carry
+    the reward the scorer gives that reply, unscored replies carry 0. For signals an
+    episode reward cannot localize (a reply that forfeits its turn by its format); the
+    scorer reads the env's text formats, so it lives with the env and is named by
+    import path, like a filter. No baseline: the scorer's rewards are the advantages,
+    so balance them by design (a small bonus for a good reply against the penalties)."""
+
+    action_loss_type: ClassVar[ActionLossType] = "rl"
+
+    scorer: str
+    """``module:function`` taking a trace (plus ``scorer_args``) and returning scores
+    with ``.node`` (index in ``trace.nodes``), ``.reward`` and ``.reasons``, e.g.
+    ``craftax_env.turn_rewards:turn_rewards``."""
+
+    scorer_args: dict[str, Any] = Field(default_factory=dict)
+    """Keyword arguments for the scorer."""
+
+    log_path: Path | None = None
+    """Append one JSON line per scored episode (policy version, replies, sampled
+    tokens, reasons, rewards): what a run monitor reads."""
+
+
 AlgoConfig: TypeAlias = Annotated[
     GRPOAlgoConfig
     | EchoAlgoConfig
@@ -408,7 +433,8 @@ AlgoConfig: TypeAlias = Annotated[
     | OPDAlgoConfig
     | OPSDAlgoConfig
     | SFTAlgoConfig
-    | DebugAlgoConfig,
+    | DebugAlgoConfig
+    | TurnCreditAlgoConfig,
     Field(discriminator="type"),
 ]
 """The training algorithm: sampling plus the per-token training signal (credit
@@ -425,6 +451,7 @@ its class defaults are the vetted setting.
 - ``echo`` — GRPO on action tokens + weighted CE on tool-response observation tokens.
 - ``debug`` — the same constant advantage on every sampled token, ignoring
   rewards. Debugging only: for infra work that needs every token trainable.
+- ``turn_credit`` — each reply's tokens carry the reward an env scorer gives that reply.
 
 A new credit-assignment scheme is a new named algorithm in code (subclass
 ``Algorithm``, register it), not a config that points at an import path.

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from unittest.mock import MagicMock
 
 import pydantic
@@ -499,3 +500,31 @@ def test_echo_filter_narrows_selection():
     episode = _two_turn_episode()
     with pytest.raises(ValueError, match="span the branch's tokens"):
         asyncio.run(_echo_algorithm(filter_fn=lambda trace: [[True] * 6]).score_episode(episode))
+
+
+def test_turn_credit_puts_each_reply_score_on_its_tokens(tmp_path):
+    from types import SimpleNamespace
+
+    from prime_rl.orchestrator.algo import TurnCreditAlgorithm
+
+    episode = _two_turn_episode(observation_role="user")
+    episode.ok = True
+    trace = episode.traces[0]
+    log = tmp_path / "credit.jsonl"
+    algo = TurnCreditAlgorithm(
+        _build(type="turn_credit", scorer="json:dumps", scorer_args={"k": 1}, log_path=str(log)), MagicMock()
+    )
+    seen = {}
+
+    def scorer(t, **kwargs):
+        seen.update(kwargs)
+        return [SimpleNamespace(node=3, reward=-1.0, reasons=["no_action_tag"])]  # the second reply only
+
+    algo.scorer = scorer
+    asyncio.run(algo.score_episode(episode))
+    assert seen == {"k": 1}
+    assert trace.nodes[1].advantages == [0.0, 0.0]
+    assert trace.nodes[3].advantages == [-1.0, -1.0]
+    record = json.loads(log.read_text())
+    assert (record["replies"], record["scored"], record["tokens"], record["credit"]) == (1, 1, 2, -1.0)
+    assert record["reasons"] == {"no_action_tag": 1}
