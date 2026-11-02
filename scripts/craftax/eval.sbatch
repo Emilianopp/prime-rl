@@ -32,6 +32,21 @@
 # message says what each action did), MAX_ACTIONS (N > 1: up to N actions per reply), REPO
 # (prime-rl checkout, deps/ submodules checked out), VENV, SGLANG_VENV, CRAFTAX_PY (a
 # --target dir with jax[cpu] and the Craftax fork, for a venv without them), OUT_ROOT.
+# TREE_DEPTH (N > 0: configs/craftax/eval-tree.toml, the frozen in-env beam over segments of
+# docs/craftax-segments-judge.md; each episode is a whole beam for one seed): ROOTS (beams =
+# episodes = CONC, default 2), BRANCHES (4), BEAM_KEEP (2), ROOT_BRANCHES (BRANCHES x
+# BEAM_KEEP), SEGMENT_TURNS (100), SEGMENT_TOKENS (96000), MAX_TOKENS (the per-segment
+# ceiling env.player.max_total_tokens: SEGMENT_TOKENS + 35072 for the notes turn, at least
+# 131072; under the engine's 262144), TREE_CHUNK (levels per eval process, unset: all in one; a
+# beam is one episode that keeps every segment's trace in host memory, so a long run plays
+# TREE_CHUNK levels per eval and the next one resumes from the beam checkpoints); saved games
+# in $OUT/state. MAMBA_SLOTS (the engine's DeltaNet state slots, default 400: 3 per open
+# segment suffice, and each slot left unused is ~24 MB of GPU memory the KV pool loses).
+# The notes judge (with TREE_DEPTH): JUDGE_BACKEND (unset: no judge, arm A0; capi: the Copilot
+# API with ~/.copilot/config.json; openai: Gemini's endpoint with ~/.gemini_key), JUDGE_MODEL
+# (gpt-4.1 for capi, gemini-3.8-flash for openai), JUDGE_MODE (single; group: a node's branches
+# in one comparative call), NOTES_WEIGHT (0.5), ADHERENCE_WEIGHT (0: off, arm A1; 0.25: arm C, the
+# adherence judge grades how each segment followed its parent's PLAN, same JUDGE_MODE).
 set -u
 # One data-parallel engine per GPU of the allocation (the config says 4; main gives 2, unkillable 1).
 GPUS=${GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}; [ "$GPUS" -ge 1 ] || GPUS=1
@@ -42,20 +57,28 @@ STEPS=${STEPS:-}
 N=${N:-$([ -n "$STEPS" ] && echo $((3 * CONC)) || echo "$CONC")} SKIP=${SKIP:-0} TURN_TOKENS=${TURN_TOKENS:-2048} NO_THINKING=${NO_THINKING:-}
 DEADLINE_MARGIN=${DEADLINE_MARGIN:-600} MULTIPLEX=${MULTIPLEX:-}
 TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} SAFE_RADIUS=${SAFE_RADIUS:-}
-[ -n "$SEGMENTS" ] && [ "$SEGMENTS" != off ] && { echo "SEGMENTS=$SEGMENTS: this branch's verifiers has no segments"; exit 2; }
+[ -n "$SEGMENTS" ] && [ "$SEGMENTS" != off ] && { echo "SEGMENTS=$SEGMENTS: this branch's verifiers has no segments (use TREE_DEPTH)"; exit 2; }
+TREE_DEPTH=${TREE_DEPTH:-} TREE_CHUNK=${TREE_CHUNK:-} MAMBA_SLOTS=${MAMBA_SLOTS:-} BRANCHES=${BRANCHES:-4} BEAM_KEEP=${BEAM_KEEP:-2} SEGMENT_TURNS=${SEGMENT_TURNS:-100} SEGMENT_TOKENS=${SEGMENT_TOKENS:-96000}
+ROOT_BRANCHES=${ROOT_BRANCHES:-$((BRANCHES * BEAM_KEEP))}
+MAX_TOKENS=${MAX_TOKENS:-$((SEGMENT_TOKENS + 35072 > 131072 ? SEGMENT_TOKENS + 35072 : 131072))}
+MAXC=$((ROOT_BRANCHES > BRANCHES * BEAM_KEEP ? ROOT_BRANCHES : BRANCHES * BEAM_KEEP))  # a level's branches play together
+if [ -n "$TREE_DEPTH" ]; then ROOTS=${ROOTS:-2}; N=$ROOTS; CONC=$ROOTS; fi
+JUDGE_BACKEND=${JUDGE_BACKEND:-} JUDGE_MODE=${JUDGE_MODE:-single} NOTES_WEIGHT=${NOTES_WEIGHT:-0.5} ADHERENCE_WEIGHT=${ADHERENCE_WEIGHT:-0}
+JUDGE_MODEL=${JUDGE_MODEL:-$([ "$JUDGE_BACKEND" = openai ] && echo gemini-3.8-flash || echo gpt-4.1)}
+[ "$JUDGE_BACKEND" = openai ] && [ -z "${GEMINI_API_KEY:-}" ] && [ -r "$HOME/.gemini_key" ] && export GEMINI_API_KEY=$(cat "$HOME/.gemini_key")
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${SAFE_RADIUS:+_safe$SAFE_RADIUS}_skip$SKIP/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${SAFE_RADIUS:+_safe$SAFE_RADIUS}${TREE_DEPTH:+_tree$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-s$SEGMENT_TURNS}${JUDGE_BACKEND:+_judge-$JUDGE_MODE}$([ -n "$JUDGE_BACKEND" ] && [ "$ADHERENCE_WEIGHT" != 0 ] && echo _adh$ADHERENCE_WEIGHT)_skip$SKIP/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY JAX_PLATFORMS=cpu
 # A Craftax step is ~1.5 ms on one thread; without this every env worker sizes XLA's CPU pool to the node.
 export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1${XLA_FLAGS:+ $XLA_FLAGS}"
 export UV_PROJECT_ENVIRONMENT=$VENV
-export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/craftax_env:$REPO/deps/verifiers:$REPO/deps/renderers${CRAFTAX_PY:+:$CRAFTAX_PY}${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/craftax_env:$REPO/environments/crafter_env:$REPO/deps/verifiers:$REPO/deps/renderers${CRAFTAX_PY:+:$CRAFTAX_PY}${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off} tree=$([ -n "$TREE_DEPTH" ] && echo "depth$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-r$ROOT_BRANCHES-s$SEGMENT_TURNS-t$SEGMENT_TOKENS-m$MAX_TOKENS" || echo off) judge=$([ -n "$JUDGE_BACKEND" ] && echo "$JUDGE_BACKEND:$JUDGE_MODEL/$JUDGE_MODE/w$NOTES_WEIGHT/adh$ADHERENCE_WEIGHT" || echo off)] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 # jobs/craftax_eval.sbatch unpacks the venv tarball here first: re-walking ~200k files on scratch costs minutes.
 [ -x "$SLURM_TMPDIR/sgl-venv/bin/python" ] || rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
@@ -70,6 +93,7 @@ else
   EVICT=(--sglang.eviction.max-turns "$KEEP")
 fi
 sed -i "s/^data_parallel_size = .*/data_parallel_size = $GPUS/" "$OUT/inference.toml"
+[ -n "$MAMBA_SLOTS" ] && sed -i "s/^max_mamba_cache_size = .*/max_mamba_cache_size = $MAMBA_SLOTS  # MAMBA_SLOTS/" "$OUT/inference.toml"
 uv run inference @ "$OUT/inference.toml" --sglang.python "$SGL_PY" "${EVICT[@]}" > "$OUT/inference.log" 2>&1 &
 INFER=$!
 for _ in $(seq 120); do
@@ -93,6 +117,7 @@ GPUMON=$!
 CPUMON=$!
 EVAL_TOML=configs/craftax/eval.toml
 [ -n "$CONTINUOUS" ] && EVAL_TOML=configs/craftax/eval-continuous.toml
+[ -n "$TREE_DEPTH" ] && EVAL_TOML=configs/craftax/eval-tree.toml
 sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"|" "$EVAL_TOML" > "$OUT/eval.toml"
 sed -i "s/^max_completion_tokens = .*/max_completion_tokens = $TURN_TOKENS/; s/^env.taskset.max_output_tokens = [0-9]*/env.taskset.max_output_tokens = $TURN_TOKENS/" "$OUT/eval.toml"
 [ -n "$FEEDBACK" ] && sed -i "s|^env.max_episode_steps = .*|&\nenv.action_feedback = true|" "$OUT/eval.toml"
@@ -105,11 +130,35 @@ if [ -n "${SLURM_JOB_ID:-}" ] && JOB_END=$(date -d "$(squeue -h -j "$SLURM_JOB_I
   sed -i "s|^env.max_episode_steps = .*|&\nenv.episode_deadline = $((JOB_END - DEADLINE_MARGIN))|" "$OUT/eval.toml"
   echo "episodes stop by $(date -d @$((JOB_END - DEADLINE_MARGIN)) +%T) (job ends $(date -d @$JOB_END +%T))"
 fi
+if [ -n "$TREE_DEPTH" ]; then
+  sed -i "s/^env.tree_depth = .*/env.tree_depth = $TREE_DEPTH/; s/^env.branches = .*/env.branches = $BRANCHES/; s/^env.keep = .*/env.keep = $BEAM_KEEP/;
+          s/^env.segment_turns = .*/env.segment_turns = $SEGMENT_TURNS/; s/^env.segment_tokens = .*/env.segment_tokens = $SEGMENT_TOKENS/;
+          s/^env.max_concurrent_agents = .*/env.max_concurrent_agents = $MAXC/; s/^env.player.max_total_tokens = .*/env.player.max_total_tokens = $MAX_TOKENS/" "$OUT/eval.toml"
+  sed -i "s|^env.max_episode_steps = .*|&\nenv.root_branches = $ROOT_BRANCHES\nenv.state_dir = \"$OUT/state\"|" "$OUT/eval.toml"
+  if [ -n "$JUDGE_BACKEND" ]; then
+    JUDGE_LINES="env.judge.backend = \"$JUDGE_BACKEND\"\nenv.judge.model = \"$JUDGE_MODEL\"\nenv.judge.sampling.temperature = 0.0\nenv.judge_mode = \"$JUDGE_MODE\"\nenv.notes_weight = $NOTES_WEIGHT\nenv.adherence_weight = $ADHERENCE_WEIGHT"
+    [ "$JUDGE_BACKEND" = openai ] && JUDGE_LINES="$JUDGE_LINES\nenv.judge.base_url = \"https://generativelanguage.googleapis.com/v1beta/openai/\"\nenv.judge.api_key_var = \"GEMINI_API_KEY\""
+    sed -i "s|^env.max_episode_steps = .*|&\n$JUDGE_LINES|" "$OUT/eval.toml"
+  fi
+fi
 [ -n "$SAFE_RADIUS" ] && sed -i "s|^env.max_episode_steps = .*|&\nenv.respawn_safe = true\nenv.respawn_safe_radius = $SAFE_RADIUS|" "$OUT/eval.toml"
 EVAL_ARGS=(--dashboard false --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "$CONC"
   --concurrency.max-inflight "$CONC" --concurrency.initial-inflight "$CONC")
-uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" "${EVAL_ARGS[@]}" > "$OUT/eval.log" 2>&1
-echo "eval exit $? $(date +%T)"
+if [ -n "$TREE_DEPTH" ] && [ -n "$TREE_CHUNK" ]; then
+  for ((d = TREE_CHUNK; ; d += TREE_CHUNK)); do
+    [ "$d" -gt "$TREE_DEPTH" ] && d=$TREE_DEPTH
+    sed -i "s/^env.tree_depth = .*/env.tree_depth = $d/" "$OUT/eval.toml"
+    uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run-d$d" "${EVAL_ARGS[@]}" >> "$OUT/eval.log" 2>&1
+    echo "eval to depth $d exit $? $(date +%T)"
+    [ "$d" -ge "$TREE_DEPTH" ] && break
+    [ -n "${JOB_END:-}" ] && [ "$(date +%s)" -ge $((JOB_END - DEADLINE_MARGIN)) ] && break
+    # go on while some beam stopped at this depth's cap (the others reached the goal or emptied)
+    $VENV/bin/python -c 'import glob, json, sys; sys.exit(not any(b.get("done") == "tree_depth" and int(b.get("depth") or 0) >= int(sys.argv[2]) for b in map(json.load, map(open, glob.glob(sys.argv[1] + "/*.json")))))' "$OUT/state/beam" "$d" || break
+  done
+else
+  uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" "${EVAL_ARGS[@]}" > "$OUT/eval.log" 2>&1
+  echo "eval exit $? $(date +%T)"
+fi
 
 kill $POLL $GPUMON $CPUMON 2>/dev/null
 echo "== kvs counters"; cat "$OUT/kvs.prom" 2>/dev/null

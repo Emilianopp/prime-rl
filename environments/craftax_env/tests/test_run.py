@@ -130,7 +130,7 @@ def test_respawn_continues_the_game(tmp_path, monkeypatch, death_inventory):
     assert all(d["floor"] == 1 for d in line["deaths"])
     assert all(isinstance(d["respawn_hostile"], bool) for d in line["deaths"])
     after = interaction.received[5]  # the observation after the first death
-    assert "You died (death 1, on floor 1" in after and "You respawned on the Overworld" in after
+    assert "You died (death 1) at F1 (" in after and "You respawned on the Overworld at F0 (" in after
     assert "Floor: 0 (Overworld)" in after and "HP: 9/9" in after
     assert ("Wood:0" in after) == (death_inventory == "drop_all")
     assert "Step: 5    Upstream timestep" in after  # no turn limit in the HUD

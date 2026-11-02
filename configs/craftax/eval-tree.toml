@@ -1,0 +1,60 @@
+# Inference-only Craftax segments with the in-env frozen beam (arm A0 of
+# docs/craftax-segments-judge.md): no trainer, no judge yet. Each episode is a whole beam
+# for one seed: `branches` segments per node (the root: branches x keep), the `keep`
+# best by segment progress (Craftax's 1/3/5/8 achievement reward of the segment's
+# unlocks) continue, down to tree_depth. A segment is 100 turns (or 96k positions), then
+# a notes turn; the next segment starts from the saved game with the game's record of the
+# state plus those notes after the system prompt. Continuous rules: a death respawns the
+# player on the Overworld with an empty inventory. Serve configs/crafter/inference-kve.toml
+# first; scripts/craftax/eval.sbatch TREE_DEPTH=<n> runs both.
+#
+#   uv run eval @ configs/craftax/eval-tree.toml
+
+model = "Qwen/Qwen3.5-4B"
+group_size = 1
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+# Any admin URL enables releasing each segment's session when it finishes.
+admin_base_url = ["http://localhost:8000/v1"]
+
+[renderer]  # token-in/out with the trace id as session id, as in training
+name = "qwen3.5"
+enable_thinking = true
+thinking_retention = "all"
+
+[concurrency]  # episodes = roots (beams) in flight; sessions = episodes x env.max_concurrent_agents
+initial_inflight = 8
+min_inflight = 8
+max_inflight = 8
+
+[select]
+limit = 8  # roots
+
+[sampling]
+max_completion_tokens = 2048
+temperature = 0.7  # TEMPORARY for smoke, revert to 1.0
+
+[[source]]
+name = "craftax"
+env.taskset.id = "craftax-env"
+env.taskset.split = "eval"
+env.taskset.max_output_tokens = 2048  # the budget the system prompt states: keep = max_completion_tokens
+env.taskset.respawn = true  # the system prompt states the continuous rules
+env.max_episode_steps = 0  # no game clock: the segment cut ends each segment
+env.on_death = "respawn"
+env.death_inventory = "drop_all"
+env.reward = "achievements"
+env.segment_turns = 100
+env.segment_tokens = 96000  # logical positions, evicted tokens included: ~32k left for the notes under 131072
+env.summary_max_tokens = 32768
+env.tree_depth = 10
+env.branches = 4
+env.keep = 2
+env.max_concurrent_agents = 8  # the root's branches play together (branches x keep)
+env.player.max_total_tokens = 131072  # per segment (one trace each), under max_model_len
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 4

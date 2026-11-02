@@ -579,9 +579,18 @@ class Dispatcher:
         )
 
         session_ids: set[str] = set()
+        releases: set[asyncio.Task] = set()
 
         def on_delta(delta: dict) -> None:
             session_ids.add(delta["trace"])
+            # A trace whose agent phase ended makes no more model calls: release its session
+            # now. An in-env search (the crafter/craftax beam) plays a whole tree of segment
+            # traces in one episode, and holding every finished segment's KV until the episode
+            # ends fills the engine until no queued turn can be admitted.
+            if (((delta.get("set") or {}).get("timing") or {}).get("agent") or {}).get("end"):
+                release = asyncio.create_task(clients.finish_sessions([delta["trace"]]))
+                releases.add(release)
+                release.add_done_callback(releases.discard)
             first = not meta.live
             live.apply(meta, delta)
             self.queue_live({"delta": delta, "dispatch": live.dispatch_info(meta)})
@@ -602,7 +611,7 @@ class Dispatcher:
                 session_ids.update(trace.id for trace in episode.traces)
                 return episode
             finally:
-                cleanup = asyncio.create_task(clients.finish_sessions(sorted(session_ids)))
+                cleanup = asyncio.ensure_future(asyncio.gather(*releases, clients.finish_sessions(sorted(session_ids))))
                 try:
                     await asyncio.shield(cleanup)
                 except asyncio.CancelledError:

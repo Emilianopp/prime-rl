@@ -437,6 +437,54 @@ class CraftaxGame:
         self.achievements = self._achievement_names()
         self.spawn = self.position
 
+    # --- segments: save and restore the whole game ---------------------------------
+    def save(self) -> dict:
+        """Everything a later segment needs to continue this exact game: the upstream
+        state (as numpy), the RNG key, the turn counter, the spawn point and the message.
+        A restored game steps bit-identically (tests/test_segments.py)."""
+        jax = self._rt["jax"]
+        return {"state": jax.device_get(self.state), "key": np.asarray(self._key), "turn": self.turn,
+                "spawn": list(self.spawn), "message": self.message}
+
+    @classmethod
+    def restore(cls, saved: dict, max_turns: int | None) -> "CraftaxGame":
+        game = cls.__new__(cls)
+        game.max_turns = int(max_turns) if max_turns else None
+        game._env, game._params, game._rt = _load(game.max_turns or ENDLESS_TIMESTEPS)
+        jax = game._rt["jax"]
+        game.state = jax.tree.map(jax.numpy.asarray, saved["state"])
+        game._key = jax.numpy.asarray(saved["key"])
+        game.turn = int(saved["turn"])
+        game.spawn = tuple(int(v) for v in saved["spawn"])
+        game.message = saved.get("message", "")
+        game.achievements = game._achievement_names()
+        return game
+
+    def visible(self) -> tuple[int, np.ndarray]:
+        """(floor, mask): the cells of the current floor the observation shows right now,
+        i.e. inside the 9x11 window and lit (light > 0.05, the renderer's own rule)."""
+        floor = self.floor
+        light = np.asarray(self.state.light_map[floor])
+        rows, cols = light.shape
+        r, c = self.position
+        mask = np.zeros_like(light, dtype=bool)
+        r0, r1, c0, c1 = max(0, r - 4), min(rows, r + 5), max(0, c - 5), min(cols, c + 6)
+        mask[r0:r1, c0:c1] = light[r0:r1, c0:c1] > 0.05
+        return floor, mask
+
+    def block_ahead(self) -> tuple[tuple[int, int], int]:
+        """The cell the player faces and its block type id."""
+        r, c = self.position
+        dr, dc = self._rt["directions"][int(np.asarray(self.state.player_direction))]
+        cell = (r + int(dr), c + int(dc))
+        game_map = np.asarray(self.state.map[self.floor])
+        inside = 0 <= cell[0] < game_map.shape[0] and 0 <= cell[1] < game_map.shape[1]
+        return cell, int(game_map[cell]) if inside else -1
+
+    def hud(self) -> str:
+        """The HUD block alone, as the observation shows it."""
+        return self.render()[2]
+
     # state accessors
     @property
     def health(self) -> float:
@@ -583,9 +631,9 @@ class CraftaxGame:
         facing = {1: "left", 2: "right", 3: "up", 4: "down"}.get(after["facing"], "?")
         if after["floor"] != before["floor"]:
             fl = after["floor"]
-            what = f"moved to floor {fl} ({FLOOR_NAMES[fl] if fl < len(FLOOR_NAMES) else fl})"
+            what = f"moved to floor {fl} ({FLOOR_NAMES[fl] if fl < len(FLOOR_NAMES) else fl}), now at {place(fl, after['pos'])}"
         elif name.startswith("MOVE_"):
-            what = (f"moved to ({after['pos'][0]},{after['pos'][1]})" if after["pos"] != before["pos"]
+            what = (f"moved to {place(after['floor'], after['pos'])}" if after["pos"] != before["pos"]
                     else f"blocked by {'a creature' if after['mob_ahead'] else after['ahead']}; now facing {facing}")
         elif name == "DO":
             target = "a creature" if before["mob_ahead"] else before["ahead"]
@@ -739,7 +787,9 @@ class CraftaxGame:
 # --- the per-turn user message (GlyphBench's render_user_turn, no history frames) ---
 
 
-def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1) -> str:
+def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1, closing: bool = True) -> str:
+    """The per-turn message; `closing = False` leaves out the closing request for an
+    action (the notes turn shows the last observation without it)."""
     legend, grid, hud, message = game.render()
     parts = []
     if legend:
@@ -750,6 +800,8 @@ def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1) -> str:
     if message:
         current.append(f"[Message]\n{message.strip()}")
     parts.append("\n".join(current))
+    if not closing:
+        return "\n\n".join(parts)
     if max_actions > 1:
         parts.append(
             f"Now reason as much as useful, then end with 1 to {max_actions} <action> tags, one per "
