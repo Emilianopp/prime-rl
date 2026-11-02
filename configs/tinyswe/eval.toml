@@ -1,0 +1,39 @@
+# tinyswe eval (inference only): fix a planted bug from its issue, mini-swe-agent style
+# (one bash command per reply), reward 1 if every FAIL_TO_PASS and PASS_TO_PASS test
+# passes. Serve configs/tinyswe/inference.toml first; the env needs podman and the
+# tinyswe-store image (scripts/tinyswe/eval.sbatch sets both up).
+#
+#   uv run eval @ configs/tinyswe/eval.toml
+
+model = "Qwen/Qwen3.5-4B"
+group_size = 1
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+
+[renderer]
+name = "qwen3.5"
+# Thinking on: without eviction there is no empty-think-block plan, and empty blocks
+# kept in history make non-thinking free-text replies collapse.
+enable_thinking = true
+thinking_retention = "all"
+
+[concurrency]
+min_inflight = 16
+max_inflight = 16
+
+[sampling]
+max_completion_tokens = 2048
+temperature = 1.0
+
+[[source]]
+name = "tinyswe"
+env.taskset.id = "tinyswe-env"
+env.taskset.dataset_path = "tinyswe_data"
+env.max_episode_steps = 50
+env.player.max_total_tokens = 30720
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16

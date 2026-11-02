@@ -1,0 +1,13 @@
+[project]
+name = "tinyswe-env"
+version = "0.1.0"
+description = "tinyswe-env — SWE-smith-style bug-fix tasks on pure-Python repos sharing one podman image, one sandbox per rollout, reward = all FAIL_TO_PASS and PASS_TO_PASS tests pass."
+requires-python = ">=3.11"
+dependencies = ["verifiers"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tinyswe_env", "leaf_harness"]

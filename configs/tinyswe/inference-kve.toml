@@ -1,0 +1,28 @@
+# tinyswe inference under KV-Streams: Qwen3.5-4B on SGLang, one node of 4 L40S as 4 data-parallel
+# engines. The eviction fork needs tensor parallel 1 (--enable-kv-eviction requires --tp-size 1), so an
+# L40S engine stands for an A100-80GB one at about half its KV memory and decode bandwidth:
+# the node is about half of a 4 x A100 node.
+# Paired with configs/tinyswe/eval-kve.toml; scripts/tinyswe/kve_sweep.sbatch runs both.
+#
+#   uv run inference @ configs/tinyswe/inference-kve.toml --sglang.python <SGLang fork venv>/bin/python
+
+backend = "sglang"
+
+[server]
+port = 8000
+
+[vllm]  # engine-agnostic fields, translated for SGLang
+model = "Qwen/Qwen3.5-4B"
+data_parallel_size = 4
+# KV-Streams survivors keep their positions, so a trace's positions grow with every
+# token it ever wrote: this bounds the whole episode, not the live context.
+max_model_len = 131072
+gpu_memory_utilization = 0.9
+
+[sglang]
+max_mamba_cache_size = 400  # DeltaNet state slots per engine: >= 3 x episodes per engine
+mamba_ssm_dtype = "bfloat16"  # half the fp32 state per slot (the KV cache is bf16 already)
+
+[sglang.eviction]  # KV-Streams turn window r8-1: one streaming session per trace; past 8 complete turns, evict the oldest
+max_turns = 8
+stride = 1
