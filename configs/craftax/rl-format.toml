@@ -19,7 +19,7 @@
 #     sbatch scripts/kv_streams/rl.sbatch
 
 max_steps = 20
-seq_len = 98304  # fits a segment (new_tokens + summary_tokens below)
+seq_len = 114688  # fits a segment (new_tokens + summary_tokens below)
 
 [deployment]
 num_train_gpus = 2
@@ -77,8 +77,13 @@ env.on_death = "respawn"
 env.death_inventory = "drop_all"
 env.reward = "achievements"
 env.action_feedback = true
-env.player.segments.new_tokens = 65536  # the eval runs 131072; a segment plus its summary must fit seq_len
-env.player.segments.summary_tokens = 32768
+# The summary turn starts at new_tokens - summary_tokens = 98304 new tokens, as in the eval
+# (131072 - 32768): ~100 turns, half of them past the r50 window's first eviction. At the
+# earlier 65536 - 32768 a segment summarized after ~34 turns and never evicted, so
+# training saw 0.1% of replies after an eviction against the eval's 58%. 8192 tokens
+# still hold the summary reply (max_completion_tokens 2048).
+env.player.segments.new_tokens = 106496
+env.player.segments.summary_tokens = 8192
 env.player.harness.id = "inline-chat"
 env.player.memory.max_key_tokens = 4096
 env.player.runtime.type = "subprocess"
