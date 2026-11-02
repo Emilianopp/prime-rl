@@ -70,6 +70,12 @@ class CraftaxConfig(vf.TasksetConfig):
     respawn: bool = False
     """State GlyphBench's TASK block for continuous play: a death respawns the player and
     there is no turn limit (match the env's ``on_death`` and ``max_episode_steps = 0``)."""
+    episodes: list[int] | None = None
+    """Play only these episode indices of the split (None: the first ``num_examples``)."""
+    variants: int = Field(1, ge=1)
+    """Copies of each episode, told apart by ``info["variant"]`` (above 1 only). With the
+    env's ``state_dir`` each copy resumes its own save, ``{seed}-{variant}.pkl``: the same
+    moment of a game played on several ways, e.g. from different handoff summaries."""
 
 
 class CraftaxEnvConfig(vf.EnvConfig):
@@ -105,14 +111,20 @@ class CraftaxEnvConfig(vf.EnvConfig):
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, return, achievements) to this file."""
     state_dir: str | None = None
-    """Save each game to ``{state_dir}/{seed}.pkl`` (every ``save_every`` turns, and when
-    the episode ends) and resume it from there: a chain of jobs plays the same worlds
+    """Save each game to ``{state_dir}/{seed}.pkl`` (a taskset's variants: ``{seed}-{variant}.pkl``)
+    every ``save_every`` turns and when the episode ends, and resume it from there: a
+    chain of jobs plays the same worlds
     on. At ``max_episode_seconds`` the model first writes a handoff summary (the
     player's segments' summary request), which opens the next job's first segment as a
     segment switch would; a game cut off without one resumes with its last segment's
     inherited summary. Counters (turns, deaths, achievements' turns, ...) carry over."""
     save_every: int = Field(50, ge=1)
     """Model turns between saves of a game with ``state_dir``."""
+    max_segments: int = Field(0, ge=0)
+    """Segments this run plays (0: no limit). At the next segment's first turn the run
+    stops (``ended_by`` = ``segment_limit``) with that reply not played, so the game stays
+    as the summary turn found it, and a ``state_dir`` save holds it there with the new
+    summary."""
 
 
 def _new_game(seed: int, max_turns: int | None) -> glyph.CraftaxGame:
@@ -161,7 +173,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         max_floor = 0
         segments = self.config.player.segments
         header = segments.summary_header if segments is not None else None
-        path = os.path.join(self.config.state_dir, f"{seed}.pkl") if self.config.state_dir else None
+        key = f"{seed}-{task.data.info['variant']}" if "variant" in task.data.info else f"{seed}"
+        path = os.path.join(self.config.state_dir, f"{key}.pkl") if self.config.state_dir else None
         saved = await asyncio.to_thread(_load_state, path) if path else None
         block, played_before, summary = 0, 0.0, None
         if saved is not None:
@@ -196,6 +209,9 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             while not segment.terminated:
                 if deadline is not None and time.time() >= deadline:
                     end = "time_limit"
+                    break
+                if self.config.max_segments and getattr(interaction, "segments", 1) > self.config.max_segments:
+                    end = "segment_limit"
                     break
                 if path and turns and turns % self.config.save_every == 0:
                     state = save(None, _inherited_summary(interaction.trace, header))
@@ -347,18 +363,20 @@ class CraftaxTaskset(vf.Taskset[CraftaxTask, CraftaxConfig]):
         cfg = self.config
         base = cfg.seed + (1_000_000 if cfg.split == "eval" else 0)
         system = glyph.system_prompt(cfg.enable_reasoning, cfg.max_output_tokens, cfg.forfeit_mode, cfg.respawn, cfg.max_actions_per_turn)
-        for i in range(cfg.num_examples):
-            # Prompt-less: the env opens the episode with the first observation of the
-            # world it builds, so loading stays instant.
-            yield CraftaxTask(
-                CraftaxData(
-                    name=f"craftax#{cfg.split}{i}",
-                    prompt=None,
-                    system_prompt=system,
-                    info={
-                        "seed": base + i, "episode_idx": i, "split": cfg.split, "reasoning": cfg.enable_reasoning,
-                        "max_actions": cfg.max_actions_per_turn,
-                    },
-                ),
-                cfg.task,
-            )
+        for i in cfg.episodes if cfg.episodes is not None else range(cfg.num_examples):
+            for v in range(cfg.variants):
+                # Prompt-less: the env opens the episode with the first observation of the
+                # world it builds, so loading stays instant.
+                yield CraftaxTask(
+                    CraftaxData(
+                        name=f"craftax#{cfg.split}{i}" + (f"v{v}" if cfg.variants > 1 else ""),
+                        prompt=None,
+                        system_prompt=system,
+                        info={
+                            "seed": base + i, "episode_idx": i, "split": cfg.split, "reasoning": cfg.enable_reasoning,
+                            "max_actions": cfg.max_actions_per_turn,
+                            **({"variant": v} if cfg.variants > 1 else {}),
+                        },
+                    ),
+                    cfg.task,
+                )

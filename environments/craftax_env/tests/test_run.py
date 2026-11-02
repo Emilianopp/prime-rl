@@ -309,3 +309,39 @@ def test_the_player_memory_is_saved_and_resumed(tmp_path, monkeypatch):
     assert memories == [{}, {"map": "job 1"}]
     assert line1["memory"] == {"tokens": {"map": 2}, "ops": {"write ok": 1}}
     assert line2["memory"]["tokens"] == {"map": 3}  # "job 1\njob 2"
+
+
+def test_episodes_and_variants():
+    tasks = list(CraftaxTaskset(CraftaxConfig(split="eval", episodes=[3, 7], variants=2)).load())
+    assert [t.data.name for t in tasks] == ["craftax#eval3v0", "craftax#eval3v1", "craftax#eval7v0", "craftax#eval7v1"]
+    assert [(t.data.info["seed"], t.data.info["variant"]) for t in tasks] == [
+        (1_000_045, 0), (1_000_045, 1), (1_000_049, 0), (1_000_049, 1)]
+    plain = next(iter(CraftaxTaskset(CraftaxConfig(num_examples=1)).load()))
+    assert "variant" not in plain.data.info
+
+
+def test_a_variant_saves_on_its_own_and_stops_after_its_segments(tmp_path):
+    """A variant keeps its own save, and ``max_segments`` stops the run at the next
+    segment's first turn without playing that reply."""
+    task = list(CraftaxTaskset(CraftaxConfig(num_examples=1, variants=2, respawn=True)).load())[1]
+
+    class TwoSegments(ScriptedInteraction):
+        @property
+        def segments(self):
+            return 1 + (len(self.received) > 3)  # the 4th turn opens segment 2
+
+    interaction = TwoSegments()
+
+    @asynccontextmanager
+    async def open_interaction(_task, **kwargs):
+        yield interaction
+
+    log = tmp_path / "episodes.jsonl"
+    env = SimpleNamespace(config=CraftaxEnvConfig(
+        episode_log=str(log), state_dir=str(tmp_path), max_segments=1, max_episode_steps=0, on_death="respawn",
+    ))
+    asyncio.run(CraftaxEnv.run(env, task, SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))))
+    line = json.loads(log.read_text())
+    assert line["ended_by"] == "segment_limit" and line["turns"] == 3
+    assert (tmp_path / f"{task.data.info['seed']}-1.pkl").exists()
+    assert not (tmp_path / f"{task.data.info['seed']}.pkl").exists()
