@@ -1,0 +1,74 @@
+# Craftax RL with Qwen3.5-4B, 2 trainer + 2 inference GPUs (A100-80GB), one node: the
+# counterpart of configs/crafter/rl.toml on full Craftax (craftax-env, GlyphBench's glyph
+# observations and action format). One episode per rollout (100 model turns, ~390-token
+# observation, ~600 tokens a turn with the reply, so ~60k a trace: twice Crafter's
+# seq_len), reward = Craftax return / 226. Thinking off, as on Crafter: the GlyphBench
+# reasoning format (reason, then a final <action> tag) is plain text. Full context as
+# written; KV-Streams: configs/craftax/kve-qwen35.toml.
+#
+#   rl @ configs/craftax/rl.toml --inference.sglang.python <SGLang fork venv>/bin/python
+#
+# Env workers need JAX on CPU: JAX_PLATFORMS=cpu and a one-thread XLA pool
+# (jobs/craftax.sbatch sets both).
+
+max_steps = 100
+seq_len = 65536
+
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 2
+
+[weight_broadcast]
+type = "filesystem"  # the SGLang backend supports filesystem weight updates only
+
+[model]
+name = "Qwen/Qwen3.5-4B"
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.01
+max_norm = 1.0
+
+[orchestrator]
+batch_size = 512
+
+[orchestrator.train]
+group_size = 4
+
+[orchestrator.concurrency]
+initial_inflight = 512
+max_inflight = 512
+min_inflight = 4
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = false
+# Bridge each turn on the sampled tokens: a re-rendered history breaks a
+# session's continuity (and a KV-Streams trace's single stream).
+thinking_retention = "all"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 1024
+temperature = 1.0
+
+[[orchestrator.train.source]]
+name = "craftax"
+env.taskset.id = "craftax-env"
+env.taskset.split = "train"
+env.taskset.max_output_tokens = 1024  # the budget the system prompt states: keep = max_completion_tokens
+env.max_episode_steps = 100
+env.player.max_total_tokens = 64000  # the episode ends (truncated) before the trace outgrows seq_len
+env.player.harness.id = "inline-chat"  # in-process chat call: no subprocess per turn
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16  # one env worker per 16 in-flight episodes (each loads Craftax, ~20 s)
+
+[inference]
+backend = "sglang"
+
+[inference.vllm]  # engine-agnostic fields, translated for SGLang
+max_model_len = 65536
+gpu_memory_utilization = 0.9
+
+[inference.sglang]
+max_mamba_cache_size = 840  # DeltaNet state slots per engine: >= 3 x 256 in flight

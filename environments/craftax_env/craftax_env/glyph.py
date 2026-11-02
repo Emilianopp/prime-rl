@@ -289,8 +289,27 @@ _MULTI = (
 )
 
 
+# action_example = True (opt-in; off keeps GlyphBench's text byte for byte): GlyphBench's shared
+# format block shows MOVE_FORWARD, which Craftax has no action of, and the per-turn line never
+# shows the tag. Replies like "Action: MOVE_LEFT" (no tags) were 26% of forfeits in job 11497243.
+EXAMPLE_ACTION = "MOVE_LEFT"
+_GENERIC_EXAMPLE = (
+    "Put the exact chosen action name between the tags; for "
+    "example, if MOVE_FORWARD is listed and you choose it, write:\n"
+    "  <action>MOVE_FORWARD</action>\n"
+)
+_CRAFTAX_EXAMPLE = (
+    "Put the exact chosen action name between the tags; for "
+    f"example, if you choose {EXAMPLE_ACTION}, the last line of your reply is:\n"
+    f"  <action>{EXAMPLE_ACTION}</action>\n"
+    f"Only the tag counts: a line such as `Action: {EXAMPLE_ACTION}` or `**{EXAMPLE_ACTION}**` "
+    "without the <action></action> tags is not an action and forfeits the turn.\n"
+)
+
+
 def system_prompt(
-    reasoning: bool, max_output_tokens: int | None, forfeit_mode: str, respawn: bool = False, max_actions: int = 1
+    reasoning: bool, max_output_tokens: int | None, forfeit_mode: str, respawn: bool = False, max_actions: int = 1,
+    action_example: bool = False,
 ) -> str:
     forfeit = _FORFEIT[forfeit_mode]
     if reasoning:
@@ -307,6 +326,8 @@ def system_prompt(
                 f"the closing </action> tag, the action is discarded and the turn is forfeited ({forfeit}). "
             )
         fmt = _REASONING_FORMAT.format(budget=budget, truncation=truncation)
+        if action_example:
+            fmt = fmt.replace(_GENERIC_EXAMPLE, _CRAFTAX_EXAMPLE)
     else:
         if max_output_tokens is None:
             budget = "No explicit output-token cap is imposed, but a valid response is only the short action tag. "
@@ -787,9 +808,11 @@ class CraftaxGame:
 # --- the per-turn user message (GlyphBench's render_user_turn, no history frames) ---
 
 
-def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1, closing: bool = True) -> str:
+def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1, closing: bool = True,
+              action_example: bool = False) -> str:
     """The per-turn message; `closing = False` leaves out the closing request for an
-    action (the notes turn shows the last observation without it)."""
+    action (the notes turn shows the last observation without it). `action_example`: the
+    closing request shows the exact tag format (see EXAMPLE_ACTION)."""
     legend, grid, hud, message = game.render()
     parts = []
     if legend:
@@ -801,6 +824,9 @@ def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1, closing:
         current.append(f"[Message]\n{message.strip()}")
     parts.append("\n".join(current))
     if not closing:
+        return "\n\n".join(parts)
+    if action_example:
+        parts.append(closing_request(reasoning, max_actions))
         return "\n\n".join(parts)
     if max_actions > 1:
         parts.append(
@@ -819,3 +845,16 @@ def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1, closing:
             "other text."
         )
     return "\n\n".join(parts)
+
+
+def closing_request(reasoning: bool, max_actions: int = 1) -> str:
+    """The per-turn request for an action with the exact tag format (action_example = True)."""
+    tag = f"<action>{EXAMPLE_ACTION}</action>"
+    if max_actions > 1:
+        return (f"Now reason as much as useful, then end with 1 to {max_actions} action tags, one per line, "
+                f"each holding one action name from the system prompt's action list, for example:\n{tag}\n<action>DO</action>")
+    if reasoning:
+        return (f"Now reason as much as useful, then end with one final line holding exactly one action tag "
+                f"with an action name from the system prompt's action list, in this exact format:\n{tag}")
+    return (f"Reply now with exactly one action tag holding one action name from the system prompt's "
+            f"action list, in this exact format, and no other text:\n{tag}")

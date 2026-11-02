@@ -303,3 +303,48 @@ def test_assign_advantages_rejects_misaligned():
     # full length is 3 (prompt + 2 sampled); a 1-element list must be rejected
     with pytest.raises(ValueError, match="align"):
         assign_advantages(episode.traces[0], [0.5])
+
+
+# --------------------------------------------------------------------------
+# GRPO advantage_mode = "per_term": each reward term standardized in the group.
+# --------------------------------------------------------------------------
+
+
+def _termed_group(terms: list[dict[str, tuple[float, float]]]) -> list[vf.Episode]:
+    group = []
+    for t in terms:
+        episode = _build_episode(0.0, sampled_lengths=[2])
+        episode.traces[0].rewards = {name: vf.Reward(score=s, weight=w) for name, (s, w) in t.items()}
+        group.append(episode)
+    return group
+
+
+def _per_term(group, **kwargs) -> list[float]:
+    algo = GRPOAlgorithm(GRPOAlgoConfig(advantage_mode="per_term", **kwargs), clients=None)
+    asyncio.run(algo.score_group(group))
+    return [_scalar(episode) for episode in group]
+
+
+def test_per_term_standardizes_each_term_then_weights():
+    # progress 0/2 (std 1), notes 0.4/0.6 (std 0.1): both terms count as one std each.
+    group = _termed_group([{"progress": (0.0, 1.0), "notes": (0.6, 0.5)}, {"progress": (2.0, 1.0), "notes": (0.4, 0.5)}])
+    advs = _per_term(group, term_std_floor={"progress": 0.5}, default_term_std_floor=0.05)
+    assert advs == pytest.approx([-1.0 + 0.5, 1.0 - 0.5])
+
+
+def test_per_term_floor_caps_tiny_spreads_and_flat_terms_add_nothing():
+    group = _termed_group([{"progress": (1.0, 1.0), "notes": (0.50, 0.5)}, {"progress": (1.0, 1.0), "notes": (0.52, 0.5)}])
+    advs = _per_term(group)  # notes std 0.01 < floor 0.1
+    assert advs == pytest.approx([0.5 * -0.01 / 0.1, 0.5 * 0.01 / 0.1])
+
+
+def test_per_term_missing_term_gets_zero_and_stats_use_present_only():
+    group = _termed_group([{"progress": (0.0, 1.0), "adherence": (0.2, 0.25)}, {"progress": (0.0, 1.0), "adherence": (0.8, 0.25)},
+                           {"progress": (0.0, 1.0)}])
+    advs = _per_term(group)
+    assert advs[2] == 0.0 and advs[0] == pytest.approx(-0.25) and advs[1] == pytest.approx(0.25)
+
+
+def test_per_term_rejects_length_penalty():
+    with pytest.raises(ValueError):
+        GRPOAlgoConfig(advantage_mode="per_term", length_weighted_baseline=True)

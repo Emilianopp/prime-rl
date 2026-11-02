@@ -34,7 +34,7 @@ limit = 8  # roots
 
 [sampling]
 max_completion_tokens = 2048
-temperature = 0.7  # TEMPORARY for smoke, revert to 1.0
+temperature = 1.0
 
 [[source]]
 name = "craftax"
@@ -42,6 +42,7 @@ env.taskset.id = "craftax-env"
 env.taskset.split = "eval"
 env.taskset.max_output_tokens = 2048  # the budget the system prompt states: keep = max_completion_tokens
 env.taskset.respawn = true  # the system prompt states the continuous rules
+env.taskset.action_example = true  # the exact tag format with a Craftax action, in the system prompt and every turn
 env.max_episode_steps = 0  # no game clock: the segment cut ends each segment
 env.on_death = "respawn"
 env.death_inventory = "drop_all"

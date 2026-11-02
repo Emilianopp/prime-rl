@@ -56,6 +56,14 @@ def _data_info(data: Any) -> dict[str, Any]:
     return dict(info) if isinstance(info, dict) else {}
 
 
+def _segments_info(info: dict[str, Any]) -> dict[str, Any]:
+    """What the env's taskset says about its segments (``info["segments"]``: ``info_key``,
+    ``continuation_header``); it overrides the sampler's config, so the child prompt is the
+    one the env's own in-env beam builds."""
+    seg = info.get("segments")
+    return seg if isinstance(seg, dict) else {}
+
+
 class TreeSampler(TaskSampler):
     def __init__(self, config: TreeSamplerConfig, tasks: Sequence[vf.Task] | Iterator[vf.Task]) -> None:
         self.config = config
@@ -76,6 +84,8 @@ class TreeSampler(TaskSampler):
         self.segments_per_depth: Counter[int] = Counter()
         self.deepest = 0
         self.deepest_tier = -1
+        self.deepest_floor = 0
+        self.groups_without_info = 0
         self.states_deleted = 0
         self.swept = 0
         self._observes = 0
@@ -130,8 +140,10 @@ class TreeSampler(TaskSampler):
         base = info.get("base_system_prompt") or root.data.system_prompt or ""
         update: dict[str, Any] = {"info": {**info, "base_system_prompt": base, "root_name": info.get("root_name") or root.data.name, "node": dict(node)}}
         if node["depth"] > 0:
-            notes = (node.get("summary") or "").strip() or "(no notes were written)"
-            update["system_prompt"] = f"{base}\n\n{self.config.summary_header}\n\n{notes}"
+            seg = _segments_info(info)
+            notes = (node.get("summary") or "").strip() or seg.get("empty_summary") or "(no notes were written)"
+            header = seg.get("continuation_header") or self.config.summary_header
+            update["system_prompt"] = f"{base}\n\n{header}\n\n{notes}"
             update["prompt"] = None
             update["name"] = f"{update['info']['root_name']}/d{node['depth']}/{node['id']}"
         return root.with_data(**update)
@@ -147,7 +159,13 @@ class TreeSampler(TaskSampler):
         level = self.levels.setdefault((root, depth), self._new_level())
         level["observed"] += 1
         self._observes += 1
-        key = self.config.info_key
+        key = _segments_info(_data_info(group[0].task.data)).get("info_key") or self.config.info_key
+        if not any(isinstance(trace.info.get(key), dict) for episode in group for trace in episode.traces):
+            # The env wrote nothing under `key`: every branch would be a leaf and the tree never grows.
+            self.groups_without_info += 1
+            if self.groups_without_info in (1, 10, 100):
+                get_logger().warning(f"TreeSampler: a group of node {node['id']} has no trace.info[{key!r}] "
+                                     f"({self.groups_without_info} so far): check info_key / the env's segment settings")
         for episode in group:
             for trace in episode.traces:
                 info = trace.info.get(key)
@@ -156,6 +174,7 @@ class TreeSampler(TaskSampler):
                 self.segments += 1
                 self.segments_per_depth[depth] += 1
                 self.deepest = max(self.deepest, depth)
+                self.deepest_floor = max(self.deepest_floor, int(info.get("max_floor") or 0))
                 achievements = set(info.get("achievements") or [])
                 for tier, name in enumerate(TIERS):
                     if name in achievements:
@@ -247,7 +266,8 @@ class TreeSampler(TaskSampler):
             "finished_roots": sorted(self.finished_roots),
             "found": self.found,
             "counters": {"roots_started": self.roots_started, "expansions": self.expansions, "segments": self.segments,
-                         "deepest": self.deepest, "deepest_tier": self.deepest_tier, "states_deleted": self.states_deleted},
+                         "deepest": self.deepest, "deepest_tier": self.deepest_tier, "states_deleted": self.states_deleted,
+                         "deepest_floor": self.deepest_floor},
             "segments_per_depth": dict(self.segments_per_depth),
         }
 
@@ -272,6 +292,7 @@ class TreeSampler(TaskSampler):
         counters = state_dict["counters"]
         self.roots_started, self.expansions, self.segments = counters["roots_started"], counters["expansions"], counters["segments"]
         self.deepest, self.deepest_tier, self.states_deleted = counters["deepest"], counters["deepest_tier"], counters["states_deleted"]
+        self.deepest_floor = int(counters.get("deepest_floor", 0))
         self.segments_per_depth = Counter({int(k): v for k, v in state_dict["segments_per_depth"].items()})
         # In-flight groups of the checkpointed run never report: let their depths close on what arrived.
         for level in self.levels.values():
@@ -288,6 +309,8 @@ class TreeSampler(TaskSampler):
             "segments": float(self.segments),
             "deepest_depth": float(self.deepest),
             "deepest_tier": float(self.deepest_tier),
+            "deepest_floor": float(self.deepest_floor),
+            "groups_without_info": float(self.groups_without_info),
             "found": float(len(self.found)),
             "states_deleted": float(self.states_deleted + self.swept),
         }

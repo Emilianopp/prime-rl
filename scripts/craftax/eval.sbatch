@@ -22,7 +22,8 @@
 # stops, default 600), MULTIPLEX (episodes per env worker process, default the config's 32),
 # SKIP (skip the first SKIP tasks: disjoint seeds across jobs), TURN_TOKENS (max tokens per reply, default
 # 2048; also the budget the system prompt states), NO_THINKING (1: the renderer's
-# non-thinking mode and GlyphBench's action-only format), TIME_LIMIT (seconds per
+# non-thinking mode and GlyphBench's action-only format; text: non-thinking mode with
+# GlyphBench's plain-text reasoning format, as the RL configs train), TIME_LIMIT (seconds per
 # episode, default the config's 9000), STEPS (turns per episode, default 10000),
 # SEGMENTS (not on this branch: its verifiers has no segments; each episode is one trace
 # under a 256k token ceiling), SAFE_RADIUS (N: respawn at a free cell with no hostile mob
@@ -69,7 +70,7 @@ JUDGE_MODEL=${JUDGE_MODEL:-$([ "$JUDGE_BACKEND" = openai ] && echo gemini-3.8-fl
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${SAFE_RADIUS:+_safe$SAFE_RADIUS}${TREE_DEPTH:+_tree$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-s$SEGMENT_TURNS}${JUDGE_BACKEND:+_judge-$JUDGE_MODE}$([ -n "$JUDGE_BACKEND" ] && [ "$ADHERENCE_WEIGHT" != 0 ] && echo _adh$ADHERENCE_WEIGHT)_skip$SKIP/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink$([ "$NO_THINKING" = text ] && echo -text)}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${SAFE_RADIUS:+_safe$SAFE_RADIUS}${TREE_DEPTH:+_tree$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-s$SEGMENT_TURNS}${JUDGE_BACKEND:+_judge-$JUDGE_MODE}$([ -n "$JUDGE_BACKEND" ] && [ "$ADHERENCE_WEIGHT" != 0 ] && echo _adh$ADHERENCE_WEIGHT)_skip$SKIP/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY JAX_PLATFORMS=cpu
@@ -122,7 +123,10 @@ sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"|
 sed -i "s/^max_completion_tokens = .*/max_completion_tokens = $TURN_TOKENS/; s/^env.taskset.max_output_tokens = [0-9]*/env.taskset.max_output_tokens = $TURN_TOKENS/" "$OUT/eval.toml"
 [ -n "$FEEDBACK" ] && sed -i "s|^env.max_episode_steps = .*|&\nenv.action_feedback = true|" "$OUT/eval.toml"
 [ -n "$MAX_ACTIONS" ] && sed -i "s|^env.taskset.split = .*|&\nenv.taskset.max_actions_per_turn = $MAX_ACTIONS|" "$OUT/eval.toml"
-[ -n "$NO_THINKING" ] && sed -i "s/^enable_thinking = true/enable_thinking = false/; s|^env.taskset.split = .*|&\nenv.taskset.enable_reasoning = false|" "$OUT/eval.toml"
+# NO_THINKING=text: the renderer's non-thinking mode but GlyphBench's reasoning format (reason in plain
+# text, then the <action> tag), as configs/craftax/kve-*.toml train; any other value: action-only too.
+if [ "$NO_THINKING" = text ]; then sed -i "s/^enable_thinking = true/enable_thinking = false/" "$OUT/eval.toml"
+elif [ -n "$NO_THINKING" ]; then sed -i "s/^enable_thinking = true/enable_thinking = false/; s|^env.taskset.split = .*|&\nenv.taskset.enable_reasoning = false|" "$OUT/eval.toml"; fi
 [ -n "$TIME_LIMIT" ] && sed -i "s/^env.max_episode_seconds = .*/env.max_episode_seconds = $TIME_LIMIT/" "$OUT/eval.toml"
 [ -n "$STEPS" ] && sed -i "s/^env.max_episode_steps = .*/env.max_episode_steps = $STEPS/" "$OUT/eval.toml"
 [ -n "$MULTIPLEX" ] && sed -i "s/^serve.pool.multiplex = .*/serve.pool.multiplex = $MULTIPLEX/" "$OUT/eval.toml"

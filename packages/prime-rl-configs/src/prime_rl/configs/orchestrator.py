@@ -206,7 +206,8 @@ class TreeSamplerConfig(BaseConfig):
     """Segments per lineage; a branch at this depth is a leaf."""
 
     info_key: str = "crafter"
-    """The `trace.info` entry the env fills with `continues`, `state_path`, `summary`, ..."""
+    """The `trace.info` entry the env fills with `continues`, `state_path`, `summary`, ...
+    A root task's `info["segments"]["info_key"]` (craftax-env sets it) takes precedence."""
 
     state_dir: str | None = None
     """The env's state directory, for the sweep of files nothing references any more
@@ -219,7 +220,8 @@ class TreeSamplerConfig(BaseConfig):
         "of the previous segment of this same game; the world, your inventory and your achievements "
         "are exactly as you left them."
     )
-    """Introduces the summary in a child's system prompt (the env's CONTINUATION_HEADER)."""
+    """Introduces the summary in a child's system prompt (the env's CONTINUATION_HEADER). A root
+    task's `info["segments"]["continuation_header"]` (craftax-env sets it) takes precedence."""
 
 
 TaskSamplerConfig: TypeAlias = Annotated[

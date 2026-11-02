@@ -22,11 +22,35 @@ class GRPOAlgorithm(Algorithm):
         self.length_penalty = config.length_penalty
         self.length_weighted_baseline = config.length_weighted_baseline
         self.loss_aggregation = config.loss_aggregation
+        self.advantage_mode = config.advantage_mode
+        self.term_std_floor = dict(config.term_std_floor)
+        self.default_term_std_floor = config.default_term_std_floor
+
+    def per_term_advantages(self, traces: list[vf.Trace]) -> list[float]:
+        """``advantage_mode = "per_term"``: sum over reward terms of w_t (r_t - mean) / max(std, floor_t)."""
+        advantages = [0.0] * len(traces)
+        names = sorted({name for trace in traces for name, r in trace.rewards.items() if r is not None})
+        for name in names:
+            present = [(i, trace.rewards[name]) for i, trace in enumerate(traces) if trace.rewards.get(name) is not None]
+            if len(present) < 2:
+                continue
+            scores = [float(r.score) for _, r in present]
+            mean = sum(scores) / len(scores)
+            std = (sum((s - mean) ** 2 for s in scores) / len(scores)) ** 0.5
+            denom = max(std, self.term_std_floor.get(name, self.default_term_std_floor))
+            for (i, r), s in zip(present, scores):
+                advantages[i] += float(r.weight) * (s - mean) / denom
+        return advantages
 
     async def score_group(self, episodes: list[vf.Episode]) -> None:
         import torch  # only the trainer-side extras ship torch; an eval process never scores a group
 
         traces = [trace for _, trace in iter_trainable_traces(episodes)]
+        if self.advantage_mode == "per_term":
+            for trace, advantage in zip(traces, self.per_term_advantages(traces), strict=True):
+                assign_advantages(trace, advantage)
+            self._apply_loss_aggregation(traces)
+            return
         rewards = torch.tensor([trace.reward for trace in traces], dtype=torch.float32)
         length_penalty = self.length_penalty
         if length_penalty is None:
@@ -52,6 +76,9 @@ class GRPOAlgorithm(Algorithm):
         advantages = shaped_rewards - baseline
         for trace, advantage in zip(traces, advantages.tolist(), strict=True):
             assign_advantages(trace, advantage)
+        self._apply_loss_aggregation(traces)
+
+    def _apply_loss_aggregation(self, traces: list[vf.Trace]) -> None:
         nodes = [node for trace in traces for node in trainable_nodes(trace)]
         if self.loss_aggregation == "prompt" and nodes:
             # rl weight 1/T_q per token: each group's weights sum to 1, and the trainer divides the

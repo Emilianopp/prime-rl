@@ -207,6 +207,28 @@ class GRPOAlgoConfig(BaseAlgoConfig):
     loss_aggregation: Literal["token", "prompt"] = "token"
     """How the rl loss weights tokens across prompt groups. ``token``: every loss token in the batch weighs the same, so groups with more total tokens dominate the gradient. ``prompt``: prompt-mean (MiMo-V2.6 Eq. 1) — each trainable token of group ``q`` gets rl weight ``1 / T_q`` (``T_q`` = the group's trainable tokens), and the trainer divides the rl loss by the summed weights, i.e. the number of groups. All rl envs of a run must use the same value."""
 
+    advantage_mode: Literal["sum", "per_term"] = "sum"
+    """``sum``: advantage = trace.reward (the weighted sum of its reward terms) minus the group mean.
+    ``per_term``: each reward term (``trace.rewards[name]``) is standardized within the group
+    first, ``A = sum_t w_t (r_t - mean_g r_t) / max(std_g r_t, floor_t)`` (population std), so the
+    weights are relative importances and no unit conversion between terms is needed. A term with
+    no spread contributes 0; a trace without a term gets 0 from it, and the term's statistics come
+    from the traces that have it (fewer than 2: 0 for all). docs/craftax-segments-judge.md, Rewards."""
+
+    term_std_floor: dict[str, float] = {}
+    """per_term: the std floor per reward term name (e.g. ``{progress = 0.5}``), so tiny spreads are not blown up."""
+
+    default_term_std_floor: float = Field(0.1, gt=0.0)
+    """per_term: the std floor of a term not in ``term_std_floor``."""
+
+    @model_validator(mode="after")
+    def validate_advantage_mode(self):
+        if self.advantage_mode == "per_term" and (self.length_penalty is not None or self.length_weighted_baseline):
+            raise ValueError("advantage_mode = 'per_term' does not combine with length_penalty or length_weighted_baseline")
+        if any(v <= 0 for v in self.term_std_floor.values()):
+            raise ValueError("term_std_floor values must be > 0")
+        return self
+
 
 class EchoAlgoConfig(GRPOAlgoConfig):
     type: Literal["echo"] = "echo"  # type: ignore[assignment]

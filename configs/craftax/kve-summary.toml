@@ -1,0 +1,110 @@
+# Craftax segment tree RL (the RL pipeline of docs/craftax-segments-judge.md; Crafter's
+# counterpart is configs/crafter/kve-summary.toml): Qwen3.5-4B, 2 trainer + 2 inference GPUs,
+# KV-Streams with an r50-1 turn window, one segment per episode. The tree sampler hands out
+# nodes (a seed, or a saved game plus the GAME RECORD and notes that ended the parent
+# segment); a node's 4 episodes are its branches (group_size) and GRPO baselines them with
+# per-term group normalization (progress, notes, adherence each standardized in the group).
+# The best branch per root and depth continues.
+#
+# Thinking off (renderer), GlyphBench's plain-text reasoning format kept. A segment is ~64k
+# logical positions (env.segment_tokens; ~100 turns at ~600 tokens a turn), then the notes
+# turn under the 80k ceiling. The notes turn is masked out of the loss (train_on_notes = false).
+# This file is arm A0 (progress only); jobs/craftax.sbatch kve-summary adds the notes judge
+# (JUDGE_BACKEND, arm A1) and adherence (ADHERENCE_WEIGHT, arm C). The sampler reads the
+# segment info key ("craftax") and the continuation header from the taskset's task info.
+#
+#   rl @ configs/craftax/kve-summary.toml --inference.sglang.python <SGLang fork venv>/bin/python
+#
+# Env workers need JAX on CPU: JAX_PLATFORMS=cpu and a one-thread XLA pool (jobs/craftax.sbatch).
+
+max_steps = 100
+seq_len = 81920
+
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 2
+
+[weight_broadcast]
+type = "filesystem"  # the SGLang backend supports filesystem weight updates only
+
+[model]
+name = "Qwen/Qwen3.5-4B"
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.01
+max_norm = 1.0
+
+[orchestrator]
+batch_size = 64  # 16 nodes of 4 branches per trainer step
+max_off_policy_steps = 8
+
+[orchestrator.train]
+group_size = 4  # the branches of one node
+
+[orchestrator.train.algo]
+type = "grpo"
+advantage_mode = "per_term"  # each reward term standardized within the sibling group, then weighted
+term_std_floor = { progress = 0.5 }  # achievement points; the 0-1 judge terms use the default
+default_term_std_floor = 0.1
+
+[orchestrator.concurrency]
+# One session per segment, ~35k live tokens each under the r50 window (thinking off).
+initial_inflight = 64
+max_inflight = 64
+min_inflight = 4
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 1024  # per turn; the notes turn raises its own cap (env.summary_max_tokens)
+temperature = 1.0
+
+[[orchestrator.train.source]]
+name = "craftax"
+env.taskset.id = "craftax-env"
+env.taskset.split = "train"
+env.taskset.max_output_tokens = 1024  # the budget the system prompt states: keep = max_completion_tokens
+env.taskset.respawn = true  # the system prompt states the continuous rules
+env.taskset.action_example = true  # the exact tag format with a Craftax action, in the system prompt and every turn
+env.max_episode_steps = 0  # no game clock: the segment cut ends each segment
+env.on_death = "respawn"
+env.death_inventory = "drop_all"
+env.reward = "achievements"
+env.segment_turns = 200  # a backstop; the token cut below is the one that binds (~100 turns)
+env.segment_tokens = 64000  # logical positions, evicted tokens included
+env.summary_max_tokens = 16384  # the notes turn's cap, cut to what is left under max_total_tokens
+env.train_on_notes = false
+env.state_dir = "states"  # the job script sets the absolute path under the run dir
+env.judge_group_size = 4  # = orchestrator.train.group_size (judge_mode = "group")
+env.judge_group_timeout_s = 1800
+env.player.max_total_tokens = 81920  # = seq_len: the notes turn fits under it
+env.player.harness.id = "inline-chat"  # in-process chat call: no subprocess per turn
+env.player.runtime.type = "subprocess"
+curriculum.sampler.type = "tree"
+curriculum.sampler.keep = 1
+curriculum.sampler.max_depth = 10
+curriculum.sampler.info_key = "craftax"  # the taskset says so too (info["segments"])
+curriculum.sampler.state_dir = "states"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16  # one env worker per 16 in-flight segments
+
+[inference]
+backend = "sglang"
+
+[inference.vllm]  # engine-agnostic fields, translated for SGLang
+max_model_len = 81920
+gpu_memory_utilization = 0.9
+
+[inference.sglang]
+sessions = true  # KV-Streams: one streaming session per trace
+max_mamba_cache_size = 840  # DeltaNet state slots per engine: >= 3 x in-flight sessions
+mamba_radix_cache_strategy = "no_buffer"  # hybrid models: required for eviction
+disable_overlap_schedule = true  # hybrid models: required for eviction
+
+[inference.sglang.eviction]  # turn window r50-1: past 50 complete turns, evict the oldest
+max_turns = 50
+stride = 1
