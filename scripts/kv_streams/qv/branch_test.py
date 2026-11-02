@@ -92,22 +92,23 @@ def summary_of(text: str) -> tuple[str, str]:
     from verifiers.v1.segments import _summary_text
 
     reasoning, _, reply = text.partition(THINK_END) if THINK_END in text else ("", "", text)
-    reply = reply.replace("<|im_end|>", "").strip()
+    reply = reply.replace("<|im_end|>", "").replace("<|endoftext|>", "").strip()
     summary = _summary_text(reply)
     return (summary or _summary_text(reasoning)), reply
 
 
-async def sample_one(client, base_url: str, model: str, ids: list[int], max_tokens: int, seed: int) -> str:
-    body = {"model": model, "prompt": ids, "max_tokens": max_tokens, "temperature": 1.0, "seed": seed,
-            "skip_special_tokens": False}
-    r = await client.post(f"{base_url}/completions", json=body, timeout=3600)
-    if r.status_code == 200:
-        return r.json()["choices"][0]["text"]
-    root = base_url.rsplit("/v1", 1)[0]  # SGLang's native endpoint takes ids too
+async def sample_one(client, base_url: str, tokenizer, ids: list[int], max_tokens: int) -> str:
+    """One completion of prompt `ids` from SGLang's native /generate. The engines run
+    token-in/token-out (no detokenizer), so the reply comes back as ids and is decoded here."""
+    root = base_url.rsplit("/v1", 1)[0]
     r = await client.post(f"{root}/generate", json={"input_ids": ids, "sampling_params": {
-        "temperature": 1.0, "max_new_tokens": max_tokens, "skip_special_tokens": False}}, timeout=3600)
+        "temperature": 1.0, "max_new_tokens": max_tokens}}, timeout=3600)
     r.raise_for_status()
-    return r.json()["text"]
+    out = r.json()
+    out = out[0] if isinstance(out, list) else out
+    if out.get("text") is not None:
+        return out["text"]
+    return tokenizer.decode(out["output_ids"], skip_special_tokens=False)
 
 
 def sample(args):
@@ -119,10 +120,14 @@ def sample(args):
     state = out / "state"
     state.mkdir(exist_ok=True)
 
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+
     async def run():
         async with httpx.AsyncClient() as client:
-            jobs = [sample_one(client, args.base_url, args.model, r["prompt_ids"], args.max_tokens, 1000 * i + j)
-                    for i, r in enumerate(resets) for j in range(args.samples)]
+            jobs = [sample_one(client, args.base_url, tokenizer, r["prompt_ids"], args.max_tokens)
+                    for r in resets for _ in range(args.samples)]
             return await asyncio.gather(*jobs)
 
     texts = asyncio.run(run())

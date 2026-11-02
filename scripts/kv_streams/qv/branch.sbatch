@@ -23,7 +23,7 @@ SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
 CRAFTAX_PY=${CRAFTAX_PY:-$SCRATCH/kv-race/pydeps/craftax-py}
 GPUS=$(nvidia-smi -L | wc -l)
 
-export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY JAX_PLATFORMS=cpu
+export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY JAX_PLATFORMS=cpu HF_HUB_OFFLINE=1
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/craftax_env:$REPO/deps/verifiers:$REPO/deps/renderers:$CRAFTAX_PY${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
