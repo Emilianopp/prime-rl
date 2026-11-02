@@ -292,7 +292,8 @@ class TrainSourceConfig(EnvConfig):
                     f"Source '{self.resolved_name}': stream_segments ships one-trace groups; "
                     "it needs group_size = 1 and per-trace credit"
                 )
-        elif in_segments and not episode_credit:
+        elif in_segments and not episode_credit and self.algo.type != "turn_credit":
+            # turn_credit scores each reply from its own segment: no episode reward involved.
             raise ValueError(f"Source '{self.resolved_name}' runs agents in segments: set algo.credit = 'episode'")
         return self
 

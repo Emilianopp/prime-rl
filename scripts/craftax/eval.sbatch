@@ -26,14 +26,16 @@
 # --target dir with jax[cpu] and the Craftax fork, for a venv without them), OUT_ROOT,
 # STATE_DIR (env.state_dir: resume each game from there and save it back - a chain of
 # jobs on the same worlds, see continuous_chain.sh), MEMORY (N: env.player.memory with
-# entries capped at N tokens - the model's own memory, kept across segments and resumes).
+# entries capped at N tokens - the model's own memory, kept across segments and resumes),
+# WEIGHTS (a HF weights dir, e.g. a trainer's run/broadcasts/step_N: loaded into the
+# engines before the eval).
 set -u
 KEEP=${KEEP:-50} N=${N:-64} CONC=${CONC:-64} SKIP=${SKIP:-0} TURN_TOKENS=${TURN_TOKENS:-2048} NO_THINKING=${NO_THINKING:-}
-TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} STATE_DIR=${STATE_DIR:-} MEMORY=${MEMORY:-}
+TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} STATE_DIR=${STATE_DIR:-} MEMORY=${MEMORY:-} WEIGHTS=${WEIGHTS:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${MEMORY:+_mem$MEMORY}_skip$SKIP/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${MEMORY:+_mem$MEMORY}${WEIGHTS:+_w-$(basename "$(dirname "$(dirname "$(dirname "$WEIGHTS")")")")-$(basename "$WEIGHTS")}_skip$SKIP/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY JAX_PLATFORMS=cpu
@@ -42,7 +44,7 @@ export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environmen
 cd "$REPO"
 # API keys for plugged judges (e.g. GEMINI_API_KEY for craftax_env.judge); .env is gitignored.
 [ -f "$REPO/.env" ] && { set -a; . "$REPO/.env"; set +a; }
-echo "[craftax eval r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} state=${STATE_DIR:-none} memory=${MEMORY:-off}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[craftax eval r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} state=${STATE_DIR:-none} memory=${MEMORY:-off} weights=${WEIGHTS:-base}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
@@ -64,6 +66,12 @@ for _ in $(seq 120); do
 done
 curl -sf -m 5 http://localhost:8000/health > /dev/null || { echo "inference not up after 20 min"; tail -30 "$OUT/inference.log"; pkill -u "$USER" -f "$SLURM_TMPDIR/sgl-venv/"; exit 1; }
 echo "inference up $(date +%T)"
+if [ -n "$WEIGHTS" ]; then
+  curl -sf -m 1800 -X POST http://localhost:8000/update_weights -H "Content-Type: application/json" \
+    -d "{\"weight_dir\": \"$WEIGHTS\"}" || { echo "weight update from $WEIGHTS failed"; pkill -u "$USER" -f "$SLURM_TMPDIR/sgl-venv/"; exit 1; }
+  # SGLang now serves the weights dir as the model, so the eval skips its model-name check.
+  echo "loaded weights $WEIGHTS $(date +%T)"
+fi
 
 ( while sleep 30; do curl -s -m 5 http://localhost:8000/metrics | grep "^kvs:" > "$OUT/kvs.prom.tmp" && mv "$OUT/kvs.prom.tmp" "$OUT/kvs.prom"; done ) &
 POLL=$!
@@ -85,6 +93,7 @@ elif [ -n "$SEGMENTS" ]; then
   sed -i "s/^env.player.segments.new_tokens = .*/env.player.segments.new_tokens = $SEG_B/; s/^env.player.segments.summary_tokens = .*/env.player.segments.summary_tokens = $SEG_S/" "$OUT/eval.toml"
 fi
 uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false \
+  ${WEIGHTS:+--client.skip-model-check true} \
   --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "$CONC" --concurrency.max-inflight "$CONC" \
   --concurrency.initial-inflight "$CONC" > "$OUT/eval.log" 2>&1
 echo "eval exit $? $(date +%T)"
