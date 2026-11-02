@@ -7,16 +7,19 @@
 # the memory bonuses and penalties are off, and there is no length or game-reward term,
 # so only the format is trained. 2 trainer + 2 inference GPUs (A100-80GB), one node.
 #
-# Episodes stop at 120 turns: the base model forfeits 11% of turns 1-40 but 15-29% from
-# turn 41 on, once the r50 window evicts, so shorter games would miss most failures.
+# Episodes stop at 600 actions (env.max_episode_steps counts actions, not replies): ~170
+# replies at 3-4 actions each, well past turn 50 where the r50 window starts evicting.
+# The base model forfeits 11% of turns 1-40 but 15-30% after, and a 120-action cap
+# shrank to ~34 replies once the policy played 4 actions a reply, so training stopped
+# seeing the evicted regime at all. The guard counts forfeits after turn 50 only.
 #
 #   CONFIG=configs/craftax/rl-format.toml ENVS=craftax_env \
 #     ARGS='--orchestrator.train.algo.log-path $OUT/format.jsonl' \
-#     WATCH='python scripts/kv_streams/format_guard.py --log $OUT/format.jsonl --out $OUT --runs $OUT/run' \
+#     WATCH='python scripts/kv_streams/format_guard.py --log $OUT/format.jsonl --out $OUT --runs $OUT/run --from-turn 50' \
 #     sbatch scripts/kv_streams/rl.sbatch
 
 max_steps = 20
-seq_len = 98304  # a 120-turn stream runs ~70k tokens; longer ones are cut
+seq_len = 98304  # fits a segment (new_tokens + summary_tokens below)
 
 [deployment]
 num_train_gpus = 2
@@ -34,7 +37,7 @@ weight_decay = 0.0
 max_norm = 1.0
 
 [orchestrator]
-batch_size = 16  # episodes per step: ~1,900 replies
+batch_size = 16  # episodes per step: ~2,700 replies
 
 [orchestrator.train]
 group_size = 1  # per-reply credit needs no group baseline
@@ -68,7 +71,7 @@ env.taskset.split = "train"
 env.taskset.max_output_tokens = 2048  # the budget the system prompt states: keep = max_completion_tokens
 env.taskset.max_actions_per_turn = 4
 env.taskset.respawn = true
-env.max_episode_steps = 120
+env.max_episode_steps = 600
 env.max_episode_seconds = 3600
 env.on_death = "respawn"
 env.death_inventory = "drop_all"

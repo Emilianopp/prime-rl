@@ -528,3 +528,4 @@ def test_turn_credit_puts_each_reply_score_on_its_tokens(tmp_path):
     record = json.loads(log.read_text())
     assert (record["replies"], record["scored"], record["tokens"], record["credit"]) == (1, 1, 2, -1.0)
     assert record["reasons"] == {"no_action_tag": 1}
+    assert record["turns"] == [["no_action_tag"]]

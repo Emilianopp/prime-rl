@@ -27,7 +27,8 @@ class TurnCreditAlgorithm(Algorithm):
     scorer gives that reply (0 when it scores none). Rollout-local, so a group of one
     is enough. With ``log_path`` set, each scored episode appends a JSON line: the
     numbers a run monitor needs (forfeits per reply, sampled tokens, game reward,
-    policy version) without reading the traces."""
+    policy version) without reading the traces, and each scored reply's reasons in
+    play order (``turns``), so a monitor can look at one stretch of the game only."""
 
     def __init__(self, config: TurnCreditAlgoConfig, clients: InferenceClient):
         super().__init__(config, clients)
@@ -38,6 +39,7 @@ class TurnCreditAlgorithm(Algorithm):
     async def score_episode(self, episode: vf.Episode) -> None:
         replies = scored = tokens = 0
         reasons: Counter[str] = Counter()
+        turns: list[list[str]] = []
         credit = 0.0
         for _, trace in iter_trainable_traces([episode]):
             scores = {score.node: score for score in self.scorer(trace, **self.scorer_args)}
@@ -53,6 +55,7 @@ class TurnCreditAlgorithm(Algorithm):
                 scored += score.reward != 0.0
                 credit += score.reward
                 reasons.update(score.reasons)
+                turns.append(list(score.reasons))
         if self.log_path is None:
             return
         try:
@@ -70,6 +73,7 @@ class TurnCreditAlgorithm(Algorithm):
             "credit": credit,
             "reward": sum(trace.reward or 0.0 for trace in episode.traces),
             "reasons": dict(reasons),
+            "turns": turns,
         }
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.log_path, "a") as f:

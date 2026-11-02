@@ -4,7 +4,9 @@ keep its weights.
 Reads the algorithm's per-episode log (`[...algo] log_path`) in windows of `--window`
 finished episodes. The first `--baseline` windows set the reference (forfeits per game
 turn f0, game reward per episode r0, sampled tokens per game turn l0); each later
-window is compared through the mean of the last two windows:
+window is compared through the mean of the last two windows. With `--from-turn N`,
+forfeits count only replies after the N-th of each episode (the log's `turns`): under
+an N-turn eviction window, the regime that has evicted.
 
   regressed     r < --min-reward x r0                    the play got worse
   drifted       l outside [1/--max-drift, --max-drift] x l0   the policy changed beyond format
@@ -29,7 +31,7 @@ from pathlib import Path
 FORFEITS = ("no_action_tag", "unknown_name", "action_in_reasoning", "think_tag_in_reply", "unclosed_action_tag")
 
 
-def windows(log: Path, size: int) -> list[dict]:
+def windows(log: Path, size: int, from_turn: int = 0) -> list[dict]:
     if not log.exists():
         return []
     episodes = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
@@ -37,12 +39,18 @@ def windows(log: Path, size: int) -> list[dict]:
     for start in range(0, len(episodes) - size + 1, size):
         chunk = episodes[start : start + size]
         reasons = sum((Counter(e["reasons"]) for e in chunk), Counter())
-        turns = max(1, sum(e["replies"] for e in chunk))
+        if from_turn:
+            late = [t for e in chunk for t in e["turns"][from_turn:]]
+            forfeit = sum(any(r in FORFEITS for r in t) for t in late) / max(1, len(late))
+        else:
+            late = None
+            forfeit = sum(reasons[r] for r in FORFEITS) / max(1, sum(e["replies"] for e in chunk))
         out.append(
             {
                 "episodes": f"{start + 1}-{start + size}",
                 "policy": [min(e["policy"] or 0 for e in chunk), max(e["policy"] or 0 for e in chunk)],
-                "forfeit": sum(reasons[r] for r in FORFEITS) / turns,
+                "forfeit": forfeit,
+                "late_turns": None if late is None else len(late),
                 "reward": sum(e["reward"] for e in chunk) / size,
                 "tokens": sum(e["tokens"] for e in chunk) / max(1, sum(e["replies"] for e in chunk)),
                 "reasons": dict(reasons.most_common()),
@@ -111,6 +119,7 @@ def main():
     ap.add_argument("--runs", type=Path, required=True, help="where the run's broadcasts/ live")
     ap.add_argument("--window", type=int, default=16, help="episodes per window")
     ap.add_argument("--baseline", type=int, default=2, help="windows that set the reference")
+    ap.add_argument("--from-turn", type=int, default=0, help="count forfeits after this reply of each episode only")
     ap.add_argument("--done-forfeit", type=float, default=0.03)
     ap.add_argument("--min-reward", type=float, default=0.8)
     ap.add_argument("--max-drift", type=float, default=1.6)
@@ -122,7 +131,7 @@ def main():
     seen = 0
     while True:
         keep_weights(args.runs, args.out / "weights", args.keep_every)
-        ws = windows(args.log, args.window)
+        ws = windows(args.log, args.window, args.from_turn)
         for w in ws[seen:]:
             print(json.dumps(w), flush=True)
         seen = len(ws)
