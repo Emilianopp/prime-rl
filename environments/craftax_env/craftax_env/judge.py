@@ -45,14 +45,16 @@ the 9x11 view it saw when it wrote them, itself at (4,5), or a direction from it
 each view place to a map place and shows both.
 Vitals: HP, food (cows, plants, bats, snails), drink (water, fountains), energy (sleep), mana \
 (spells). The tech tree: wood (DO on a tree) -> table (2 wood) -> wood pickaxe and sword \
-(1 wood, at a table) -> stone -> stone pickaxe and sword (1 wood 1 stone) -> furnace (1 stone, \
-near a table) -> coal (wood pickaxe), iron (stone pickaxe) -> iron pickaxe and sword (1 wood \
+(1 wood, at a table) -> stone -> stone pickaxe and sword (1 wood 1 stone, at a table) -> furnace \
+(1 stone, placed anywhere: no table needed) -> coal (wood pickaxe), iron (stone pickaxe) -> iron pickaxe and sword (1 wood \
 1 stone 1 iron 1 coal, table and furnace) -> diamond (iron pickaxe) -> diamond tools (3 or 2 \
-diamonds). Torches (wood + coal) light dark floors. The Overworld's down-ladder is open from \
+diamonds). Torches (1 wood 1 coal, at a table) light dark floors. The Overworld's down-ladder is open from \
 the start; every deeper floor's opens after 8 kills there. Chests hold loot, books teach \
 fireball or iceball, potion colours have effects shuffled per game.
 In these runs a death respawns the player on the Overworld near the spawn with full vitals, \
-losing the whole inventory; achievements, XP and placed tables and furnaces stay."""
+losing the whole inventory; achievements, XP and placed tables and furnaces stay. A table or \
+furnace is destroyed (it becomes path, nothing comes back) by DO facing it or by an arrow; \
+the events say when one was, and the record lists only the stations that still stand."""
 
 NOTES_JUDGE_PROMPT = """\
 You are grading the notes a language-model agent wrote at the end of one segment of a \

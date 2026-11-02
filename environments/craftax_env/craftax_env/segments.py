@@ -14,7 +14,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from craftax_env.glyph import FLOOR_NAMES, place
+import numpy as np
+
+from craftax_env.glyph import FLOOR_NAMES, FURNACE_BLOCK, TABLE_BLOCK, place
 
 NOTES_PROTOCOL = """\
 SEGMENTS
@@ -122,6 +124,22 @@ def continuation_prompt(base: str, summary: str | None) -> str:
 # --- the game record -------------------------------------------------------------------
 
 
+STATION_BLOCKS = {"table": TABLE_BLOCK, "furnace": FURNACE_BLOCK}
+
+
+def standing_stations(game: Any, stations: list[dict[str, Any]], floor: int | None = None) -> list[dict[str, Any]]:
+    """The placed stations whose block still stands (on `floor` only, when given). Craftax
+    turns a table or furnace into path when the player DOes facing it or an arrow hits it."""
+    if not stations:
+        return []
+    keep = [s for s in stations if floor is None or s["floor"] == floor]
+    if not keep:
+        return []
+    blocks = np.asarray(game.state.map if floor is None else game.state.map[floor])
+    at = (lambda s: blocks[s["floor"], s["pos"][0], s["pos"][1]]) if floor is None else (lambda s: blocks[s["pos"][0], s["pos"][1]])
+    return [s for s in keep if int(at(s)) == STATION_BLOCKS[s["kind"]]]
+
+
 def game_record(
     game: Any,
     *,
@@ -135,7 +153,7 @@ def game_record(
 ) -> str:
     """The env-written block at the top of the next segment: the HUD as the game prints it
     (without its turn counter), the achievements by name, the stations the agent placed
-    and what the segment just played did to the player (deaths, respawns)."""
+    that still stand, and what the segment just played did to the player (deaths, respawns)."""
     hud = [line for line in game.hud().splitlines() if not line.startswith("Step:")]
     achievements = sorted(game.achievements)
     total = len(game._rt["achievements"])
@@ -145,7 +163,7 @@ def game_record(
              f"Game step: {game.timestep}  (model turns so far: {game.turn})", *hud,
              f"Achievements ({len(achievements)}/{total}): {', '.join(achievements) or 'none'}"]
     if record_stations:
-        shown = [f"{s['kind']} {place(s['floor'], s['pos'])}" for s in stations[-8:]]
+        shown = [f"{s['kind']} {place(s['floor'], s['pos'])}" for s in standing_stations(game, stations)[-8:]]
         lines.append(f"Stations you placed: {', '.join(shown) if shown else 'none'}")
     if not previous:  # the record at a segment's start (the judge's "before")
         return "\n".join(lines)

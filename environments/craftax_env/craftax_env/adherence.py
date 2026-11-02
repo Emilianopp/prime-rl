@@ -2,7 +2,9 @@
 on the PLAN its parent wrote, as code can see it.
 
 - ``parse_plan``: the parent's PLAN lines -> subgoals, each matched (leniently: the model's
-  plans are free text) to an achievement, item-count targets and a place.
+  plans are free text) to an achievement, item-count targets, a place, and (below the
+  Overworld) a ladder target: the floor's kills reaching the 8 that open its down-ladder.
+  A generic "descend" below the Overworld is the next floor's entry achievement.
 - ``AdherenceTracker``: fed once per turn during the segment; per subgoal the turn its
   achievement unlocked, the item counts reached, the closest approach to its place; a
   position every 5 turns with the distance to the active subgoal (the first one code does
@@ -60,6 +62,17 @@ _ALIASES: dict[str, tuple[tuple[str, ...], ...]] = {
     "make_diamond_armour": (("diamond", "armor"),), "enchant_armour": (("armor",),),
     "defeat_orc_solider": (("orc", "soldier"),),
 }
+# Floor -> the achievement for entering it (Craftax's LEVEL_ACHIEVEMENT_MAP; floor 0 has none).
+# A plan's generic "descend" / "ladder" matches enter_dungeon; below the Overworld it means the
+# next floor down.
+FLOOR_ENTRY = (None, "enter_dungeon", "enter_gnomish_mines", "enter_sewers", "enter_vault", "enter_troll_mines",
+               "enter_fire_realm", "enter_ice_realm", "enter_graveyard")
+LADDER_KILLS = 8  # Craftax's MONSTERS_KILLED_TO_CLEAR_LEVEL: kills on a floor that open its down-ladder
+# "open the ladder", "until the ladder opens", "Ladder: OPEN", "kill 8 monsters", "8 kills", "clear the floor".
+_LADDER_OPEN = re.compile(
+    r"\b(?:open|unlock|clear)\w*\b[^.|;]{0,30}?\bladder\b|\bladder\b[^.|;]{0,20}?\b(?:open|unlock)\w*\b"
+    r"|\bkill\w*\s+(?:\d+\s+(?:more\s+)?)?(?:monsters|enemies|mobs|creatures)\b|\b\d+\s+kills\b|\bclear\w*\s+(?:the\s+|this\s+)?(?:floor|level)\b",
+    re.IGNORECASE)
 _FIELD = re.compile(r"^\s*(goal|where|at|near|destination|needs|need|done when|done)\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
 _NUMBERED = re.compile(r"(?:^|(?<=\s))([1-9])\s*[.:)]\s+")
 
@@ -76,6 +89,7 @@ class Subgoal:
     place: tuple[int, int, int] | None = None  # (floor, row, col)
     thing: str | None = None
     place_seen: bool = True  # False: the agent never saw that cell (a grid-view coordinate, or made up)
+    ladder_floor: int | None = None  # open this floor's down-ladder (LADDER_KILLS kills on it)
 
 
 def _words(text: str) -> str:
@@ -166,12 +180,18 @@ def parse_plan(lines: list[str], achievement_names: list[str], default_floor: in
                 done, goal = text[cut + len("done when"):].lstrip(" :"), text[:cut].rstrip(" |,;-–—")
             where = text
         places = parse_places(where or goal, default_floor, view) or parse_places(text, default_floor, view)
+        achievement = match_achievement(goal, achievement_names) or (match_achievement(done, achievement_names) if done else None)
+        if achievement == "enter_dungeon" and default_floor >= 1:  # "descend" below the Overworld: the next floor
+            achievement = FLOOR_ENTRY[default_floor + 1] if default_floor + 1 < len(FLOOR_ENTRY) else None
+        # The Overworld's ladder starts open, so a kill target means something only below it.
+        opens_ladder = default_floor >= 1 and bool(_LADDER_OPEN.search(f"{goal} | {done}"))
         out.append(Subgoal(
             n=n, text=text, goal=goal, where=where if len(parts) > 1 else "", done_when=done,
-            achievement=match_achievement(goal, achievement_names) or (match_achievement(done, achievement_names) if done else None),
+            achievement=achievement,
             items=_targets(f"{goal} | {done}"),
             place=places[0] if places else None,
             thing=claim_feature(where or goal),
+            ladder_floor=default_floor if opens_ladder else None,
         ))
     return out
 
@@ -186,6 +206,11 @@ def plan_text(subgoals: list[Subgoal]) -> str:
 def _inventory(game: Any, items: set[str]) -> dict[str, int]:
     inv = game.state.inventory
     return {k: int(np.asarray(getattr(inv, k))) for k in items}
+
+
+def _kills(game: Any, floors: set[int]) -> dict[int, int]:
+    killed = np.asarray(game.state.monsters_killed)
+    return {f: int(killed[f]) for f in floors if 0 <= f < killed.shape[0]}
 
 
 def _cheb(a: tuple[int, int], b: tuple[int, int]) -> int:
@@ -210,6 +235,10 @@ class AdherenceTracker:
         self.start_inv = _inventory(game, self.items)
         self.max_inv = dict(self.start_inv)
         self.end_inv = dict(self.start_inv)
+        self.ladder_floors = {s.ladder_floor for s in subgoals if s.ladder_floor is not None}
+        self.start_kills = _kills(game, self.ladder_floors)
+        self.end_kills = dict(self.start_kills)
+        self.ladder_open_at: dict[int, int] = {}  # floor -> the turn its kills reached LADDER_KILLS
         self.first_turn = self.last_turn = game.turn
         self.unlocked: dict[str, int] = {}
         self.item_reached: dict[tuple[int, str], int] = {}
@@ -240,6 +269,8 @@ class AdherenceTracker:
         ("place a table" when one is placed), else the targets decide ("wood 1 -> 3" is not
         done because collect_wood was unlocked long ago); item targets alone decide too."""
         items = [self.max_inv.get(item, 0) >= self._target(item, count, rel) for item, count, rel in s.items]
+        if s.ladder_floor is not None:  # kills only grow, so the end count says it
+            items.append(self.end_kills.get(s.ladder_floor, 0) >= LADDER_KILLS)
         if s.achievement and s.achievement in self.unlocked and s.achievement not in self.before:
             return True
         if items:
@@ -288,6 +319,11 @@ class AdherenceTracker:
         self.end_inv = inv
         for item, v in inv.items():
             self.max_inv[item] = max(self.max_inv[item], v)
+        if self.ladder_floors:
+            self.end_kills = _kills(game, self.ladder_floors)
+            for f, k in self.end_kills.items():
+                if k >= LADDER_KILLS:
+                    self.ladder_open_at.setdefault(f, turn)
         for s in self.subgoals:
             for item, count, rel in s.items:
                 if inv[item] >= self._target(item, count, rel):
@@ -355,6 +391,12 @@ class AdherenceTracker:
                 reached = self.item_reached.get((s.n, item))
                 ev.append(f"{item} {self.start_inv[item]} at start, max {self.max_inv[item]}, {self.end_inv[item]} at end; "
                           f"target {target}: " + (f"reached at turn {reached}" if reached is not None else "not reached"))
+            if s.ladder_floor is not None:
+                f = s.ladder_floor
+                start, end = self.start_kills.get(f, 0), self.end_kills.get(f, 0)
+                ev.append(f"F{f}'s down-ladder: {start} kills at start, {end} at end ({LADDER_KILLS} open it): "
+                          + ("open at the start" if start >= LADDER_KILLS else
+                             f"opened at turn {self.ladder_open_at[f]}" if f in self.ladder_open_at else "still closed"))
             if s.place is not None:
                 at = f"{s.thing or 'its place'} {place(s.place[0], s.place[1:])}"
                 if not s.place_seen:
@@ -369,7 +411,7 @@ class AdherenceTracker:
                     ev.append(f"{at}: never on F{s.place[0]} this segment")
             done = self._done(s)
             verdict = ("already true at the start of this segment (not scored)" if s.n in self.done_at_start else
-                       "no code check (no achievement, item count or place recognized)" if done is None and (s.place is None or not s.place_seen) else
+                       "no code check (no achievement, item count, ladder kills or place recognized)" if done is None and (s.place is None or not s.place_seen) else
                        "code cannot tell done (a place only)" if done is None else
                        f"done by code at turn {self.done_at[s.n]}" if done else "not done by code")
             out.append(f"{s.n}. {s.goal[:160]}\n   code: {'; '.join(ev) or '-'} -> {verdict}")
@@ -385,6 +427,7 @@ class AdherenceTracker:
                                     "finished subgoals out of order or died)",
             "subgoals": [{"n": s.n, "goal": s.goal, "achievement": s.achievement, "items": s.items,
                           "place": list(s.place) if s.place else None, "place_seen": s.place_seen,
+                          "ladder_floor": s.ladder_floor,
                           "code_done": self._done(s), "done_at": self.done_at.get(s.n),
                           "done_at_start": s.n in self.done_at_start,
                           "done_late": s.n in self.done_at and s.n not in self.done_at_start

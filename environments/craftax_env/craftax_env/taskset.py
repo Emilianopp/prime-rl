@@ -48,6 +48,7 @@ from craftax_env.segments import (
     game_record,
     notes_format,
     notes_of_summary,
+    standing_stations,
     notes_problem,
     parse_notes,
     summary_text,
@@ -242,6 +243,7 @@ def _new_game(seed: int, max_turns: int | None) -> glyph.CraftaxGame:
 _PLACE_STATIONS = {glyph.ACTION_NAMES.index("PLACE_TABLE"): ("table", glyph.TABLE_BLOCK),
                    glyph.ACTION_NAMES.index("PLACE_FURNACE"): ("furnace", glyph.FURNACE_BLOCK)}
 _SLEEP = glyph.ACTION_NAMES.index("SLEEP")
+_DO = glyph.ACTION_NAMES.index("DO")
 _LOGGED_PREFIXES = ("MAKE_", "PLACE_", "ENCHANT_", "DRINK_", "READ_", "LEVEL_UP_", "CAST_")
 
 
@@ -583,7 +585,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         if node.get("state_path"):
             saved = await asyncio.to_thread(store.get, node["state_path"], node.get("state_sha256"))
             game = await asyncio.to_thread(glyph.CraftaxGame.restore, saved["game"], max_turns)
-            explored, stations = saved["explored"], list(saved.get("stations") or [])
+            # A station destroyed in an earlier segment (DO facing it, an arrow) is dropped here.
+            explored, stations = saved["explored"], standing_stations(game, list(saved.get("stations") or []))
         else:
             game = await asyncio.to_thread(_new_game, seed, max_turns)
             explored, stations = None, []
@@ -657,6 +660,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         before = game.snapshot() if feedback or logged else None
                         floor_before = game.floor
                         ahead = game.block_ahead() if segmented and index in _PLACE_STATIONS else None
+                        # The cell a DO hits, to tell the agent's own DO from an arrow when a station goes.
+                        do_cell = game.block_ahead()[0] if segmented and index == _DO and stations else None
                         try:
                             step = await asyncio.to_thread(game.step, index)
                         except Exception as exc:  # a broken step must not kill the rollout
@@ -684,6 +689,12 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                                 if now == block and block_before != block:
                                     stations.append({"kind": kind, "floor": floor_before, "pos": [int(cell[0]), int(cell[1])], "turn": game.turn})
                                     timeline.add(game.turn, f"placed a {kind} at {glyph.place(floor_before, cell)}")
+                            if stations and any(s["floor"] == floor_before for s in stations):
+                                standing = {id(s) for s in standing_stations(game, stations, floor=floor_before)}
+                                for s in [s for s in stations if s["floor"] == floor_before and id(s) not in standing]:
+                                    stations.remove(s)
+                                    how = "your DO facing it" if do_cell is not None and tuple(s["pos"]) == tuple(do_cell) else "an arrow or another projectile"
+                                    timeline.add(game.turn, f"the {s['kind']} at {glyph.place(s['floor'], s['pos'])} was destroyed by {how} (it is path now)")
                             if index == _SLEEP and step.fast_forward_ticks:
                                 timeline.add(game.turn, f"slept {step.fast_forward_ticks} ticks at {glyph.place(game.floor, game.position)}")
                             floor, mask = game.visible()

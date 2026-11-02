@@ -210,9 +210,8 @@ def next_step(game: Any, stations: list[dict[str, Any]] | None = None) -> str:
                     needs.append(f"a {s} within one step ({_nearest_station(game, s, stations)})")
             label = f"{name} ({how})"
         elif how in PLACEMENTS:
+            # Craftax places a furnace anywhere (place_block checks only the stone): no table needed.
             needs += [f"{n} {k} (has {items[k]})" for k, n in PLACEMENTS[how].items() if items[k] < n]
-            if how == "PLACE_FURNACE" and not snap["near_table"]:
-                needs.append(f"a table within one step ({_nearest_station(game, 'table', stations)})")
             label = f"{name} ({how})"
         elif how == "DESCEND":
             mask = _feature_mask(game, 0, "ladder down")
