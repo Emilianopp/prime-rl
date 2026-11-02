@@ -30,7 +30,7 @@ FIELDS = ("input_tokens", "output_tokens", "thinking_tokens", "cost_usd")
 def run_totals(path: str) -> dict:
     log = path if path.endswith(".jsonl") else os.path.join(path, "episodes.jsonl")
     lines = [json.loads(l) for l in open(log) if l.strip()]
-    judged = [l for l in lines if l.get("task") == "crafter-judge"]
+    judged = [l for l in lines if l.get("task") in ("crafter-judge", "craftax-judge", "craftax-adherence")]
     segs = [l for l in lines if l.get("task") == "crafter"]
     def val(j, k):  # a CAPI judge (Copilot quota, no per-token price) logs cost_usd = NaN
         v = float(j.get(k) or 0)
@@ -46,13 +46,14 @@ def run_totals(path: str) -> dict:
         "run": out_dir, "job": os.path.basename(out_dir.rstrip("/")), "kind": "run",
         "modes": dict(collections.Counter(j.get("mode", "single") for j in judged)),
         "segments": len(segs), "judged": len(judged), "priced": priced, "calls": round(calls, 2), **tot,
-        "usd_per_segment": tot["cost_usd"] / max(1, len(judged)), "cell": cell[:200],
+        "usd_per_segment": tot["cost_usd"] / max(1, sum(j.get("task") != "craftax-adherence" for j in judged)),
+        "adherence_judged": sum(j.get("task") == "craftax-adherence" for j in judged), "cell": cell[:200],
     }
 
 
 def show(t: dict) -> None:
     unpriced = t["judged"] - t["priced"]
-    print(f"{t['job']}: {t['judged']} segments judged in {t['calls']:.0f} calls {t['modes']}; "
+    print(f"{t['job']}: {t['judged']} judge lines ({t.get('adherence_judged', 0)} adherence) in {t['calls']:.0f} calls {t['modes']}; "
           f"input {t['input_tokens'] / 1e6:.2f}M, output {t['output_tokens'] / 1e6:.2f}M tokens (thinking {t['thinking_tokens'] / 1e6:.2f}M); "
           f"${t['cost_usd']:.2f} (${t['usd_per_segment'] * 1000:.2f} per 1000 segments)"
           + (f"; {unpriced} judge lines carry no price (a CAPI judge, or logs from before cost logging)" if unpriced else ""))

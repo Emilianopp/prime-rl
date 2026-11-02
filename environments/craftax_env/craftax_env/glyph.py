@@ -62,6 +62,18 @@ PLACEMENTS: dict[str, dict[str, int]] = {
 for a sapling; water also takes stone)."""
 ENDLESS_TIMESTEPS = 1_000_000_000
 """The game's own time limit when a game has no turn limit (int32, out of reach)."""
+def place(floor: int, pos) -> str:
+    """THE way every env-written text names a place: ``F<floor> (row,col)``, e.g. ``F0 (19,29)``.
+    The HUD prints the same numbers as ``Floor: 0 ... Pos: (19,29)``; row grows downward
+    (MOVE_DOWN adds 1), col grows to the right (MOVE_RIGHT adds 1). The game record, the
+    timeline, the death and respawn messages, the action feedback, the notes format and every
+    judge input use this, so the policy and the judge see one convention."""
+    r, c = (int(v) for v in pos)
+    return f"F{int(floor)} ({r},{c})"
+
+
+TABLE_BLOCK, FURNACE_BLOCK = 11, 12
+"""Craftax's BlockType.CRAFTING_TABLE and FURNACE (checked against the enum in ``_load``)."""
 FLOOR_NAMES = (
     "Overworld",
     "Dungeon",
@@ -104,6 +116,7 @@ def _load(max_timesteps: int) -> tuple[Any, Any, Any]:
             _runtime["block_names"] = {b.value: b.name.lower().replace("_", " ") for b in C.BlockType}
             _runtime["directions"] = np.asarray(C.DIRECTIONS)
             _runtime["table"], _runtime["furnace"] = C.BlockType.CRAFTING_TABLE.value, C.BlockType.FURNACE.value
+            assert (_runtime["table"], _runtime["furnace"]) == (TABLE_BLOCK, FURNACE_BLOCK)
             _runtime.update(
                 weights=np.asarray(C.ACHIEVEMENT_REWARD_MAP, dtype=float),
                 not_walkable=np.asarray(C.SOLID_BLOCK_MAPPING) | np.isin(np.arange(len(C.BlockType)), blocked),

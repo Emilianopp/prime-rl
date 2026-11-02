@@ -5,6 +5,9 @@ description = "craftax-env — GlyphBench's full Craftax (glyph observations) as
 requires-python = ">=3.11"
 dependencies = [
     "verifiers",
+    # Also imports crafter_env (environments/crafter_env: state store, beam helpers, later the
+    # judge client) until those move to a shared module. Not declared: it is not on PyPI, so
+    # install it next to this one (uv pip install -e environments/crafter_env).
     "jax[cpu]",
     # The Craftax fork GlyphBench pins: upstream Craftax plus its Unicode glyph renderer.
     "craftax @ git+https://github.com/roger-creus/Craftax.git@ef0cd470f64605832089c921ec7a737dd38a23b8",
