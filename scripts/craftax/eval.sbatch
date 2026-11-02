@@ -2,8 +2,8 @@
 #SBATCH --job-name=craftax-eval
 #SBATCH --partition=short-unkillable
 #SBATCH --gres=gpu:a100l:4
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=256G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
 #SBATCH --time=2:59:00
 #SBATCH --output=%x-%j.out
 # Inference-only full Craftax (craftax-env, GlyphBench's glyph observations): SGLang
@@ -12,9 +12,15 @@
 #
 #   sbatch scripts/craftax/eval.sbatch
 #
-# Env: KEEP (eviction max_turns, default 50; "full": eviction off, plain SGLang), N
-# (episodes, default 64), CONC (in-flight episodes, default 64), SKIP (skip the first
-# SKIP tasks: disjoint seeds across jobs), TURN_TOKENS (max tokens per reply, default
+# Env: KEEP (eviction max_turns, default 50; "full": eviction off, plain SGLang), CONC
+# (in-flight episodes, default PER_GPU x GPUs), PER_GPU (default 32 with eviction, which
+# fills about 80% of an A100's KV pool at ~45k live tokens a trace; 6 with KEEP=full, whose
+# traces grow to the 256k ceiling), N (episodes; default 3 x CONC when STEPS caps the episodes,
+# else CONC: above CONC finished slots refill - without it the batch drains and only ~35% of
+# decode ran at a full batch in job 11468460 - and the episodes still running at the job's end
+# stop at DEADLINE, logged as ended_by=deadline and left out of the summary), DEADLINE_MARGIN (seconds before the job's end at which every episode
+# stops, default 600), MULTIPLEX (episodes per env worker process, default the config's 32),
+# SKIP (skip the first SKIP tasks: disjoint seeds across jobs), TURN_TOKENS (max tokens per reply, default
 # 2048; also the budget the system prompt states), NO_THINKING (1: the renderer's
 # non-thinking mode and GlyphBench's action-only format), TIME_LIMIT (seconds per
 # episode, default the config's 9000), STEPS (turns per episode, default 10000),
@@ -27,7 +33,14 @@
 # (prime-rl checkout, deps/ submodules checked out), VENV, SGLANG_VENV, CRAFTAX_PY (a
 # --target dir with jax[cpu] and the Craftax fork, for a venv without them), OUT_ROOT.
 set -u
-KEEP=${KEEP:-50} N=${N:-64} CONC=${CONC:-64} SKIP=${SKIP:-0} TURN_TOKENS=${TURN_TOKENS:-2048} NO_THINKING=${NO_THINKING:-}
+# One data-parallel engine per GPU of the allocation (the config says 4; main gives 2, unkillable 1).
+GPUS=${GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}; [ "$GPUS" -ge 1 ] || GPUS=1
+KEEP=${KEEP:-50}
+PER_GPU=${PER_GPU:-$([ "$KEEP" = full ] && echo 6 || echo 32)}
+CONC=${CONC:-$((GPUS * PER_GPU))}
+STEPS=${STEPS:-}
+N=${N:-$([ -n "$STEPS" ] && echo $((3 * CONC)) || echo "$CONC")} SKIP=${SKIP:-0} TURN_TOKENS=${TURN_TOKENS:-2048} NO_THINKING=${NO_THINKING:-}
+DEADLINE_MARGIN=${DEADLINE_MARGIN:-600} MULTIPLEX=${MULTIPLEX:-}
 TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} SAFE_RADIUS=${SAFE_RADIUS:-}
 [ -n "$SEGMENTS" ] && [ "$SEGMENTS" != off ] && { echo "SEGMENTS=$SEGMENTS: this branch's verifiers has no segments"; exit 2; }
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
@@ -37,12 +50,15 @@ OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TUR
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY JAX_PLATFORMS=cpu
+# A Craftax step is ~1.5 ms on one thread; without this every env worker sizes XLA's CPU pool to the node.
+export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1${XLA_FLAGS:+ $XLA_FLAGS}"
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/craftax_env:$REPO/deps/verifiers:$REPO/deps/renderers${CRAFTAX_PY:+:$CRAFTAX_PY}${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[craftax eval r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off}] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
-rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
+# jobs/craftax_eval.sbatch unpacks the venv tarball here first: re-walking ~200k files on scratch costs minutes.
+[ -x "$SLURM_TMPDIR/sgl-venv/bin/python" ] || rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
 export CUDA_HOME=$($SGL_PY -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13
 
@@ -53,8 +69,6 @@ else
   cp configs/crafter/inference-kve.toml "$OUT/inference.toml"
   EVICT=(--sglang.eviction.max-turns "$KEEP")
 fi
-# One data-parallel engine per GPU of the allocation (the config says 4; main gives 2, unkillable 1).
-GPUS=${GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}; [ "$GPUS" -ge 1 ] || GPUS=1
 sed -i "s/^data_parallel_size = .*/data_parallel_size = $GPUS/" "$OUT/inference.toml"
 uv run inference @ "$OUT/inference.toml" --sglang.python "$SGL_PY" "${EVICT[@]}" > "$OUT/inference.log" 2>&1 &
 INFER=$!
@@ -68,6 +82,15 @@ echo "inference up $(date +%T)"
 
 ( while sleep 30; do curl -s -m 5 http://localhost:8000/metrics | grep "^kvs:" > "$OUT/kvs.prom.tmp" && mv "$OUT/kvs.prom.tmp" "$OUT/kvs.prom"; done ) &
 POLL=$!
+# utilization.gpu is the share of time any kernel runs, not SM occupancy: it stayed >= 90% with 15
+# of 128 episodes left (job 11468460). SM occupancy / DRAM counters (DCGM, ncu) are admin-only on
+# Mila (RmProfilingAdminOnly=1), so the summary estimates HBM bandwidth from the decode log instead.
+nvidia-smi --query-gpu=timestamp,index,utilization.gpu,utilization.memory,memory.used,power.draw,clocks.sm \
+  --format=csv,nounits -l 30 > "$OUT/gpu.csv" 2>/dev/null &
+GPUMON=$!
+# CPU: load and the busiest processes (top's second frame: %CPU over the last 5 s, 100 = one core).
+( while sleep 25; do echo "== $(date +%T) load $(cut -d' ' -f1-3 /proc/loadavg)"; top -b -n 2 -d 5 -w 200 -u "$USER" | awk '/^top -/ { f++ } f == 2' | sed -n '7,22p'; done ) > "$OUT/cpu.txt" 2>&1 &
+CPUMON=$!
 EVAL_TOML=configs/craftax/eval.toml
 [ -n "$CONTINUOUS" ] && EVAL_TOML=configs/craftax/eval-continuous.toml
 sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"|" "$EVAL_TOML" > "$OUT/eval.toml"
@@ -77,13 +100,35 @@ sed -i "s/^max_completion_tokens = .*/max_completion_tokens = $TURN_TOKENS/; s/^
 [ -n "$NO_THINKING" ] && sed -i "s/^enable_thinking = true/enable_thinking = false/; s|^env.taskset.split = .*|&\nenv.taskset.enable_reasoning = false|" "$OUT/eval.toml"
 [ -n "$TIME_LIMIT" ] && sed -i "s/^env.max_episode_seconds = .*/env.max_episode_seconds = $TIME_LIMIT/" "$OUT/eval.toml"
 [ -n "$STEPS" ] && sed -i "s/^env.max_episode_steps = .*/env.max_episode_steps = $STEPS/" "$OUT/eval.toml"
+[ -n "$MULTIPLEX" ] && sed -i "s/^serve.pool.multiplex = .*/serve.pool.multiplex = $MULTIPLEX/" "$OUT/eval.toml"
+if [ -n "${SLURM_JOB_ID:-}" ] && JOB_END=$(date -d "$(squeue -h -j "$SLURM_JOB_ID" -o %e)" +%s 2>/dev/null); then
+  sed -i "s|^env.max_episode_steps = .*|&\nenv.episode_deadline = $((JOB_END - DEADLINE_MARGIN))|" "$OUT/eval.toml"
+  echo "episodes stop by $(date -d @$((JOB_END - DEADLINE_MARGIN)) +%T) (job ends $(date -d @$JOB_END +%T))"
+fi
 [ -n "$SAFE_RADIUS" ] && sed -i "s|^env.max_episode_steps = .*|&\nenv.respawn_safe = true\nenv.respawn_safe_radius = $SAFE_RADIUS|" "$OUT/eval.toml"
-uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false \
-  --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "$CONC" --concurrency.max-inflight "$CONC" \
-  --concurrency.initial-inflight "$CONC" > "$OUT/eval.log" 2>&1
+EVAL_ARGS=(--dashboard false --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "$CONC"
+  --concurrency.max-inflight "$CONC" --concurrency.initial-inflight "$CONC")
+uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" "${EVAL_ARGS[@]}" > "$OUT/eval.log" 2>&1
 echo "eval exit $? $(date +%T)"
 
-kill $POLL 2>/dev/null; echo "== kvs counters"; cat "$OUT/kvs.prom" 2>/dev/null
+kill $POLL $GPUMON $CPUMON 2>/dev/null
+echo "== kvs counters"; cat "$OUT/kvs.prom" 2>/dev/null
+echo "== GPU (nvidia-smi every 30 s, eval window; util = time a kernel runs, not occupancy)"
+awk -F', *' 'NR > 1 && $3 != "" { u[$2] += $3; m[$2] += $5; n[$2]++ } END { for (g in n) printf "gpu%s util %.0f%%  mem %.1f GB\n", g, u[g] / n[g], m[g] / n[g] / 1024 }' "$OUT/gpu.csv" 2>/dev/null | sort
+# Decode is HBM-bound: a step reads the weights, every live token's KV (8 full-attention layers x K/V
+# x 4 heads x 256 x bf16 = 32 KB for Qwen3.5-4B) and reads + writes each request's DeltaNet state
+# (24 layers x 32 heads x 128 x 128 x bf16 = 25 MB, twice). Step time = running / gen tok/s, so
+# bytes / step time is the bandwidth the engine reaches (A100-SXM4-80GB peak 2039 GB/s); "full
+# batch" is the share of decode logs with at least 90% of PER_GPU running (the rest is the drain).
+echo "== SGLang decode batches (per engine: mean running requests, gen tok/s, KV pool peak, HBM estimate)"
+grep "Decode batch" "$OUT/inference.log" | sed -E 's/.*(DP[0-9]+)\].*#running-req: ([0-9]+), #full token: ([0-9]+).*full token usage: ([0-9.]+).*gen throughput \(token\/s\): ([0-9.]+).*/\1 \2 \3 \4 \5/' \
+  | awk -v w="${HBM_WEIGHT_GB:-8.4}" -v kvb="${KV_BYTES_PER_TOKEN:-32768}" -v sb="${STATE_BYTES_PER_REQ:-50.3e6}" -v peak="${HBM_PEAK_GBS:-2039}" -v full="$PER_GPU" '
+    $1 ~ /^DP/ && $2 > 0 && $5 > 0 { d = $1; r[d] += $2; t[d] += $5; k[d] = ($4 > k[d] ? $4 : k[d]); n[d]++
+      bw[d] += (w * 1e9 + $3 * kvb + $2 * sb) * $5 / $2 / 1e9; f[d] += ($2 >= 0.9 * full) }
+    END { for (d in n) printf "%s running %.1f  gen %.0f tok/s  KV peak %.0f%%  HBM ~%.0f GB/s (%.0f%% of peak)  full batch %.0f%%\n",
+      d, r[d] / n[d], t[d] / n[d], 100 * k[d], bw[d] / n[d], 100 * bw[d] / n[d] / peak, 100 * f[d] / n[d] }' | sort
 echo "== episodes"; $VENV/bin/python scripts/craftax/summarize_episodes.py "$OUT/episodes.jsonl" | tee "$OUT/summary.txt"
+echo "== forfeits (also appended to the ledger: scripts/craftax/forfeit_report.py --show)"
+JAX_PLATFORMS=cpu $VENV/bin/python scripts/craftax/forfeit_report.py "$OUT" --ledger | tee "$OUT/forfeits.txt"
 kill $INFER 2>/dev/null; pkill -u "$USER" -f "$SLURM_TMPDIR/sgl-venv/" 2>/dev/null
 exit 0  # the outcome is in summary.txt; pkill's no-match status must not fail the job

@@ -14,6 +14,7 @@ pulls in NLE/MiniHack native builds Crafter does not need).
 from __future__ import annotations
 
 import asyncio
+import bisect
 import dataclasses
 import gc
 import json
@@ -897,6 +898,33 @@ def _ledger_death(env: crafter.Env, step: int, current: dict[str, Any]) -> str:
         )
     vitals = ", ".join(f"{k} {int(inventory.get(k, 0))}" for k in ("food", "drink", "energy"))
     return f"step {step} at ({px}, {py}): died ({vitals}; zombies adjacent: {zombies})"
+
+
+def _segment_cost(trace: Any) -> dict[str, Any]:
+    """The inference cost of one segment, for scaling studies at a fixed compute budget:
+    model calls, tokens generated and newly fed in (prefill), and the live context each
+    call ran against (its prompt minus the tokens evicted before it). `live_x_tokens`
+    (sum of live context x tokens processed) is what the attention KV reads scale with;
+    `call_s` is the summed wall time of the model calls."""
+    deaths = sorted(e["at"] for n in getattr(trace, "nodes", ()) if (e := getattr(n, "eviction", None))
+                    for a, b in e["spans"] for _ in range(b - a))
+    calls = gen = fed = live_x = 0
+    call_s = 0.0
+    live_max, prev = 0, 0
+    for call in getattr(trace, "calls", ()):
+        if call.usage is None:
+            continue
+        prompt, out = call.usage.input_tokens, call.usage.completion_tokens
+        new = max(0, prompt - prev)
+        live = prompt - bisect.bisect_right(deaths, prompt)
+        calls, gen, fed = calls + 1, gen + out, fed + new
+        live_x += live * (new + out)
+        live_max = max(live_max, live)
+        if call.time.start is not None and call.time.end is not None:
+            call_s += call.time.end - call.time.start
+        prev = call.usage.total_tokens
+    return {"calls": calls, "gen_tokens": gen, "fed_tokens": fed, "live_x_tokens": live_x,
+            "live_mean": live_x // max(gen + fed, 1), "live_max": live_max, "call_s": round(call_s, 1)}
 
 
 def _initial_observation(
@@ -2029,6 +2057,7 @@ class CrafterEnv(vf.Env[CrafterEnvConfig]):
                 "actions": dict(actions),
                 "inventory": record["inventory"],
                 "trace_tokens": trace.num_total_tokens,
+                "cost": _segment_cost(trace),
                 "task": "crafter",
                 "node_id": node_id,
                 "parent": record["parent"],

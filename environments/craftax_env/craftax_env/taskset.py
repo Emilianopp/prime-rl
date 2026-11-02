@@ -30,6 +30,7 @@ from pydantic import Field
 import verifiers.v1 as vf
 
 from craftax_env import glyph
+from craftax_env.forfeits import ForfeitTracker, classify, reply_parts
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,10 @@ class CraftaxEnvConfig(vf.EnvConfig):
     max_episode_seconds: float | None = Field(None, gt=0)
     """Wall-clock budget per episode: the episode ends (``ended_by`` = ``time_limit``) at
     the first turn after this many seconds, the capped turn's action not played."""
+    episode_deadline: float | None = None
+    """Unix time at which every episode ends (``ended_by`` = ``deadline``), checked like
+    `max_episode_seconds`: the job's wall clock, so episodes started late (N > concurrency)
+    are logged instead of killed with the job. They are cut short, so summaries keep them apart."""
     forfeit_mode: Literal["freeze", "noop"] = "freeze"
     """A reply without a valid action: "freeze" (GlyphBench's default) counts the turn
     without moving the world; "noop" plays NOOP."""
@@ -127,16 +132,23 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         unlocked_at: dict[str, int] = {}
         deaths: list[dict] = []  # one entry per respawned death: turn, floor, position, where it came back
         max_floor = 0
+        tracker = ForfeitTracker()  # forfeit kinds, streaks and collapse onset
         async with agents.player.interaction(task) as interaction:
             segment = await interaction.turn(opening)
             while not segment.terminated:
                 if deadline is not None and time.time() >= deadline:
                     end = "time_limit"
                     break
+                if self.config.episode_deadline is not None and time.time() >= self.config.episode_deadline:
+                    end = "deadline"
+                    break
                 turns += 1
                 indices, failure, dropped = glyph.parse_actions(segment.last_reply, max_actions)
                 if not indices:
                     forfeits[failure] += 1
+                    tracker.update(classify(*reply_parts(segment, interaction.trace), failure))
+                else:
+                    tracker.update(None)
                 if not indices and self.config.forfeit_mode == "freeze":
                     done = game.forfeit()
                     per_turn[0] += 1
@@ -224,6 +236,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "turns": float(turns),
                 "actions": float(sum(actions.values())),
                 "game_steps": float(game.turn),
+                **tracker.metrics(),
             }
         )
         trace.info["craftax"] = {
@@ -252,6 +265,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "actions_played": sum(actions.values()),
                 "actions_per_turn": {str(k): v for k, v in sorted(per_turn.items())},
                 "forfeits": dict(forfeits),
+                **tracker.log(),
                 "actions": dict(actions),
                 "ended_by": end,
                 "survived": game.health > 0,

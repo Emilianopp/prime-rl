@@ -36,6 +36,15 @@ class ScriptedInteraction:
         return SimpleNamespace(last_reply=reply, terminated=self.turns is not None and len(self.received) > self.turns)
 
 
+def make_env(config):
+    """A stand-in for the Env instance: the config plus CraftaxEnv's own methods."""
+    env = SimpleNamespace(config=config)
+    for name, member in vars(CraftaxEnv).items():  # every method, so the stand-in never lags the class
+        if callable(member) and not name.startswith("__"):
+            setattr(env, name, member.__get__(env))
+    return env
+
+
 def play(tmp_path, turns=None, respawn=False, **env_config):
     task = next(iter(CraftaxTaskset(CraftaxConfig(num_examples=1, max_output_tokens=2048, respawn=respawn)).load()))
     assert task.data.prompt is None  # the env opens the episode
@@ -46,7 +55,7 @@ def play(tmp_path, turns=None, respawn=False, **env_config):
         yield interaction
 
     log = tmp_path / "episodes.jsonl"
-    env = SimpleNamespace(config=CraftaxEnvConfig(episode_log=str(log), **env_config))
+    env = make_env(CraftaxEnvConfig(episode_log=str(log), **env_config))
     agents = SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))
     asyncio.run(CraftaxEnv.run(env, task, agents))
     return task, interaction, json.loads(log.read_text())
@@ -245,7 +254,7 @@ def test_multi_actions_and_feedback_in_a_run(tmp_path, monkeypatch):
         yield interaction
 
     log = tmp_path / "episodes.jsonl"
-    env = SimpleNamespace(config=CraftaxEnvConfig(episode_log=str(log), max_episode_steps=0, action_feedback=True))
+    env = make_env(CraftaxEnvConfig(episode_log=str(log), max_episode_steps=0, action_feedback=True))
     asyncio.run(CraftaxEnv.run(env, task, SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))))
     line = json.loads(log.read_text())
     assert line["turns"] == 6 and line["actions_played"] == 2 * 3 + 2 * 1
@@ -255,3 +264,43 @@ def test_multi_actions_and_feedback_in_a_run(tmp_path, monkeypatch):
     assert "Played 3 actions, reward" in after_multi and "1. MOVE_LEFT: " in after_multi and "3. DO: " in after_multi
     assert "the turn was forfeited: the world did not move" in after_forfeit
     assert "then end with 1 to 3 <action> tags" in after_multi
+
+
+def test_job_deadline_ends_the_episode(tmp_path):
+    _, interaction, line = play(tmp_path, max_episode_steps=12, episode_deadline=1.0)  # long past
+    assert line["ended_by"] == "deadline" and line["turns"] == 0
+    assert len(interaction.received) == 1  # the opening; the reply to it is not played
+
+
+def test_forfeit_classify():
+    from craftax_env.forfeits import classify
+
+    assert classify("", "long thinking", "length", "no_action_tag") == "length"
+    assert classify("", "Then I `MA", "stop", "no_action_tag") == "reasoning_only"
+    assert classify("", "so <action>DO</action>", "stop", "no_action_tag") == "action_in_reasoning"
+    assert classify("890602", "", "stop", "no_action_tag") == "content_no_tag"
+    assert classify("<action>", "", "stop", "no_action_tag") == "malformed_tag"
+    assert classify("", "", "stop", "no_action_tag") == "empty"
+    assert classify("<action>JUMP</action>", "", "stop", "unknown_name") == "unknown_name"
+
+
+def test_forfeit_tracker_collapse():
+    from craftax_env.forfeits import COLLAPSE_STREAK, ForfeitTracker
+
+    t = ForfeitTracker()
+    for _ in range(3):
+        t.update(None)
+    t.update("length")
+    t.update(None)
+    for _ in range(COLLAPSE_STREAK + 2):
+        t.update("reasoning_only")
+    m, log = t.metrics(), t.log()
+    assert m["forfeit_length"] == 1 and m["forfeit_reasoning_only"] == COLLAPSE_STREAK + 2
+    assert m["max_forfeit_streak"] == COLLAPSE_STREAK + 2 and m["forfeit_collapsed"] == 1.0
+    assert log["collapse_onset"] == 5 and sum(log["forfeit_buckets"]) == COLLAPSE_STREAK + 3
+
+
+def test_forfeit_kinds_logged(tmp_path):
+    _, _, line = play(tmp_path, turns=10)
+    assert line["forfeit_kinds"] == {"unknown_name": 2, "content_no_tag": 2}
+    assert line["max_forfeit_streak"] == 2 and line["collapse_onset"] is None

@@ -55,4 +55,4 @@ env.player.max_total_tokens = 256000
 env.player.harness.id = "inline-chat"
 env.player.runtime.type = "subprocess"
 serve.pool.type = "elastic"
-serve.pool.multiplex = 16
+serve.pool.multiplex = 32  # episodes per env worker: each worker loads Craftax (~20 s) and does its episodes' JSON/HTTP under one GIL (~15 ms a turn at 100k tokens)

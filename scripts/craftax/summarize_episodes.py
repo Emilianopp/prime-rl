@@ -17,8 +17,20 @@ FLOORS = ("Overworld", "Dungeon", "Gnomish Mines", "Sewers", "Vaults", "Troll Mi
 N_ACHIEVEMENTS = 67
 
 eps = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+eps = [e for e in eps if "ended_by" in e]  # a tree run's log also holds the judges' verdicts
 if not eps:
     sys.exit("no episodes")
+# Episodes the job's deadline cut short started late (N > concurrency) and would pull every
+# statistic down, so they are left out. Once some are cut, the late starters that did finish
+# lean toward short games (early deaths); when none is cut, refilled slots are unbiased.
+cut = [e for e in eps if e["ended_by"] == "deadline"]
+if cut and len(cut) < len(eps):
+    eps = [e for e in eps if e["ended_by"] != "deadline"]
+    print(f"{len(cut)} episodes cut by the job deadline left out (turns p50 {sorted(e['turns'] for e in cut)[len(cut) // 2]})")
+    first = min(e["start"] for e in eps)
+    late = sum(e["start"] > first + 300 for e in eps)
+    if late:
+        print(f"{late} kept episodes started over 5 min after the first: biased toward short games")
 n = len(eps)
 
 
@@ -59,6 +71,22 @@ forfeits = Counter()
 for e in eps:
     forfeits.update(e["forfeits"])
 print(f"forfeited turns per turn: {sum(forfeits.values()) / max(sum(turns), 1):.3f}  {dict(forfeits)}")
+if all("forfeit_kinds" in e for e in eps):  # craftax_env.forfeits (logged since 2026-11-01)
+    kinds = Counter()
+    for e in eps:
+        kinds.update(e["forfeit_kinds"])
+    tot = sum(kinds.values()) or 1
+    print("forfeit kinds: " + ", ".join(f"{k} {100 * v / tot:.0f}%" for k, v in kinds.most_common()))
+    share = [sum(e["forfeit_kinds"].values()) / max(e["turns"], 1) for e in eps]
+    onsets = [e["collapse_onset"] for e in eps if e.get("collapse_onset") is not None]
+    print(f"episodes forfeiting <5% of turns: {100 * sum(x < .05 for x in share) / n:.0f}%, >50%: {100 * sum(x > .5 for x in share) / n:.0f}%; "
+          f"collapsed (10+ in a row): {len(onsets)} ({100 * len(onsets) / n:.0f}%), onset turn p50 {q(onsets, .5) if onsets else '-'}")
+    width = max(len(e["forfeit_buckets"]) for e in eps)
+    rate = []
+    for b in range(width):
+        live = [e for e in eps if len(e["forfeit_buckets"]) > b]
+        rate.append(sum(e["forfeit_buckets"][b] for e in live) / max(1, sum(min(10, e["turns"] - 10 * b) for e in live)))
+    print("forfeit share by 10-turn bucket: " + " ".join(f"{r:.2f}" for r in rate[:30]) + (" ..." if width > 30 else ""))
 print()
 print("achievement            success   first unlock turn (p50)")
 for a, c in counts.most_common():
