@@ -21,6 +21,9 @@ model turn is one reply however many calls it makes. Grading is the same.
 
 Dataset layout (`dataset_path`, from stage_tasks.py): index.jsonl (one task per line: id, repo,
 problem statement, suite time), tasks/<id>.json (FAIL_TO_PASS, PASS_TO_PASS), patches/<id>.diff.
+SWE-smith tasks (stage_smith.py) add `image` to the row (its jyangballin/swesmith.x86_64.* image,
+repo at /testbed, conda env) and `test_files` to the task: the grade runs those files and reads
+pytest node ids off the -rA summary.
 """
 
 import asyncio
@@ -153,14 +156,32 @@ class Sandbox:
         t0 = time.time()
         self.sock_dir.mkdir(parents=True)
         repo, data = self.info["repo"], self.info["dataset_path"]
-        # The bug must not be a commit of its own (`git log -p` would show the fix): rebuild the repo
-        # as one commit that already holds it, keeping the release tag git-derived versions read.
-        boot = (
-            f"cp -a /repos/{repo} /work && cd /work && tag=$(git describe --tags --abbrev=0 2>/dev/null; true) "
-            f"&& git apply /in/patches/{self.info['id']}.diff && rm -rf .git && git init -q && git add -A "
-            f"&& git -c user.name=tinyswe -c user.email=tinyswe@localhost commit -qm base "
-            f'&& {{ [ -z "$tag" ] || git tag "$tag"; }} && exec /usr/local/bin/python /opt/cmdserver.py /sock/s'
-        )
+        commit = "git -c user.name=tinyswe -c user.email=tinyswe@localhost commit -qm base"
+        if self.info.get("image"):
+            # A SWE-smith image: the repo at /testbed (its conda env installs it in place, so it stays
+            # there; /work links to it) and one git branch per task, i.e. every task's bug and fix.
+            # Rebuild it as one commit holding this task's bug.
+            image, vpy = self.info["image"], "/opt/miniconda3/envs/testbed/bin/python"
+            path = "/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/bin:/usr/bin:/bin"
+            boot = (
+                f"ln -s /testbed /work && cd /testbed && git apply /in/patches/{self.info['id']}.diff "
+                f"&& rm -rf .git && git init -q && git add -A && {commit} "
+                f"&& for py in /opt/miniconda3/bin/python3 {vpy} python3; do "
+                f"command -v $py > /dev/null && exec $py /opt/cmdserver.py /sock/s; done"
+            )
+        else:
+            # The bug must not be a commit of its own (`git log -p` would show the fix): rebuild the repo
+            # as one commit that already holds it, keeping the release tag git-derived versions read.
+            image, vpy, path = (
+                self.config.image,
+                f"/envs/{repo}/bin/python",
+                f"/envs/{repo}/bin:/usr/local/bin:/usr/bin:/bin",
+            )
+            boot = (
+                f"cp -a /repos/{repo} /work && cd /work && tag=$(git describe --tags --abbrev=0 2>/dev/null; true) "
+                f"&& git apply /in/patches/{self.info['id']}.diff && rm -rf .git && git init -q && git add -A "
+                f'&& {commit} && {{ [ -z "$tag" ] || git tag "$tag"; }} && exec /usr/local/bin/python /opt/cmdserver.py /sock/s'
+            )
         argv = [
             *shlex.split(self.config.podman),
             "run",
@@ -173,18 +194,18 @@ class Sandbox:
             "--tmpfs",
             "/tmp:size=512m",
             "-e",
-            f"VPY=/envs/{repo}/bin/python",
+            f"VPY={vpy}",
             "-e",
             f"MEM_MB={self.config.memory_mb}",
             "-e",
-            f"PATH=/envs/{repo}/bin:/usr/local/bin:/usr/bin:/bin",
+            f"PATH={path}",
             "-v",
             f"{data}:/in:ro",
             "-v",
             f"{Path(__file__).parent / 'cmdserver.py'}:/opt/cmdserver.py:ro",
             "-v",
             f"{self.sock_dir}:/sock",
-            self.config.image,
+            image,
             "bash",
             "-c",
             boot,
@@ -387,6 +408,7 @@ class TinySweTaskset(vf.Taskset[TinySweTask, TinySweConfig]):
                         "suite_s": row["suite_s"],
                         "dataset_path": str(root.resolve()),
                         "harness": self.config.harness,
+                        "image": row.get("image"),
                     },
                 ),
                 self.config.task,

@@ -21,10 +21,11 @@
 # mode), STEPS (turns per episode, default the eval config's 50), GROUP (rollouts per task, default
 # the eval config's: 633 tasks run out within a level at >= 128 in flight), HARNESS (leaf: FrogNano's
 # Leaf tools, leaf-harness, instead of one bash block per reply), DP (engines, default 4: one per
-# GPU of the allocation), MAMBA_SLOTS (DeltaNet
+# GPU of the allocation), EXTRA ("key = value; ..." lines added to the eval source, e.g.
+# "env.memory_mb = 4096"), TINYSWE_EXTRA_TARS (podman_env.sh: more images, for SWE-smith data), MAMBA_SLOTS (DeltaNet
 # slots per engine, >= 3 x in-flight episodes per engine), DATA, REPO, VENV, SGLANG_VENV, OUT_ROOT.
 set -u
-LEVELS=${LEVELS:-32 64 128 192} LEVEL_MIN=${LEVEL_MIN:-20} KEEP=${KEEP:-8} THINKING=${THINKING:-} STEPS=${STEPS:-} GROUP=${GROUP:-} HARNESS=${HARNESS:-} DP=${DP:-} MAMBA_SLOTS=${MAMBA_SLOTS:-}
+LEVELS=${LEVELS:-32 64 128 192} LEVEL_MIN=${LEVEL_MIN:-20} KEEP=${KEEP:-8} THINKING=${THINKING:-} STEPS=${STEPS:-} GROUP=${GROUP:-} HARNESS=${HARNESS:-} DP=${DP:-} EXTRA=${EXTRA:-} MAMBA_SLOTS=${MAMBA_SLOTS:-}
 REPO=${REPO:-$SCRATCH/kv-race/prl-tinyswe-wt}
 VENV=${VENV:-$SCRATCH/kv-race/prime-rl-kvs/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
@@ -77,6 +78,8 @@ for CONC in $LEVELS; do
   [ -n "$THINKING" ] && sed -i "s/^enable_thinking = false/enable_thinking = true/" "$L/eval.toml"
   [ -n "$STEPS" ] && sed -i "s/^env.max_episode_steps = .*/env.max_episode_steps = $STEPS/" "$L/eval.toml"
   [ -n "$GROUP" ] && sed -i "s/^group_size = .*/group_size = $GROUP/" "$L/eval.toml"
+  IFS=';' read -ra KVS <<< "$EXTRA"
+  for kv in "${KVS[@]}"; do kv=$(echo "$kv" | sed 's/^ *//; s/ *$//'); [ -n "$kv" ] && sed -i "s|^env.episode_log = .*|&\n$kv|" "$L/eval.toml"; done
   [ "$HARNESS" = leaf ] && sed -i -e 's/^env.player.harness.id = .*/env.player.harness.id = "leaf-harness"/' \
     -e 's|^env.episode_log = .*|&\nenv.taskset.harness = "leaf"|' "$L/eval.toml"
   [ "$KEEP" = full ] && sed -i -e '/^admin_base_url/d' -e 's/^env.player.max_total_tokens = .*/env.player.max_total_tokens = 30720/' "$L/eval.toml"

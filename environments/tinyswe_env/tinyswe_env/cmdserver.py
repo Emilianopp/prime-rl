@@ -4,6 +4,8 @@ one JSON request per line, so the agent's commands never go through `podman exec
   {"op": "sh", "cmd": "...", "timeout": s, "max_chars": n} -> {"rc", "wall", "output"}
   {"op": "grade", "task": "/in/tasks/<id>.json", "timeout": s}
       -> {"rc", "wall", "f2p_failing", "n_f2p", "n_p2p_failed", "p2p_failed"}
+      tiny-swe tasks (junit ids): the whole suite. SWE-smith tasks (pytest node ids; the task lists its
+      `test_files`): those files, statuses read off pytest's -rA summary.
   {"op": "leaf", "tool": "Read|Write|Edit|Glob|Bash", "args": {...}, "timeout": s} -> {"rc", "wall", "output"}
       one tool call of the Leaf harness (leaf_harness), in Leaf's own output formats
 
@@ -15,6 +17,7 @@ RLIMIT_DATA (MEM_MB) and a wall timeout. RLIMIT_AS alone at 2-4 GB breaks thread
 import glob
 import json
 import os
+import re
 import resource
 import socket
 import subprocess
@@ -72,7 +75,9 @@ def leaf_path(args, key="file_path"):
 
 
 def leaf_display(path):
-    rel = os.path.relpath(os.path.realpath(path), "/work")
+    rel = os.path.relpath(
+        os.path.realpath(path), os.path.realpath("/work")
+    )  # /work links to /testbed on SWE-smith images
     return path if rel.startswith("..") else rel
 
 
@@ -182,8 +187,13 @@ def handle(req):
         xd = ["-n0"] if subprocess.run([VPY, "-c", "import xdist"], capture_output=True).returncode == 0 else []
         if os.path.exists("/tmp/grade.xml"):
             os.unlink("/tmp/grade.xml")
-        r, _ = run(PYTEST + xd + ["--junitxml=/tmp/grade.xml"], req["timeout"])
-        ok = junit_pass("/tmp/grade.xml")
+        if task.get("test_files"):  # rerunfailures binds "localhost", which does not resolve under --network none
+            argv = PYTEST + xd + ["-rA", "--tb=no", "--color=no", "-p", "no:rerunfailures"] + task["test_files"]
+            r, out = run(argv, req["timeout"])
+            ok = {m.group(1) for m in re.finditer(r"^PASSED (\S+)", out, re.M)}
+        else:
+            r, _ = run(PYTEST + xd + ["--junitxml=/tmp/grade.xml"], req["timeout"])
+            ok = junit_pass("/tmp/grade.xml")
         p2p_failed = [t for t in task["PASS_TO_PASS"] if t not in ok]
         return r | {
             "f2p_failing": sum(t not in ok for t in task["FAIL_TO_PASS"]),
