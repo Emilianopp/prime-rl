@@ -423,3 +423,36 @@ def test_exploration_aid_every_turn(tmp_path):
     asyncio.run(env.play_segment(child_task(task, node), child))
     opening = next(m for m in [*child.systems, *child.received] if "[Exploration Aid]" in m)
     assert "visits here=" in opening
+
+
+def test_action_from_reasoning(tmp_path):
+    """env.action_from_reasoning: a reply whose thinking ENDS with the tag and whose content has none
+    plays that tag; a tag mentioned earlier in the thinking does not count."""
+    assert glyph.trailing_actions("I could <action>DO</action> but\nfinally:\n<action>MOVE_LEFT</action>\n") == "<action>MOVE_LEFT</action>\n"
+    assert glyph.trailing_actions("maybe <action>DO</action>, then I think more") is None
+    assert glyph.trailing_actions(None) is None
+
+    class ThinkingPlayer(SegmentPlayer):
+        @asynccontextmanager
+        async def interaction(self, task):
+            async with SegmentPlayer.interaction(self, task) as inner:
+                class Wrapped:
+                    trace = inner.trace
+
+                    async def turn(self, message=None):
+                        out = await inner.turn(message)
+                        if message.startswith("END OF SEGMENT"):
+                            return out
+                        thinking = f"Let me think.\n{out.last_reply}"  # the tag only inside the thinking
+                        msg = SimpleNamespace(role="assistant", content="", reasoning_content=thinking)
+                        return SimpleNamespace(last_reply="", messages=[msg], terminated=False)
+                yield Wrapped()
+
+    for on in (False, True):
+        task, env = make(tmp_path / str(on), segment_turns=4, action_from_reasoning=on)
+        out = asyncio.run(env.play_segment(task, ThinkingPlayer()))
+        line = json.loads(open(tmp_path / str(on) / "episodes.jsonl").readline())
+        if on:
+            assert line["actions_from_reasoning"] == 4 and not line["forfeits"] and out["trace"].metrics["actions_from_reasoning"] == 4.0
+        else:
+            assert line["actions_from_reasoning"] == 0 and sum(line["forfeits"].values()) == 4

@@ -380,6 +380,17 @@ def parse_action(reply: str) -> tuple[int | None, str | None]:
     return (index, None) if index is not None else (None, "unknown_name")
 
 
+_TRAILING_TAGS = re.compile(r"(?:<action>[^<]*</action>\s*)+$")
+
+
+def trailing_actions(reasoning: str | None) -> str | None:
+    """The <action> tag(s) a reasoning ENDS with, else None: a reply whose thinking closes on its
+    final tag and whose content holds none (11518276: 59 of 148 forfeits, every one a single tag
+    at the very end). A tag mentioned earlier in the reasoning does not count."""
+    match = _TRAILING_TAGS.search(reasoning or "")
+    return match.group(0) if match else None
+
+
 def parse_actions(reply: str, max_actions: int) -> tuple[list[int], str | None, int]:
     """Up to ``max_actions`` actions from the final run of consecutive <action> tags after
     the last </think> (only whitespace between them): (indices, failure, dropped). The run

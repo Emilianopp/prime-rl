@@ -181,6 +181,10 @@ class CraftaxEnvConfig(vf.EnvConfig):
     """Output cap for the notes turn only (cut to what the context still holds)."""
     summary_prompt: str | None = None
     """Overrides the default notes request (segments.SUMMARY_PROMPT)."""
+    action_from_reasoning: bool = False
+    """Play the action tag(s) a reply's reasoning ends with when its content holds no tag (the
+    model closed its thinking on the final tag). False: such a turn is forfeited (GlyphBench reads
+    the content only). Counted as `actions_from_reasoning`."""
     exploration_aid: bool = False
     """Show GlyphBench's [Exploration Aid] (navigation.py: visits, recent route, frontiers, last-seen
     features on this floor, computed from the observations) after every observation, as its Pro harness
@@ -664,6 +668,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example, aid())
         total, done, end = 0.0, False, "terminated"  # terminated: the run stopped answering
         forfeits: Counter[str] = Counter()
+        from_reasoning = 0  # action_from_reasoning: turns played from the tag the reasoning ended with
         actions: Counter[str] = Counter()
         turns = 0  # model replies; each plays up to max_actions actions (game steps)
         per_turn: Counter[int] = Counter()  # actions played per reply
@@ -688,6 +693,13 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     break
                 turns += 1
                 indices, failure, dropped = glyph.parse_actions(segment.last_reply, max_actions)
+                if not indices and cfg.action_from_reasoning:
+                    tail = glyph.trailing_actions(reply_parts(segment, interaction.trace)[1])
+                    if tail:
+                        rescued = glyph.parse_actions(tail, max_actions)
+                        if rescued[0]:
+                            indices, failure, dropped = rescued
+                            from_reasoning += 1
                 if adherence is not None:
                     adherence.reply(*reply_parts(segment, interaction.trace)[:2])
                 if not indices:
@@ -917,6 +929,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "achievement_score": game.achievement_score,
                 "deaths": float(len(deaths)),
                 "forfeits": float(sum(forfeits.values())),
+                "actions_from_reasoning": float(from_reasoning),
                 "survived": 1.0 if game.health > 0 else 0.0,
                 "max_floor": float(max_floor),
                 "turns": float(turns),
@@ -987,6 +1000,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "actions_played": sum(actions.values()),
                 "actions_per_turn": {str(k): v for k, v in sorted(per_turn.items())},
                 "forfeits": dict(forfeits),
+                "actions_from_reasoning": from_reasoning,
                 **tracker.log(),
                 "actions": dict(actions),
                 "ended_by": end,
