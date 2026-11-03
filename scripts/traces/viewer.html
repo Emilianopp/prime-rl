@@ -1,0 +1,393 @@
+<meta charset="utf-8">
+<title>Trace Inspector</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: run bar on top; episode list left, selected trace right (charts, context map, dialogue); stacks below 1000px. */
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --line: #dfe3ea; --fg: #18202c; --muted: #5d6878; --faint: #eef1f5;
+  --accent: #0f6f6a; --accent-soft: #d8efed;
+  --sys: #64748b; --env: #2563eb; --env-soft: #e3ecfd; --agent: #b45309; --agent-soft: #fbeedd;
+  --think: #7c3aed; --think-soft: #efe8fd; --evict: #d03030; --evict-soft: #fbe4e4; --ok: #15803d; --bad: #c2410c;
+  --model-bar: #b45309; --env-bar: #2563eb;
+  --sans: "Instrument Sans", "Segoe UI", system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #11151b; --panel: #171c24; --line: #2a313c; --fg: #e5e9ef; --muted: #98a2b1; --faint: #1d232c;
+  --accent: #4fc3b8; --accent-soft: #163633;
+  --sys: #94a3b8; --env: #7aa7ff; --env-soft: #1a2640; --agent: #f0a54a; --agent-soft: #33261a;
+  --think: #b399ff; --think-soft: #2a2140; --evict: #ff6b6b; --evict-soft: #3a1d1f; --ok: #4ade80; --bad: #fb923c;
+  --model-bar: #f0a54a; --env-bar: #7aa7ff; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #11151b; --panel: #171c24; --line: #2a313c; --fg: #e5e9ef; --muted: #98a2b1; --faint: #1d232c;
+  --accent: #4fc3b8; --accent-soft: #163633;
+  --sys: #94a3b8; --env: #7aa7ff; --env-soft: #1a2640; --agent: #f0a54a; --agent-soft: #33261a;
+  --think: #b399ff; --think-soft: #2a2140; --evict: #ff6b6b; --evict-soft: #3a1d1f; --ok: #4ade80; --bad: #fb923c;
+  --model-bar: #f0a54a; --env-bar: #7aa7ff; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); }
+.wrap { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 14px 40px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; padding-bottom: 12px; border-bottom: 1px solid var(--line); margin-bottom: 14px }
+h1 { font-size: 19px; font-weight: 700; margin: 0; letter-spacing: -0.01em }
+.runpick { display: flex; gap: 6px; flex-wrap: wrap }
+.runpick button { font: 600 12px var(--sans); padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer }
+.runpick button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--bg) }
+.runmeta { color: var(--muted); font-size: 12.5px; display: flex; gap: 4px 14px; flex-wrap: wrap }
+.runmeta b { color: var(--fg); font-weight: 600 }
+.grid { display: grid; grid-template-columns: minmax(300px, 420px) minmax(0, 1fr); gap: 16px; align-items: start }
+@media (max-width: 1000px) { .grid { grid-template-columns: minmax(0, 1fr) } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 0 }
+.eplist { position: sticky; top: env(safe-area-inset-top, 0px); max-height: calc(100vh - 24px); display: flex; flex-direction: column }
+@media (max-width: 1000px) { .eplist { position: static; max-height: 420px } }
+.filters { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; align-items: center }
+.filters input[type=search] { flex: 1 1 140px; min-width: 0; font: 13px var(--sans); padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg) }
+.filters label { font-size: 12px; color: var(--muted); display: flex; gap: 4px; align-items: center }
+.tablewrap { overflow: auto; min-height: 0 }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums }
+th { position: sticky; top: 0; background: var(--panel); text-align: left; font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding: 6px 8px; border-bottom: 1px solid var(--line); cursor: pointer; white-space: nowrap; user-select: none }
+td { padding: 5px 8px; border-bottom: 1px solid var(--faint); white-space: nowrap }
+td.task { max-width: 190px; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 11.5px }
+tr.has { cursor: pointer }
+tr.has:hover td { background: var(--faint) }
+tr.sel td { background: var(--accent-soft) }
+tr.nofull td { color: var(--muted) }
+.num { text-align: right }
+.pill { display: inline-block; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 18px }
+.pill.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok) }
+.pill.bad { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad) }
+.pill.mid { background: var(--faint); color: var(--muted) }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 5px; vertical-align: 1px }
+.main { display: flex; flex-direction: column; gap: 14px; min-width: 0 }
+.card { padding: 12px 14px }
+.card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; font-weight: 600 }
+.tracehead { display: flex; flex-wrap: wrap; gap: 8px 22px; align-items: baseline }
+.tracehead .task { font: 600 14px var(--mono); overflow-wrap: anywhere }
+.stats { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums }
+.stats b { color: var(--fg); font-weight: 600 }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px }
+.chart svg { width: 100%; height: auto; display: block }
+.legend { display: flex; gap: 12px; font-size: 11.5px; color: var(--muted); flex-wrap: wrap; margin-top: 4px }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px }
+.cmapwrap { overflow-y: auto; max-height: 340px; border: 1px solid var(--faint); border-radius: 6px }
+canvas#cmap { display: block; width: 100%; cursor: pointer }
+.dialog { display: flex; flex-direction: column; gap: 8px }
+.msg { border: 1px solid var(--line); border-left: 3px solid var(--sys); border-radius: 6px; padding: 8px 10px; background: var(--panel); min-width: 0; content-visibility: auto; contain-intrinsic-size: auto 90px }
+.msg.user, .msg.tool { border-left-color: var(--env) }
+.msg.assistant { border-left-color: var(--agent) }
+.msg.evicted { background: repeating-linear-gradient(135deg, var(--panel) 0 8px, var(--evict-soft) 8px 10px) }
+.msg.flash { outline: 2px solid var(--accent); outline-offset: 2px }
+.mhead { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 11.5px; color: var(--muted); margin-bottom: 4px; font-variant-numeric: tabular-nums }
+.role { font-weight: 700; text-transform: uppercase; letter-spacing: .05em; font-size: 10.5px }
+.msg.user .role, .msg.tool .role { color: var(--env) } .msg.assistant .role { color: var(--agent) } .msg.system .role { color: var(--sys) }
+.chip { padding: 0 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; line-height: 17px }
+.chip.ev { background: var(--evict-soft); color: var(--evict) }
+.chip.rc0 { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok) }
+.chip.rcx { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad) }
+.chip.t { background: var(--faint); color: var(--muted) }
+.text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px }
+pre { margin: 6px 0 0; padding: 8px 10px; background: var(--faint); border-radius: 5px; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto }
+.call { font: 600 11.5px var(--mono); color: var(--agent); margin-top: 6px }
+pre.cmd { background: var(--agent-soft); border: 1px solid color-mix(in srgb, var(--agent) 30%, transparent) }
+details { margin-top: 4px } summary { cursor: pointer; font-size: 12px; color: var(--muted) }
+details.think pre { background: var(--think-soft) }
+.more { align-self: center; font: 600 12.5px var(--sans); padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 14px; font-size: 12.5px; font-variant-numeric: tabular-nums }
+.kv span:nth-child(odd) { color: var(--muted); font-family: var(--mono); font-size: 11.5px }
+.kv span:nth-child(even) { overflow-wrap: anywhere }
+.empty { padding: 40px 16px; text-align: center; color: var(--muted) }
+button:focus-visible, input:focus-visible, tr:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px }
+.hint { font-size: 11.5px; color: var(--muted) }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Trace Inspector</h1>
+    <div class="runpick" id="runpick" role="group" aria-label="Runs"></div>
+    <div class="runmeta" id="runmeta"></div>
+  </header>
+  <div class="grid">
+    <section class="panel eplist" aria-label="Episodes">
+      <div class="filters">
+        <input type="search" id="q" placeholder="Filter by task or field" aria-label="Filter episodes">
+        <label><input type="checkbox" id="onlyfull" checked> with dialogue</label>
+      </div>
+      <div class="tablewrap"><table id="eptable"><thead></thead><tbody></tbody></table></div>
+    </section>
+    <section class="main" id="main"><div class="panel empty">Pick an episode on the left.</div></section>
+  </div>
+</div>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const RUNS = JSON.parse(document.getElementById("data").textContent);
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const fmt = (x, d = 1) => x == null || Number.isNaN(x) ? "–" : (typeof x === "number" ? (Number.isInteger(x) ? x.toLocaleString() : x.toFixed(d)) : x);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+/* Env plugins: how to read a message, and which info fields belong in the episode table.
+   Any env without one gets the generic view: plain text, every info field in the detail panel. */
+const PLUGINS = {
+  tinyswe: {
+    columns: [["repo", r => String(r.task || "").split(".")[0]], ["solved", r => r.info["tinyswe.solved"]], ["submitted", r => r.info["tinyswe.submitted"]]],
+    assistant(text) {
+      const m = text.match(/```(?:bash|sh)\s*\n([\s\S]*?)```/);
+      if (!m) return `<div class="text">${esc(text)}</div>`;
+      const before = text.slice(0, m.index).trim(), after = text.slice(m.index + m[0].length).trim();
+      return (before ? `<div class="text">${esc(before)}</div>` : "") + `<pre class="cmd">${esc(m[1].trimEnd())}</pre>` + (after ? `<div class="text">${esc(after)}</div>` : "");
+    },
+    user(text) {
+      const rc = text.match(/^<returncode>(-?\d+)<\/returncode>\s*<output>\n?([\s\S]*?)<\/output>([\s\S]*)$/);
+      if (!rc) return null;
+      const lines = rc[2].split("\n").length;
+      const body = `<pre>${esc(rc[2].trimEnd()) || "<span class='hint'>(no output)</span>"}</pre>`;
+      return { chip: `<span class="chip ${rc[1] === "0" ? "rc0" : "rcx"}">rc ${rc[1]}</span>`,
+               html: (lines > 25 ? `<details><summary>output · ${lines} lines</summary>${body}</details>` : body) + (rc[3].trim() ? `<div class="hint">${esc(rc[3].trim())}</div>` : "") };
+    },
+  },
+  crafter: {
+    columns: [["ach", r => r.info["crafter.achievements"] ?? r.info["achievements"]]],
+    user(text) {
+      const st = text.match(/^Step: (\d+)/m);
+      return st ? { chip: `<span class="chip t">step ${st[1]}</span>`, html: `<pre>${esc(text)}</pre>` } : null;
+    },
+  },
+};
+
+let run = 0, sortKey = "i", sortDir = 1, selected = null;
+
+function renderRunPicker() {
+  $("#runpick").innerHTML = RUNS.map((d, i) => `<button aria-pressed="${i === run}" data-i="${i}">${esc(d.label || d.run.env)}</button>`).join("");
+  $("#runpick").onclick = e => { const b = e.target.closest("button"); if (b) { run = +b.dataset.i; selected = null; sortKey = "i"; renderRun(); } };
+}
+
+function renderRun() {
+  renderRunPicker();
+  const r = RUNS[run].run;
+  const stops = Object.entries(r.stops || {}).map(([k, v]) => `${esc(k)} ${v}`).join(", ");
+  $("#runmeta").innerHTML = [["env", r.env], ["model", r.model], ["episodes", fmt(r.episodes)], ["mean reward", fmt(r.reward_mean, 3)],
+    ["mean turns", fmt(r.turns_mean)], ["with dialogue", fmt(r.shown)], ["stop", stops], ["run", r.run]]
+    .map(([k, v]) => `<span>${k} <b>${esc(v)}</b></span>`).join("");
+  renderTable();
+  const first = RUNS[run].episodes.find(e => e.t);
+  if (first) selectEp(first.i);
+}
+
+function columns() {
+  const env = RUNS[run].run.env, p = PLUGINS[env];
+  const base = [["i", "#", r => r.i], ["task", "task", r => r.task], ["reward", "reward", r => r.reward], ["turns", "turns", r => r.turns],
+    ["tok", "tokens", r => r.in_tok + r.out_tok], ["dur", "sec", r => r.dur]];
+  const extra = p?.columns ? p.columns.map(([k, f]) => [k, k, f]) : [];
+  return base.concat(extra);
+}
+
+function cell(k, v) {
+  if (k === "reward") return `<td class="num"><span class="pill ${v > 0 ? "ok" : v < 0 ? "bad" : "mid"}">${fmt(v, 2)}</span></td>`;
+  if (typeof v === "boolean") return `<td><span class="pill ${v ? "ok" : "mid"}">${v ? "yes" : "no"}</span></td>`;
+  if (k === "task") return `<td class="task" title="${esc(v)}">${esc(v)}</td>`;
+  return `<td class="${typeof v === "number" ? "num" : ""}">${esc(fmt(v))}</td>`;
+}
+
+function renderTable() {
+  const cols = columns(), q = $("#q").value.trim().toLowerCase(), only = $("#onlyfull").checked;
+  const head = cols.map(([k, label]) => `<th data-k="${k}" aria-sort="${sortKey === k ? (sortDir > 0 ? "ascending" : "descending") : "none"}">${label}${sortKey === k ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`).join("");
+  $("#eptable thead").innerHTML = `<tr>${head}</tr>`;
+  const f = Object.fromEntries(cols.map(c => [c[0], c[2]]));
+  let rows = RUNS[run].episodes.filter(r => (!only || r.t) && (!q || JSON.stringify([r.task, r.id, r.info, r.stop]).toLowerCase().includes(q)));
+  rows.sort((a, b) => { const x = f[sortKey](a), y = f[sortKey](b); return (x > y ? 1 : x < y ? -1 : 0) * sortDir; });
+  $("#eptable tbody").innerHTML = rows.map(r => `<tr class="${r.t ? "has" : "nofull"} ${selected === r.i ? "sel" : ""}" data-i="${r.i}" ${r.t ? 'tabindex="0"' : ""}>` +
+    cols.map(([k, , g]) => k === "i" ? `<td class="num">${r.t ? '<span class="dot" title="dialogue saved"></span>' : ""}${r.i}</td>` : cell(k, g(r))).join("") + "</tr>").join("")
+    || `<tr><td colspan="${cols.length}" class="empty">No episodes match.</td></tr>`;
+}
+
+$("#eptable").addEventListener("click", e => {
+  const th = e.target.closest("th");
+  if (th) { const k = th.dataset.k; sortDir = sortKey === k ? -sortDir : (k === "i" || k === "task" ? 1 : -1); sortKey = k; renderTable(); return; }
+  const tr = e.target.closest("tr.has"); if (tr) selectEp(+tr.dataset.i);
+});
+$("#eptable").addEventListener("keydown", e => { const tr = e.target.closest("tr.has"); if (tr && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); selectEp(+tr.dataset.i); } });
+$("#q").addEventListener("input", renderTable);
+$("#onlyfull").addEventListener("change", renderTable);
+
+function selectEp(i) {
+  selected = i;
+  renderTable();
+  const ep = RUNS[run].episodes.find(e => e.i === i);
+  renderTrace(ep, RUNS[run].traces[ep.t[0]]);
+}
+
+/* call index k -> its prompt's end position (the sampled node's start); eviction `at` is a position */
+function callPositions(tr) { return tr.calls.map(c => tr.msgs[c[0]] ? tr.msgs[c[0]][1] : tr.ntok); }
+function callAt(pos, cp) { let k = cp.findIndex(p => p >= pos); return k < 0 ? cp.length - 1 : k; }
+/* tokens below position P that evictions at or before P removed (spans may overlap: merge them) */
+function evictedBy(ev, P) {
+  const sp = ev.filter(e => e[0] <= P).map(e => [e[1], Math.min(e[2], P)]).filter(s => s[1] > s[0]).sort((a, b) => a[0] - b[0]);
+  let n = 0, cur = -1;
+  for (const [s, e] of sp) { const a = Math.max(s, cur); if (e > a) { n += e - a; cur = e; } }
+  return n;
+}
+
+function renderTrace(ep, tr) {
+  const cp = callPositions(tr), env = RUNS[run].run.env, plug = PLUGINS[env] || {};
+  const model = tr.calls.map(c => c[2] - c[1]);
+  const envT = tr.calls.map((c, k) => k + 1 < tr.calls.length ? Math.max(0, tr.calls[k + 1][1] - c[2]) : null);
+  const evTok = tr.ev.reduce((s, e) => s + (e[2] - e[1]), 0);
+  const sum = a => a.filter(x => x != null).reduce((s, x) => s + x, 0);
+  const rew = Object.entries(tr.rewards || {}).map(([k, v]) => `${k} ${fmt(v.score, 2)}`).join(", ");
+  const live = tr.calls.map(c => c[3]);
+  const liveCtx = cp.map(P => P - evictedBy(tr.ev, P));
+  $("#main").innerHTML = `
+    <div class="panel card">
+      <div class="tracehead"><span class="task">${esc(ep.task)}</span><span class="pill ${ep.reward > 0 ? "ok" : "mid"}">reward ${fmt(ep.reward, 2)}</span></div>
+      <div class="stats" style="margin-top:6px">
+        <span><b>${tr.calls.length}</b> model calls</span><span><b>${fmt(tr.ntok)}</b> tokens written</span>
+        <span><b>${fmt(Math.max(...live.filter(x => x != null)))}</b> largest prompt</span>
+        <span><b>${tr.ev.length}</b> eviction spans · <b>${fmt(evTok)}</b> tokens evicted</span>
+        <span>model <b>${fmt(sum(model))} s</b> · env <b>${fmt(sum(envT))} s</b></span>
+        <span>stop <b>${esc(tr.stop)}</b></span>${rew ? `<span>${esc(rew)}</span>` : ""}
+      </div>
+    </div>
+    <div class="charts">
+      <div class="panel card chart"><h2>Time per turn</h2>${timeChart(model, envT)}
+        <div class="legend"><span><i class="sw" style="background:var(--model-bar)"></i>model (call wall time)</span><span><i class="sw" style="background:var(--env-bar)"></i>env (until the next call)</span></div></div>
+      <div class="panel card chart"><h2>Context per call</h2>${lineChart(liveCtx, live)}
+        <div class="legend"><span><i class="sw" style="background:var(--accent)"></i>live tokens (positions minus evicted)</span><span><i class="sw" style="background:var(--muted)"></i>prompt tokens reported by the call</span></div></div>
+    </div>
+    <div class="panel card"><h2>Context map</h2>
+      <div class="hint" style="margin-bottom:6px">One row per model call, token positions left to right up to that call's prompt. Hatched red: evicted by then. Click a row to jump to its reply.</div>
+      <div class="cmapwrap"><canvas id="cmap" aria-label="Context map"></canvas></div>
+      <div class="legend"><span><i class="sw" style="background:var(--sys)"></i>system</span><span><i class="sw" style="background:var(--env)"></i>env / user</span><span><i class="sw" style="background:var(--agent)"></i>model</span><span><i class="sw" style="background:var(--evict)"></i>evicted</span></div>
+    </div>
+    <div class="panel card"><h2>Episode info</h2><div class="kv">${infoKV(tr)}</div></div>
+    <div class="panel card"><h2>Dialogue</h2><div class="dialog" id="dialog"></div></div>`;
+  drawCmap(tr, cp);
+  renderDialog(tr, cp, plug, 0);
+}
+
+function infoKV(tr) {
+  const flat = {};
+  const walk = (o, p) => { for (const [k, v] of Object.entries(o || {})) { if (["dispatch", "arrival", "kind"].includes(k)) continue; v && typeof v === "object" && !Array.isArray(v) ? walk(v, p + k + ".") : flat[p + k] = v; } };
+  walk(tr.info, ""); walk(tr.rewards, "reward.");
+  if (tr.errors?.length) flat.errors = JSON.stringify(tr.errors).slice(0, 400);
+  return Object.entries(flat).map(([k, v]) => `<span>${esc(k)}</span><span>${esc(typeof v === "object" ? JSON.stringify(v) : fmt(v, 3))}</span>`).join("");
+}
+
+function axisY(max, h, w, pad) {
+  const ticks = [0, max / 2, max];
+  return ticks.map(t => { const y = h - pad.b - (t / max) * (h - pad.t - pad.b);
+    return `<line x1="${pad.l}" x2="${w - pad.r}" y1="${y}" y2="${y}" stroke="var(--faint)"/><text x="${pad.l - 4}" y="${y + 3}" text-anchor="end" font-size="10" fill="var(--muted)">${fmt(t, t < 10 ? 1 : 0)}</text>`; }).join("");
+}
+
+function timeChart(model, envT) {
+  const n = model.length, w = 520, h = 170, pad = {l: 34, r: 6, t: 8, b: 20};
+  const tot = model.map((m, k) => m + (envT[k] || 0));
+  const max = Math.max(...tot, 0.1) * 1.05, bw = (w - pad.l - pad.r) / n;
+  const y = v => (v / max) * (h - pad.t - pad.b);
+  let bars = "";
+  model.forEach((m, k) => {
+    const x = pad.l + k * bw, e = envT[k] || 0;
+    bars += `<rect x="${x + bw * 0.12}" width="${Math.max(bw * 0.76, 1)}" y="${h - pad.b - y(m)}" height="${y(m)}" fill="var(--model-bar)"><title>call ${k + 1}: model ${m.toFixed(2)} s, env ${e.toFixed(2)} s</title></rect>`;
+    bars += `<rect x="${x + bw * 0.12}" width="${Math.max(bw * 0.76, 1)}" y="${h - pad.b - y(m) - y(e)}" height="${y(e)}" fill="var(--env-bar)"><title>call ${k + 1}: model ${m.toFixed(2)} s, env ${e.toFixed(2)} s</title></rect>`;
+  });
+  const xt = [1, Math.ceil(n / 2), n].map(k => `<text x="${pad.l + (k - 0.5) * bw}" y="${h - 5}" text-anchor="middle" font-size="10" fill="var(--muted)">${k}</text>`).join("");
+  return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Seconds per turn">${axisY(max, h, w, pad)}${bars}${xt}<text x="${pad.l}" y="${pad.t + 2}" font-size="10" fill="var(--muted)" dx="4" dy="8">s</text></svg>`;
+}
+
+function lineChart(vals, ref) {
+  const pts = vals.map((v, k) => [k, v]).filter(p => p[1] != null);
+  const rp = (ref || []).map((v, k) => [k, v]).filter(p => p[1] != null);
+  if (!pts.length) return `<div class="hint">No calls.</div>`;
+  const n = vals.length, w = 520, h = 170, pad = {l: 44, r: 8, t: 8, b: 20};
+  const max = Math.max(...pts.map(p => p[1]), ...rp.map(p => p[1]), 1) * 1.08, bw = (w - pad.l - pad.r) / Math.max(n - 1, 1);
+  const X = k => pad.l + k * bw, Y = v => h - pad.b - (v / max) * (h - pad.t - pad.b);
+  const path = ps => ps.map((p, j) => `${j ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+  const d = path(pts), area = d + `L${X(pts.at(-1)[0])},${h - pad.b}L${X(pts[0][0])},${h - pad.b}Z`;
+  const last = pts.at(-1);
+  const xt = [0, Math.floor((n - 1) / 2), n - 1].map(k => `<text x="${X(k)}" y="${h - 5}" text-anchor="middle" font-size="10" fill="var(--muted)">${k + 1}</text>`).join("");
+  return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Tokens per call">${axisY(max, h, w, pad)}` +
+    (rp.length ? `<path d="${path(rp)}" fill="none" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="3 3"/>` : "") +
+    `<path d="${area}" fill="var(--accent-soft)" opacity=".7"/><path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.8"/>` +
+    `<circle cx="${X(last[0])}" cy="${Y(last[1])}" r="3.2" fill="var(--accent)"/>${xt}</svg>`;
+}
+
+function drawCmap(tr, cp) {
+  const cv = $("#cmap"), dpr = window.devicePixelRatio || 1, W = cv.parentElement.clientWidth;
+  const n = tr.calls.length, rowH = n > 120 ? 3 : n > 60 ? 5 : 8, gap = rowH > 4 ? 1 : 0, H = n * (rowH + gap) + 2;
+  cv.width = W * dpr; cv.height = H * dpr; cv.style.height = H + "px";
+  const g = cv.getContext("2d"); g.scale(dpr, dpr);
+  const maxPos = Math.max(...cp, 1), sx = x => (x / maxPos) * W;
+  const color = {system: css("--sys"), user: css("--env"), tool: css("--env"), assistant: css("--agent")}, red = css("--evict");
+  const pat = document.createElement("canvas"); pat.width = pat.height = 6;
+  const pg = pat.getContext("2d"); pg.strokeStyle = red; pg.lineWidth = 1.6; pg.beginPath(); pg.moveTo(0, 6); pg.lineTo(6, 0); pg.stroke();
+  const hatch = g.createPattern(pat, "repeat");
+  const evs = tr.ev.slice().sort((a, b) => a[0] - b[0]);
+  for (let k = 0; k < n; k++) {
+    const y = 1 + k * (rowH + gap), P = cp[k];
+    for (const m of tr.msgs) {
+      if (m[1] >= P) break;
+      g.globalAlpha = 0.85; g.fillStyle = color[m[0]] || color.system;
+      g.fillRect(sx(m[1]), y, Math.max(sx(Math.min(m[1] + m[2], P)) - sx(m[1]), 0.5), rowH);
+    }
+    g.globalAlpha = 1;
+    for (const [at, s, e] of evs) {
+      if (at > P) break;
+      g.fillStyle = css("--panel"); g.fillRect(sx(s), y, Math.max(sx(e) - sx(s), 0.5), rowH);
+      g.fillStyle = hatch; g.fillRect(sx(s), y, Math.max(sx(e) - sx(s), 0.5), rowH);
+    }
+  }
+  cv.onclick = e => {
+    const k = Math.min(n - 1, Math.floor((e.offsetY - 1) / (rowH + gap)));
+    jumpTo(tr.calls[k][0], tr, cp);
+  };
+}
+
+const PAGE = 120;
+function renderDialog(tr, cp, plug, upto) {
+  const box = $("#dialog"), end = Math.min(tr.msgs.length, upto + PAGE);
+  const callOf = new Map(tr.calls.map((c, k) => [c[0], k]));
+  let html = "";
+  for (let j = upto; j < end; j++) {
+    const [role, pos, ntok, evAt, evFrac, text, think, , , calls] = tr.msgs[j];
+    const k = callOf.get(j);
+    let body = null, chip = "";
+    if (role === "assistant" && plug.assistant) body = plug.assistant(text);
+    if (role === "user" && plug.user) { const r = plug.user(text); if (r) { body = r.html; chip = r.chip; } }
+    if (body == null) body = text ? (role === "tool" ? `<pre>${esc(text)}</pre>` : `<div class="text">${esc(text)}</div>`) : "";
+    body += (calls || []).map(([name, args]) => toolCall(name, args)).join("");
+    const evN = Math.round(evFrac * ntok);
+    const evChip = evAt < 0 ? "" : `<span class="chip ev">${evFrac >= 0.999 ? "" : evFrac >= 0.1 ? Math.round(evFrac * 100) + "% " : evN + " tok "}evicted by call ${callAt(evAt, cp) + 1}</span>`;
+    const th = think ? `<details class="think"><summary>reasoning · ${think.length.toLocaleString()} chars</summary><pre>${esc(think)}</pre></details>` : "";
+    html += `<div class="msg ${esc(role)} ${evAt >= 0 && evFrac >= 0.5 ? "evicted" : ""}" id="m${j}"><div class="mhead"><span class="role">${esc(role)}</span>` +
+      (k != null ? `<span class="chip t">call ${k + 1}</span>` : "") + chip + `<span>pos ${pos.toLocaleString()} · ${ntok.toLocaleString()} tok</span>${evChip}</div>${th}${body}</div>`;
+  }
+  const old = $("#more"); if (old) old.remove();
+  box.insertAdjacentHTML("beforeend", html);
+  if (end < tr.msgs.length) {
+    box.insertAdjacentHTML("beforeend", `<button class="more" id="more">Show ${Math.min(PAGE, tr.msgs.length - end)} more of ${(tr.msgs.length - end).toLocaleString()} messages</button>`);
+    $("#more").onclick = () => renderDialog(tr, cp, plug, end);
+  }
+}
+
+/* A function call: Bash shows its command, Edit its old/new strings, other tools their arguments. */
+function toolCall(name, raw) {
+  let a = null;
+  try { a = JSON.parse(raw); } catch (e) {}
+  if (!a || typeof a !== "object") return `<div class="call">${esc(name)}</div><pre class="cmd">${esc(raw)}</pre>`;
+  if (name === "Bash" && a.command) return `<div class="call">Bash${a.timeout ? ` · timeout ${esc(a.timeout)}` : ""}</div><pre class="cmd">${esc(a.command)}</pre>`;
+  if (name === "Edit") return `<div class="call">Edit ${esc(a.file_path)}</div><pre class="cmd">${esc(a.old_string)}\n────────\n${esc(a.new_string)}</pre>`;
+  if (name === "Write") return `<div class="call">Write ${esc(a.file_path)} · ${String(a.content || "").length.toLocaleString()} chars</div><details><summary>content</summary><pre class="cmd">${esc(a.content)}</pre></details>`;
+  const rest = Object.entries(a).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join("  ");
+  return `<div class="call">${esc(name)}</div><pre class="cmd">${esc(rest)}</pre>`;
+}
+
+function jumpTo(j, tr, cp) {
+  let el = document.getElementById("m" + j);
+  while (!el && $("#more")) { $("#more").click(); el = document.getElementById("m" + j); }
+  if (!el) return;
+  el.scrollIntoView({block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"});
+  el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1400);
+}
+
+let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (selected != null) { const ep = RUNS[run].episodes.find(e => e.i === selected); drawCmap(RUNS[run].traces[ep.t[0]], callPositions(RUNS[run].traces[ep.t[0]])); } }, 150); });
+renderRun();
+</script>

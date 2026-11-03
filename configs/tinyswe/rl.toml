@@ -1,0 +1,75 @@
+# tinyswe RL with Qwen3.5-4B, 2 trainer + 2 inference GPUs, one node: fix a planted bug
+# from its issue, mini-swe-agent style (one bash command per reply, 50 commands max, 32k context),
+# reward 1 if every FAIL_TO_PASS and PASS_TO_PASS test passes. Every rollout is a
+# throwaway container of ONE shared image, so the node's CPUs (test runs) are the
+# sandbox budget; scripts/tinyswe/rl.sbatch loads the image and sets up podman.
+#
+#   rl @ configs/tinyswe/rl.toml --inference.sglang.python <SGLang fork venv>/bin/python
+
+max_steps = 10
+seq_len = 34816  # whole episode in one sample: trace cap + one reply + margin
+
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 2
+
+[weight_broadcast]
+type = "filesystem"  # the SGLang backend supports filesystem weight updates only
+
+[model]
+name = "Qwen/Qwen3.5-4B"
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.01
+max_norm = 1.0
+
+[orchestrator]
+batch_size = 256
+
+[orchestrator.train]
+group_size = 8  # 32 tasks x 8 attempts
+
+[orchestrator.concurrency]
+# Dynamic: the controller grows the cap while KV usage is under 0.8 and trims above it.
+# Start below the KV ceiling: episodes grow in place for minutes, so a start above it (384)
+# fills the pool and hard-trims, cancelling half-done episodes. Pinned at 160 with the
+# 1200-slot mamba cache, KV sat at 0.97-0.99 and decode fell to a third. The sandbox
+# ceiling is the node's CPUs (~0.06 cores per episode in the 2026-11-01 load test).
+initial_inflight = 100
+max_inflight = 256
+min_inflight = 4
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = true  # no eviction plan without [compaction]: empty think blocks would collapse replies
+thinking_retention = "all"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 2048
+temperature = 1.0
+
+[[orchestrator.train.source]]
+name = "tinyswe"
+env.taskset.id = "tinyswe-env"
+env.taskset.dataset_path = "/network/scratch/e/emiliano.penaloza/podman-swe-test/tiny-swe/data/tinyswe_v1"
+env.max_episode_steps = 50
+env.player.max_total_tokens = 30720  # + a 2048-token reply = the 32k context
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16
+
+[inference]
+backend = "sglang"
+
+[inference.vllm]  # engine-agnostic fields, translated for SGLang
+max_model_len = 34816  # trace cap + one reply + margin (an observation can push a trace past its cap)
+gpu_memory_utilization = 0.9
+
+[inference.sglang]
+# DeltaNet state slots per engine, 5 per running request in SGLang: 640 covers 128 running.
+# Slots are reserved up front out of the KV budget (1200 took 29.5 of 80 GB per A100 and ran
+# ~25% full; KV got 1.07M tokens), so size them to what the KV pool can actually hold.
+max_mamba_cache_size = 640
+mamba_ssm_dtype = "bfloat16"

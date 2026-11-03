@@ -13,13 +13,16 @@
 #
 # Env: CONFIG (rl toml in REPO), STEPS (max_steps override; default the config's),
 # ENVS (environments/ packages on PYTHONPATH, default textworld_env), REPO
-# (prime-rl checkout, deps/ submodules checked out), VENV, SGLANG_VENV, OUT_ROOT.
+# (prime-rl checkout, deps/ submodules checked out), VENV, SGLANG_VENV, OUT_ROOT,
+# RUN (a fixed run name for a chain of jobs: one output dir, a checkpoint every CKPT_INTERVAL
+# steps (default 1), and each job resumes from the latest complete checkpoint, trainer and
+# orchestrator both; a job that finds none starts the run over), CKPT_INTERVAL, CKPT_KEEP (checkpoints kept, default 2).
 set -u
-CONFIG=${CONFIG:?set CONFIG} STEPS=${STEPS:-} ENVS=${ENVS:-textworld_env}
+CONFIG=${CONFIG:?set CONFIG} STEPS=${STEPS:-} ENVS=${ENVS:-textworld_env} RUN=${RUN:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/rl}/$(basename "$CONFIG" .toml)/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/rl}/$(basename "$CONFIG" .toml)/${RUN:-${SLURM_JOB_ID:-local}}
 mkdir -p "$OUT"
 
 echo "[rl $CONFIG steps=${STEPS:-config}] $(git -C "$REPO" log --oneline -1)" | tee "$OUT/cell.txt"
@@ -40,11 +43,22 @@ rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
 export CUDA_HOME=$($SGL_PY -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13
 
-uv run rl @ "$CONFIG" --clean --output-dir "$OUT/run" --inference.sglang.python "$SGL_PY" \
+START=(--clean)
+if [ -n "$RUN" ]; then
+  START=(--run.name "$RUN" --ckpt.interval "${CKPT_INTERVAL:-1}" --ckpt.keep-last "${CKPT_KEEP:-2}")
+  # Resume from the newest step that holds BOTH halves: a job cut off by its wall clock can leave
+  # the orchestrator's next checkpoint without the trainer's, and a bare --resume picks that
+  # step (FileNotFoundError: .../step_N/trainer) on every later job of the chain.
+  STEP=$(ls -d "$OUT/run/$RUN/checkpoints"/step_* 2>/dev/null | sort -V | while read -r d; do
+    [ -d "$d/trainer" ] && [ -d "$d/orchestrator" ] && basename "$d"; done | tail -1)
+  if [ -n "$STEP" ]; then START+=(--resume.step "${STEP#step_}"); else START+=(--clean); fi
+  echo "run $RUN: ${START[*]} (job ${SLURM_JOB_ID:-local})" | tee -a "$OUT/cell.txt"
+fi
+uv run rl @ "$CONFIG" "${START[@]}" --output-dir "$OUT/run" --inference.sglang.python "$SGL_PY" \
   ${STEPS:+--max-steps "$STEPS"} --rollout-transport.type zmq --rollout-transport.port 5655 > "$OUT/rl.log" 2>&1
 echo "rl exit $?"
 
-L=$(ls -d "$OUT"/run/*/logs/attempt_1 2>/dev/null | head -1)
+L=$(ls -d "$OUT"/run/*/logs/attempt_* 2>/dev/null | sort -V | tail -1)
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 echo "== trainer steps"; grep -a -E "Step [0-9]+ \|" "$L/trainer.log" | strip | cut -c1-300 | tee "$OUT/trainer_steps.txt"
 echo "== orchestrator steps"; grep -a -E "Step [0-9]+ \|" "$L/orchestrator.log" | strip | cut -c1-300 | tee "$OUT/orchestrator_steps.txt"

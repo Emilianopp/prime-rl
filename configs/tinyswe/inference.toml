@@ -1,0 +1,20 @@
+# tinyswe inference for an inference-only smoke/eval: Qwen3.5-4B on SGLang, full context
+# (no eviction, no sessions), one engine per GPU. Paired with configs/tinyswe/eval.toml;
+# scripts/tinyswe/eval.sbatch serves both.
+#
+#   uv run inference @ configs/tinyswe/inference.toml --sglang.python <SGLang fork venv>/bin/python
+
+backend = "sglang"
+
+[server]
+port = 8000
+
+[vllm]  # engine-agnostic fields, translated for SGLang
+model = "Qwen/Qwen3.5-4B"
+data_parallel_size = 1
+max_model_len = 34816  # trace cap + one reply + margin (an observation can push a trace past its cap)
+gpu_memory_utilization = 0.9
+
+[sglang]
+max_mamba_cache_size = 400  # DeltaNet state slots per engine: >= 3 x episodes per engine
+mamba_ssm_dtype = "bfloat16"

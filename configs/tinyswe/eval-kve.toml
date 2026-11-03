@@ -1,0 +1,42 @@
+# tinyswe eval (inference only) under KV-Streams, as configs/crafter/eval-kve.toml: fix a
+# planted bug from its issue, mini-swe-agent style (one bash command per reply), reward 1
+# if every FAIL_TO_PASS and PASS_TO_PASS test passes. Serve configs/tinyswe/inference-kve.toml
+# first; the env needs podman and the tinyswe-store image (scripts/tinyswe/podman_env.sh).
+# scripts/tinyswe/kve_sweep.sbatch runs both at several concurrency levels.
+#
+#   uv run eval @ configs/tinyswe/eval-kve.toml
+
+model = "Qwen/Qwen3.5-4B"
+group_size = 3  # 633 tasks run out in minutes at 128+ in flight: 3 rollouts each
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+# Any admin URL enables releasing each episode's session when it finishes.
+admin_base_url = ["http://localhost:8000/v1"]
+
+[renderer]  # token-in/out with the trace id as session id, as in training
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[concurrency]
+min_inflight = 128
+max_inflight = 128
+
+[sampling]
+max_completion_tokens = 2048
+temperature = 1.0
+
+[[source]]
+name = "tinyswe"
+env.taskset.id = "tinyswe-env"
+env.taskset.dataset_path = "tinyswe_data"
+env.max_episode_steps = 50
+# trace tokens: survivors keep their positions, so this bounds every token the episode
+# wrote, under inference-kve.toml's max_model_len
+env.player.max_total_tokens = 126976
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16
