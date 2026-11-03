@@ -60,7 +60,13 @@ the events say when one was, and the record lists only the stations that still s
 CF_GUIDE = CRAFTAX_GUIDE.replace(
     "The agent's notes and plans write places differently: (row,col) in the 9x11 view it saw when it wrote "
     "them, itself at (4,5), or a direction from itself; code converts each view place to a map place and shows both.",
-    "The agent's notes take their places from KNOWN PLACES, in the same F<floor> (row,col) form.")
+    "The agent's notes take their places from KNOWN PLACES, in the same F<floor> (row,col) form.") + (
+    "\nRules the agent is NOT told (it can only find them out by playing; a finding that states one is "
+    "true): a tree gives 1 wood per DO and then turns into grass, so wood needs one tree per unit; a "
+    "craft needs its table (and furnace) in one of the 8 cells around the player, diagonals included; "
+    "a table costs 2 wood (wood pickaxe or sword 1 wood more, stone ones 1 wood + 1 stone); stone and "
+    "coal need a wood pickaxe, iron a stone pickaxe, diamond an iron pickaxe; DO on grass gives a "
+    "sapling 10% of the time.")
 
 NOTES_JUDGE_PROMPT = """\
 You are grading the notes a language-model agent wrote at the end of one segment of a \
@@ -166,8 +172,9 @@ segment, and code has already checked the plan's feasibility and whether its fir
 the tech tree's critical path. You check only what code cannot: whether each finding is true and \
 useful, whether the first finding explains the largest loss, and whether a plan that leaves the \
 critical path has a reason. The next segment reads these findings as advice from its past self, so \
-a false finding does harm: check every cause against the rules above, the events and the record, \
-and do not accept a rule of the game that the guide does not state. Your verdicts train the agent; \
+a false finding does harm: check every cause against the rules above, the events and the record. \
+A rule the agent discovered is true when the rules above or the events support it; a claim that \
+nothing above supports or contradicts is unsupported, not false. Your verdicts train the agent; \
 grade what the notes would do for the next segment, not the prose."""
 
 CF_RUBRIC = """\

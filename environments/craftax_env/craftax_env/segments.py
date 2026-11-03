@@ -121,7 +121,7 @@ FINDINGS:
 2. Turn 41: make_stone_pickaxe failed because I had used my last wood on a sword -> keep 1 wood for each craft (in PLAN 1)
 3. Turns 60-75: zombies hit me on open grass at night far from the table -> be at the table by dusk (in SURVIVAL 2)
 PLAN:
-1. 2 wood at the tree F0 (22,31), going by the south shore of the lake - done when Wood:2
+1. 2 wood from the trees near F0 (22,31), going by the south shore of the lake - done when Wood:2
 2. make_stone_pickaxe at the table F0 (25,30) - done when the HUD shows a stone pickaxe
 3. collect_iron at F0 (14,36) - done when Iron:1
 SURVIVAL:
