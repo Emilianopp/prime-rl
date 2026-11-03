@@ -21,16 +21,18 @@
 # mode), STEPS (turns per episode, default the eval config's 50), GROUP (rollouts per task, default
 # the eval config's: 633 tasks run out within a level at >= 128 in flight), HARNESS (leaf: FrogNano's
 # Leaf tools, leaf-harness, instead of one bash block per reply), DP (engines, default 4: one per
-# GPU of the allocation), EXTRA ("key = value; ..." lines added to the eval source, e.g.
+# GPU of the allocation), CONC_MIN (adaptive concurrency: each level's value is the in-flight CEILING
+# and the orchestrator's controller sizes in-flight episodes from engine KV pressure down to CONC_MIN,
+# starting from its own derived value; unset pins every level at its value), EXTRA ("key = value; ..." lines added to the eval source, e.g.
 # "env.memory_mb = 4096"), TINYSWE_EXTRA_TARS (podman_env.sh: more images, for SWE-smith data), MAMBA_SLOTS (DeltaNet
 # slots per engine, >= 3 x in-flight episodes per engine), DATA, REPO, VENV, SGLANG_VENV, OUT_ROOT.
 set -u
-LEVELS=${LEVELS:-32 64 128 192} LEVEL_MIN=${LEVEL_MIN:-20} KEEP=${KEEP:-8} THINKING=${THINKING:-} STEPS=${STEPS:-} GROUP=${GROUP:-} HARNESS=${HARNESS:-} DP=${DP:-} EXTRA=${EXTRA:-} MAMBA_SLOTS=${MAMBA_SLOTS:-}
+LEVELS=${LEVELS:-32 64 128 192} LEVEL_MIN=${LEVEL_MIN:-20} KEEP=${KEEP:-8} THINKING=${THINKING:-} STEPS=${STEPS:-} GROUP=${GROUP:-} HARNESS=${HARNESS:-} DP=${DP:-} EXTRA=${EXTRA:-} CONC_MIN=${CONC_MIN:-} MAMBA_SLOTS=${MAMBA_SLOTS:-}
 REPO=${REPO:-$SCRATCH/kv-race/prl-tinyswe-wt}
 VENV=${VENV:-$SCRATCH/kv-race/prime-rl-kvs/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
 DATA=${DATA:-$SCRATCH/podman-swe-test/tiny-swe/data/tinyswe_v1}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/tinyswe_sweep}/r${KEEP}${HARNESS:+_$HARNESS}${THINKING:+_thinking}${STEPS:+_steps$STEPS}${GROUP:+_g$GROUP}/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/tinyswe_sweep}/r${KEEP}${HARNESS:+_$HARNESS}${CONC_MIN:+_adaptive$CONC_MIN}${THINKING:+_thinking}${STEPS:+_steps$STEPS}${GROUP:+_g$GROUP}/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY
@@ -83,10 +85,12 @@ for CONC in $LEVELS; do
   [ "$HARNESS" = leaf ] && sed -i -e 's/^env.player.harness.id = .*/env.player.harness.id = "leaf-harness"/' \
     -e 's|^env.episode_log = .*|&\nenv.taskset.harness = "leaf"|' "$L/eval.toml"
   [ "$KEEP" = full ] && sed -i -e '/^admin_base_url/d' -e 's/^env.player.max_total_tokens = .*/env.player.max_total_tokens = 30720/' "$L/eval.toml"
+  INIT=(--concurrency.initial-inflight "$CONC")
+  [ -n "$CONC_MIN" ] && INIT=()  # adaptive: the controller derives its own starting point and ramps
   t0=$(date +%s)
   timeout --signal=INT --kill-after=60 "${LEVEL_MIN}m" uv run eval @ "$L/eval.toml" --clean --output-dir "$L/run" --dashboard false \
-    --select.limit "$N_TASKS" --concurrency.min-inflight "$CONC" --concurrency.max-inflight "$CONC" \
-    --concurrency.initial-inflight "$CONC" > "$L/eval.log" 2>&1
+    --select.limit "$N_TASKS" --concurrency.min-inflight "${CONC_MIN:-$CONC}" --concurrency.max-inflight "$CONC" \
+    "${INIT[@]}" > "$L/eval.log" 2>&1
   echo "level $CONC exit $? $(( $(date +%s) - t0 )) s, episodes $(wc -l < "$L/episodes.jsonl" 2>/dev/null || echo 0)"
   printf "%s\t%s\t%s\n" "$CONC" "$t0" "$(date +%s)" >> "$OUT/levels.tsv"
   $TINYSWE_PODMAN rm -af -t 0 > /dev/null 2>&1  # sandboxes of episodes the timeout cut off
