@@ -353,12 +353,20 @@ def test_turns_lost_counts():
     t.observe("MAKE_WOOD_PICKAXE", "MAKE_WOOD_PICKAXE: nothing made: needs a table within one step.", snap(), snap())
     t.observe("NOOP", "NOOP: no visible effect.", snap(), snap())
     t.forfeit("no <action> tag")
-    assert t.total == 7
+    drink = {"vitals": {"food": 5, "drink": 4, "energy": 5}}
+    t.observe("DO", "DO: no effect on water; drink 4→5.", {**snap(), **drink}, {**snap(), "vitals": {"food": 5, "drink": 5, "energy": 5}})
+    assert t.total == 7  # drinking is useful
+    for a, b in [((5, 5), (5, 6)), ((5, 6), (5, 7)), ((5, 7), (5, 6)), ((5, 6), (5, 5)), ((5, 5), (5, 6))]:  # pacing
+        t.observe("MOVE_RIGHT", "MOVE_RIGHT: moved.", snap(pos=a), snap(pos=b))
     kinds = {k: n for k, n, _ in t.by_kind()}
-    assert kinds == {"bump": 1, "turn": 1, "do": 1, "build": 2, "idle": 1, "forfeit": 1}
-    assert t.by_kind()[0][0] == "build"  # the largest first
-    text = t.text(10)
-    assert text.startswith("TURNS LOST in the previous segment (counted by the game): 7 of 10 turns")
+    assert kinds == {"bump": 1, "turn": 1, "do": 1, "build": 2, "idle": 1, "forfeit": 1, "revisit": 3}
+    t.observe("DO", "DO: used on tree: wood +1 (now 2).", snap(), snap())  # a useful action resets the walk
+    t.observe("MOVE_LEFT", "MOVE_LEFT: moved.", snap(pos=(5, 6)), snap(pos=(5, 5)))
+    assert t.total == 10
+    assert t.by_kind()[0][0] == "revisit"  # the largest first
+    text = t.text(20)
+    assert text.startswith("TURNS LOST in the previous segment (counted by the game): 10 of 20 turns")
+    assert "- 3 moves back to a cell already visited" in text and "F0 (5,6) x2" in text
     assert "- 2 failed crafts and placements: MAKE_WOOD_PICKAXE: nothing made: needs a table within one step x2" in text
     assert "nothing collected: stone needs a wood pickaxe x1" in text  # the vitals' change is dropped
     assert count_findings(["1. a", "2) b", "more prose"]) == 2 and count_findings(["none"]) == 0

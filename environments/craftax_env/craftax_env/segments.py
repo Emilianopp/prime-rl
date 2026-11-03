@@ -153,6 +153,7 @@ LOST_KINDS = {
     "forfeit": "forfeited turns (no action played)",
     "bump": "moves into a blocked cell that did not even turn you",
     "turn": "turns in place that the next action did not use",
+    "revisit": "moves back to a cell already visited since your last useful action (back and forth)",
     "do": "DO with no effect",
     "build": "failed crafts and placements",
     "idle": "NOOP or no visible effect",
@@ -162,11 +163,15 @@ LOST_KINDS = {
 class TurnsLost:
     """Turns that changed nothing, counted from the game's own feedback, by kind and detail. A blocked
     move that turns the player is a turn in place: lost unless the next action uses it (a DO, a craft,
-    a placement that does something); a move on, or another turn, means it was not."""
+    a placement that does something); a move on, or another turn, means it was not. A move back to a
+    cell already visited since the last useful action is lost too (pacing back and forth); a useful
+    action, a floor change or a respawn starts the count of visited cells again. Eating, drinking and
+    sleeping (food, drink or energy up) are useful."""
 
     def __init__(self) -> None:
         self.counts: dict[tuple[str, str], int] = {}
         self._turned: str | None = None  # the pending turn in place
+        self._visited: set | None = None  # cells walked through since the last useful action
 
     def add(self, kind: str, detail: str, n: int = 1) -> None:
         self.counts[(kind, detail)] = self.counts.get((kind, detail), 0) + n
@@ -185,25 +190,36 @@ class TurnsLost:
         what = text.split(": ", 1)[1] if ": " in text else text
         what = what.rstrip(".").split("; ")[0]  # drop the vitals' changes
         if after["floor"] != before["floor"]:
-            self._turned = None
+            self._turned = self._visited = None
             return
         if name.startswith("MOVE_"):
             self._flush()  # moving on (or turning again) did not use the last turn
-            if after["pos"] == before["pos"]:
+            pos, start = tuple(after["pos"]), tuple(before["pos"])
+            if pos == start:
                 if after["facing"] == before["facing"]:
                     self.add("bump", what)
                 else:
                     self._turned = what
+                return
+            if self._visited is None or (abs(pos[0] - start[0]) + abs(pos[1] - start[1]) > 1):  # a respawn jump
+                self._visited = {start}
+            if pos in self._visited:
+                self.add("revisit", f"F{after['floor']} ({pos[0]},{pos[1]})")
+            self._visited.add(pos)
             return
+        vb, va = before.get("vitals") or {}, after.get("vitals") or {}
+        refreshed = any(va.get(k, 0) > vb.get(k, 0) for k in ("food", "drink", "energy"))
         lost = None
-        if name == "DO" and what.startswith(("no effect", "nothing collected")):
+        if refreshed:
+            pass
+        elif name == "DO" and what.startswith(("no effect", "nothing collected")):
             lost = ("do", what)
         elif what.startswith(("nothing made", "nothing placed")):
             lost = ("build", f"{name}: {what}")
         elif name == "NOOP" or what.startswith(("no visible effect", "no effect")):
             lost = ("idle", name)
         if lost is None:
-            self._turned = None  # this action used the turn
+            self._turned = self._visited = None  # this action used the turn, and the walk to it
         else:
             self._flush()
             self.add(*lost)
