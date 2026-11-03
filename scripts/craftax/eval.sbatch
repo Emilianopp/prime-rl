@@ -88,6 +88,9 @@ echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_T
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
 export CUDA_HOME=$($SGL_PY -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13
 
+# A free port per job (PORT=... to force one): on a shared node another user's server can hold 8000, and
+# the health check below would take it for ours (job 11518234: "Model ... was not found in the inference pool").
+PORT=${PORT:-$($VENV/bin/python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}
 if [ "$KEEP" = full ]; then
   sed '/^\[sglang.eviction\]/,$d' configs/crafter/inference-kve.toml > "$OUT/inference.toml"
   EVICT=()
@@ -95,19 +98,19 @@ else
   cp configs/crafter/inference-kve.toml "$OUT/inference.toml"
   EVICT=(--sglang.eviction.max-turns "$KEEP")
 fi
-sed -i "s/^data_parallel_size = .*/data_parallel_size = $GPUS/" "$OUT/inference.toml"
+sed -i "s/^data_parallel_size = .*/data_parallel_size = $GPUS/; s/^port = .*/port = $PORT/" "$OUT/inference.toml"
 [ -n "$MAMBA_SLOTS" ] && sed -i "s/^max_mamba_cache_size = .*/max_mamba_cache_size = $MAMBA_SLOTS  # MAMBA_SLOTS/" "$OUT/inference.toml"
 uv run inference @ "$OUT/inference.toml" --sglang.python "$SGL_PY" "${EVICT[@]}" > "$OUT/inference.log" 2>&1 &
 INFER=$!
 for _ in $(seq 120); do
-  curl -sf -m 5 http://localhost:8000/health > /dev/null && break
+  curl -sf -m 5 http://localhost:$PORT/health > /dev/null && break
   kill -0 $INFER 2>/dev/null || { echo "inference died"; tail -30 "$OUT/inference.log"; exit 1; }
   sleep 10
 done
-curl -sf -m 5 http://localhost:8000/health > /dev/null || { echo "inference not up after 20 min"; tail -30 "$OUT/inference.log"; pkill -u "$USER" -f "$SLURM_TMPDIR/sgl-venv/"; exit 1; }
-echo "inference up $(date +%T)"
+curl -sf -m 5 http://localhost:$PORT/health > /dev/null || { echo "inference not up after 20 min"; tail -30 "$OUT/inference.log"; pkill -u "$USER" -f "$SLURM_TMPDIR/sgl-venv/"; exit 1; }
+echo "inference up $(date +%T) on port $PORT"
 
-( while sleep 30; do curl -s -m 5 http://localhost:8000/metrics | grep "^kvs:" > "$OUT/kvs.prom.tmp" && mv "$OUT/kvs.prom.tmp" "$OUT/kvs.prom"; done ) &
+( while sleep 30; do curl -s -m 5 http://localhost:$PORT/metrics | grep "^kvs:" > "$OUT/kvs.prom.tmp" && mv "$OUT/kvs.prom.tmp" "$OUT/kvs.prom"; done ) &
 POLL=$!
 # utilization.gpu is the share of time any kernel runs, not SM occupancy: it stayed >= 90% with 15
 # of 128 episodes left (job 11468460). SM occupancy / DRAM counters (DCGM, ncu) are admin-only on
@@ -121,7 +124,7 @@ CPUMON=$!
 EVAL_TOML=configs/craftax/eval.toml
 [ -n "$CONTINUOUS" ] && EVAL_TOML=configs/craftax/eval-continuous.toml
 [ -n "$TREE_DEPTH" ] && EVAL_TOML=configs/craftax/eval-tree.toml
-sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"|" "$EVAL_TOML" > "$OUT/eval.toml"
+sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"|; s|localhost:8000|localhost:$PORT|g" "$EVAL_TOML" > "$OUT/eval.toml"
 sed -i "s/^max_completion_tokens = .*/max_completion_tokens = $TURN_TOKENS/; s/^env.taskset.max_output_tokens = [0-9]*/env.taskset.max_output_tokens = $TURN_TOKENS/" "$OUT/eval.toml"
 [ -n "$FEEDBACK" ] && sed -i "s|^env.max_episode_steps = .*|&\nenv.action_feedback = true|" "$OUT/eval.toml"
 [ -n "$MAX_ACTIONS" ] && sed -i "s|^env.taskset.split = .*|&\nenv.taskset.max_actions_per_turn = $MAX_ACTIONS|" "$OUT/eval.toml"
