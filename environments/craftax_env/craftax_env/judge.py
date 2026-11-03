@@ -147,26 +147,40 @@ nearest features: {nearest}
 
 
 # --- code_facts: the judge grades only what code cannot ------------------------------------
-# The game wrote the places and the event log; code checks the plan's feasibility and whether its
-# first subgoal is on the critical path (plan_check). The judge gives `findings` (are the lessons
-# real and useful) and `plan` = whether a plan that LEAVES the critical path has a reason that holds.
+# The game wrote the places, the turns lost and the event log; code checks the plan's feasibility and
+# whether its first subgoal is on the critical path (plan_check). The judge checks each finding (true?
+# a lesson? its fix carried out by the plan?), whether finding 1 explains the largest TURNS LOST line
+# (`waste`), and `deviation` = whether a plan that LEAVES the critical path has a reason that holds.
 
 CF_TASK = """\
 You are grading the notes a language-model agent wrote at the end of one segment of a Craftax \
-game, for the next segment. The game itself writes the places the agent has seen (KNOWN PLACES) \
-and the segment's events (EVENT LOG) into the next segment, and code has already checked the \
-plan's feasibility and whether its first subgoal is on the tech tree's critical path. You grade \
-only the two things code cannot. Your scores train the agent; grade what the notes would do for \
-the next segment, not the prose."""
+game, for the next segment. The game itself writes the places the agent has seen (KNOWN PLACES), \
+the turns that changed nothing (TURNS LOST) and the segment's events (EVENT LOG) into the next \
+segment, and code has already checked the plan's feasibility and whether its first subgoal is on \
+the tech tree's critical path. You check only what code cannot: whether each finding is true and \
+useful, whether the first finding explains the largest loss, and whether a plan that leaves the \
+critical path has a reason. The next segment reads these findings as advice from its past self, so \
+a false finding does harm: check every cause against the rules above, the events and the record, \
+and do not accept a rule of the game that the guide does not state. Your verdicts train the agent; \
+grade what the notes would do for the next segment, not the prose."""
 
 CF_RUBRIC = """\
-- findings (0 to 1): are the FINDINGS real lessons? A good finding explains why something in the \
-events failed or hurt, or what to do differently, tied to an event or place, and is not just a \
-rule of the game (the guide above) or a copy of an event. 1: every finding is such a lesson. 0.5: \
-some are, others are generic or copied. 0: generic advice, contradicted by the events, or \
-invented. "none" scores 0.5 when the events hold no failure, damage or death, 0.2 otherwise.
-- plan (0 to 1): ONLY when the code check says the first subgoal is NOT on the critical path: is \
-there a reason that holds for doing something else first (a vital at 3 or below, night with \
+- rationale: one or two lines, written first.
+- findings: one entry per numbered FINDING, in order (an empty list when the FINDINGS say "none"):
+  - n: its number.
+  - truth: "true" when the rules, the events and the record support its cause; "false" when they \
+contradict it (a rule that does not exist, a cause the events rule out, an event or place that did \
+not happen); "unsupported" when you cannot tell.
+  - lesson: true when it names a cause and a fix specific to what happened in this segment; false \
+for a rule of the game restated, a copied event, or generic advice ("explore more").
+  - applied: true when the PLAN subgoal or SURVIVAL rule it names carries out its fix; false when \
+it names none, or the one it names does something else.
+- waste (0 to 1, or null): null when TURNS LOST counts fewer than 10 lost turns. Otherwise: does \
+finding 1 explain the first (largest) TURNS LOST line? 1: it names that loss, a cause the events \
+support and a fix that would stop it. 0.5: it names the loss, but its cause or fix is vague or \
+partly wrong. 0: it is about something else, or its cause is wrong.
+- deviation (0 to 1): ONLY when the code check says the first subgoal is NOT on the critical path: \
+is there a reason that holds for doing something else first (a vital at 3 or below, night with \
 enemies near, a needed resource never seen so a search comes first, a station destroyed)? 1: the \
 departure is clearly right and the plan says why. 0.5: defensible but unexplained. 0: no reason \
 holds (a side achievement, a repeat, wandering). When the code check says the first subgoal IS \
@@ -197,7 +211,7 @@ legend: {legend}
 == Code check of the plan ==
 {plan_check}
 
-Give two scores and a one-line rationale:
+Give your verdict:
 """ + CF_RUBRIC
 
 CF_GROUP_PROMPT = CF_TASK + """ The branches below all started from the same saved world and \
@@ -210,7 +224,7 @@ the same notes; your scores compare them, so use the whole range when they diffe
 
 {branches}
 
-For every branch give two scores and a one-line rationale:
+For every branch give a verdict:
 """ + CF_RUBRIC + """
 Return one verdict per branch, with the branch number as given."""
 
@@ -243,13 +257,37 @@ class GroupNotesVerdict(BaseModel):
     comparison: str = ""
 
 
+class FindingVerdict(BaseModel):
+    n: int
+    truth: Literal["true", "false", "unsupported"]
+    lesson: bool
+    applied: bool
+
+
+class CFNotesVerdict(BaseModel):
+    """`code_facts`: a verdict per finding, the largest loss explained, a justified departure."""
+    rationale: str = ""
+    findings: list[FindingVerdict]
+    waste: float | None = Field(default=None, ge=0.0, le=1.0)
+    deviation: float = Field(ge=0.0, le=1.0)
+
+
+class CFBranchNotesVerdict(CFNotesVerdict):
+    branch: int
+
+
+class CFGroupNotesVerdict(BaseModel):
+    verdicts: list[CFBranchNotesVerdict]
+    comparison: str = ""
+
+
 class CraftaxNotesJudge(_CrafterJudge[NotesVerdict]):
     prompt = NOTES_JUDGE_PROMPT
     schema = NotesVerdict
 
     def build_messages(self, **fields: Any) -> str:
         if fields.get("code_facts"):
-            self.prompt = CF_SINGLE_PROMPT
+            self.prompt, self.schema = CF_SINGLE_PROMPT, CFNotesVerdict
         return super().build_messages(guide=CRAFTAX_GUIDE, **fields)
 
 
@@ -270,7 +308,7 @@ class CraftaxGroupNotesJudge(_CrafterJudge[GroupNotesVerdict]):
                     "record_after", "steps", "events", "actions", "forfeits", "map_ascii", "nearest",
                     "next_step", "notes", "notes_view", "map_claims")}))
         if code_facts:
-            self.prompt = CF_GROUP_PROMPT
+            self.prompt, self.schema = CF_GROUP_PROMPT, CFGroupNotesVerdict
         shared = judge_fields(infos[0])
         return vf.Judge.build_messages(self, guide=CRAFTAX_GUIDE, n=len(infos), record_before=shared["record_before"],
                                        branches="\n\n".join(blocks))
@@ -310,21 +348,50 @@ def notes_score(map_check: float, findings: float, plan: float, map_weight: floa
 
 
 FINDINGS_WEIGHT = 0.3
+
+# A finding's value: a false one is worse than none (the next segment acts on it), a true restated
+# rule or copied event is worth little, a true lesson whose fix no plan subgoal or survival rule
+# carries out is worth part of one that is carried out.
+CLAIM_FALSE, CLAIM_GENERIC, CLAIM_UNAPPLIED = -1.0, 0.2, 0.6
+
+
+def claim_value(c: Any) -> float:
+    if c.truth == "false":
+        return CLAIM_FALSE
+    if c.truth == "unsupported":
+        return 0.0
+    if not c.lesson:
+        return CLAIM_GENERIC
+    return 1.0 if c.applied else CLAIM_UNAPPLIED
+
+
+def findings_score(claims: list[Any], n_findings: int, lost: int, died: bool) -> float:
+    """The mean claim value over the findings (one the judge skipped counts 0), clipped to [0, 1].
+    No findings ("none"): 0.5 when fewer than LOST_MIN turns were lost and nobody died, else 0.2."""
+    from craftax_env.segments import LOST_MIN
+
+    n = max(n_findings, len(claims))
+    if n == 0:
+        return 0.5 if lost < LOST_MIN and not died else 0.2
+    values = [claim_value(c) for c in claims[:n]] + [0.0] * (n - len(claims))
+    return float(min(1.0, max(0.0, sum(values) / n)))
 """code_facts: notes = (1 - w) plan + w findings, plan = code (feasible, on_path) + the judge's deviation verdict."""
 
 
 def code_facts_verdict(info: dict[str, Any], findings: float | None, deviation: float | None, rationale: str,
-                       failed: bool, **extra: Any) -> dict[str, Any]:
-    """The notes reward under `code_facts`. A failed judge drops its parts (no neutral 0.5): the plan
-    keeps its code score and findings leave the mix."""
+                       failed: bool, waste: float | None = None, **extra: Any) -> dict[str, Any]:
+    """The notes reward under `code_facts`: (1 - w) x plan + w x the judge's part, the mean of
+    `findings` and `waste` (when TURNS LOST asked for one). A failed judge drops its parts (no
+    neutral 0.5): the plan keeps its code score."""
     from craftax_env.plan_check import plan_code_score
 
     feasible, on_path = info.get("plan_feasible"), float(info.get("plan_on_path") or 0.0)
     if failed:
-        findings = deviation = None
+        findings = deviation = waste = None
     plan, path = plan_code_score(feasible, on_path, deviation)
     w = float(info.get("findings_weight", FINDINGS_WEIGHT))
-    score = plan if findings is None else (1.0 - w) * plan + w * float(findings)
+    llm = [float(x) for x in (findings, waste) if x is not None]
+    score = plan if not llm else (1.0 - w) * plan + w * sum(llm) / len(llm)
     out = {"score": float(min(1.0, max(0.0, score))), "grounding": float(findings or 0.0), "map_check": 0.0,
            "findings": float(findings) if findings is not None else 0.0, "plan": plan, "path": path,
            "plan_on_path": on_path, "rationale": rationale, "failed": failed, **extra}
@@ -332,7 +399,23 @@ def code_facts_verdict(info: dict[str, Any], findings: float | None, deviation: 
         out["plan_feasible"] = float(feasible)
     if deviation is not None:
         out["deviation"] = float(deviation)
+    if waste is not None:
+        out["waste"] = float(waste)
     return out
+
+
+def cf_verdict(info: dict[str, Any], parsed: CFNotesVerdict, **extra: Any) -> dict[str, Any]:
+    """A parsed `code_facts` verdict -> the notes reward, with the per-finding verdicts kept."""
+    from craftax_env.segments import LOST_MIN
+
+    lost = int(info.get("turns_lost_total") or 0)
+    findings = findings_score(parsed.findings, int(info.get("findings_count") or 0), lost, bool(info.get("deaths")))
+    waste = parsed.waste if lost >= LOST_MIN else None
+    if lost >= LOST_MIN and waste is None:
+        waste = 0.0  # the judge owed a waste score: the first finding did not explain the loss
+    claims = [{"n": c.n, "truth": c.truth, "lesson": c.lesson, "applied": c.applied} for c in parsed.findings]
+    return code_facts_verdict(info, findings, parsed.deviation, parsed.rationale, False, waste=waste,
+                              claims=claims, **extra)
 
 
 def _verdict(info: dict[str, Any], findings: float, plan: float, rationale: str, failed: bool, **extra: Any) -> dict[str, Any]:
@@ -345,7 +428,9 @@ def _verdict(info: dict[str, Any], findings: float, plan: float, rationale: str,
 
 
 def fallback_verdict(info: dict[str, Any], error: str) -> dict[str, Any]:
-    """The judge failed: the code part stays, the LLM parts are neutral (0.5)."""
+    """The judge failed: the code part stays; the LLM parts are neutral (0.5), or dropped under `code_facts`."""
+    if info.get("code_facts"):
+        return code_facts_verdict(info, None, None, f"judge failed: {error}", True)
     return _verdict(info, 0.5, 0.5, f"judge failed: {error}", True)
 
 
@@ -370,7 +455,10 @@ async def judge_notes(
         parsed = response.parsed
         if parsed is None:
             raise RuntimeError("judge returned no verdict")
-        verdict = _verdict(info, parsed.findings, parsed.plan, parsed.rationale, False)
+        if info.get("code_facts"):
+            verdict = cf_verdict(info, parsed)
+        else:
+            verdict = _verdict(info, parsed.findings, parsed.plan, parsed.rationale, False)
     except Exception as exc:  # a segment is minutes of sampling: never fail it on the judge
         logger.warning("notes judge failed (%s); neutral LLM parts", exc)
         verdict = fallback_verdict(info, str(exc))
@@ -402,7 +490,8 @@ async def group_verdicts(
         by_branch = {v.branch: v for v in (parsed.verdicts if parsed else [])}
         if sorted(by_branch) != list(range(len(infos))):
             raise RuntimeError(f"group verdict covers branches {sorted(by_branch)}, expected 0..{len(infos) - 1}")
-        out = [_verdict(infos[i], by_branch[i].findings, by_branch[i].plan, by_branch[i].rationale, False,
+        out = [cf_verdict(infos[i], by_branch[i], comparison=parsed.comparison) if infos[i].get("code_facts") else
+               _verdict(infos[i], by_branch[i].findings, by_branch[i].plan, by_branch[i].rationale, False,
                         comparison=parsed.comparison) for i in range(len(infos))]
         return out, time.time() - t0, None
     except Exception as exc:
@@ -438,7 +527,8 @@ async def judge_notes_group(
         single = trace.info["craftax"]["judge"]
         cost = {k: cost[k] + float(single.get(k, 0.0)) for k in cost}
         verdict = {k: single[k] for k in ("score", "grounding", "map_check", "findings", "plan", "path", "plan_on_path",
-                                          "plan_feasible", "deviation", "rationale", "failed") if k in single}
+                                          "plan_feasible", "deviation", "waste", "claims", "rationale", "failed")
+                   if k in single}
         timing = {**timing, "call_s": timing.get("call_s", 0.0) + single.get("call_s", 0.0), "group_fallback": 1.0}
     else:
         timing = {**timing, "group_fallback": 0.0}
@@ -461,7 +551,7 @@ def apply_verdict(
     info = trace.info.get("craftax") or {}
     score = float(verdict["score"])
     trace.record_reward("notes", score, weight)
-    parts = ("grounding", "map_check", "findings", "plan", "path", "plan_on_path", "plan_feasible", "deviation")
+    parts = ("grounding", "map_check", "findings", "plan", "path", "plan_on_path", "plan_feasible", "deviation", "waste")
     trace.record_metrics({
         "notes_score": score, "judge_failed": float(verdict["failed"]),
         **{f"notes_{k}": float(verdict[k]) for k in parts if k in verdict},
@@ -474,7 +564,7 @@ def apply_verdict(
         line = {"task": "craftax-judge", "node_id": info.get("node_id"), "parent": info.get("parent"), "depth": info.get("depth"),
                 "seed": info.get("seed"), "notes_score": score, "judge_failed": verdict["failed"],
                 "rationale": verdict.get("rationale", ""), "at": time.time(), "mode": mode, **timing, **(cost or {}),
-                **{k: verdict[k] for k in parts if k in verdict}}
+                **{k: verdict[k] for k in parts if k in verdict}, **({"claims": verdict["claims"]} if "claims" in verdict else {})}
 
         def write():
             with open(episode_log, "a") as f:

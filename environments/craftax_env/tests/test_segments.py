@@ -280,7 +280,7 @@ def test_summary_frame_roundtrip():
 
 PLAN_NOTES = """<notes>
 FINDINGS:
-1. Turn 2: DO on grass did nothing; face a tree first.
+1. Turn 2: DO on grass did nothing because I faced grass, not a tree -> face the tree first (PLAN 1)
 PLAN:
 1. 2 wood at the tree F0 (23,24) - done when Wood:2
 2. place_table near F0 (24,24) - done when the HUD shows a table
@@ -299,7 +299,8 @@ def test_code_facts_split(tmp_path):
     first = asyncio.run(env.play_segment(task, player))
     request = player.received[-1]
     assert request.startswith("END OF SEGMENT") and request.endswith(PLAN_PROMPT)
-    assert request.index("[Grid]") < request.index("KNOWN PLACES on F0") < request.index("EVENT LOG") < request.index(PLAN_PROMPT)
+    assert (request.index("[Grid]") < request.index("KNOWN PLACES on F0") < request.index("TURNS LOST")
+            < request.index("EVENT LOG") < request.index(PLAN_PROMPT))
     assert "<- needed next" in request  # collect_wood / place_table: trees are marked
     summary = first["summary"]
     assert summary.startswith("GAME RECORD") and "KNOWN PLACES on F0" in summary and "EVENT LOG" in summary
@@ -333,3 +334,31 @@ def test_known_places_and_critical_path():
     assert "never seen on this floor: tree" in world.known_places(game, blind)
     # a lost pickaxe puts its craft back on the path: the ladder looks at the inventory, not only achievements
     assert world.direction(-5, 1) == "north" and world.direction(-5, -5) == "north-west" and world.direction(0, 3) == "east"
+
+
+def test_turns_lost_counts():
+    from craftax_env.segments import TurnsLost, count_findings
+
+    def snap(pos=(5, 5), facing=1, floor=0):
+        return {"pos": pos, "facing": facing, "floor": floor}
+
+    t = TurnsLost()
+    t.observe("MOVE_LEFT", "MOVE_LEFT: blocked by water; now facing left.", snap(), snap())  # same facing: a bump
+    t.observe("MOVE_UP", "MOVE_UP: blocked by tree; now facing up.", snap(), snap(facing=3))  # a turn...
+    t.observe("DO", "DO: used on tree: wood +1 (now 1).", snap(facing=3), snap(facing=3))  # ...used by the DO
+    t.observe("MOVE_DOWN", "MOVE_DOWN: blocked by stone; now facing down.", snap(), snap(facing=4))  # a turn...
+    t.observe("MOVE_RIGHT", "MOVE_RIGHT: moved to F0 (5,6).", snap(facing=4), snap(pos=(5, 6), facing=2))  # ...not used
+    t.observe("DO", "DO: nothing collected: stone needs a wood pickaxe; food 5→4.", snap(), snap())
+    t.observe("MAKE_WOOD_PICKAXE", "MAKE_WOOD_PICKAXE: nothing made: needs a table within one step.", snap(), snap())
+    t.observe("MAKE_WOOD_PICKAXE", "MAKE_WOOD_PICKAXE: nothing made: needs a table within one step.", snap(), snap())
+    t.observe("NOOP", "NOOP: no visible effect.", snap(), snap())
+    t.forfeit("no <action> tag")
+    assert t.total == 7
+    kinds = {k: n for k, n, _ in t.by_kind()}
+    assert kinds == {"bump": 1, "turn": 1, "do": 1, "build": 2, "idle": 1, "forfeit": 1}
+    assert t.by_kind()[0][0] == "build"  # the largest first
+    text = t.text(10)
+    assert text.startswith("TURNS LOST in the previous segment (counted by the game): 7 of 10 turns")
+    assert "- 2 failed crafts and placements: MAKE_WOOD_PICKAXE: nothing made: needs a table within one step x2" in text
+    assert "nothing collected: stone needs a wood pickaxe x1" in text  # the vitals' change is dropped
+    assert count_findings(["1. a", "2) b", "more prose"]) == 2 and count_findings(["none"]) == 0

@@ -90,13 +90,16 @@ PLAN_SECTIONS = ("FINDINGS", "PLAN", "SURVIVAL")
 PLAN_PROMPT = """\
 Your notes for the next segment. This reply is not a game turn: no action will be played. \
 The game continues from exactly this state in a fresh context, which will show the game's own \
-record of your state, the KNOWN PLACES above and the segment's EVENT LOG, so do not copy any of \
+record of your state, the KNOWN PLACES, TURNS LOST and EVENT LOG above, so do not copy any of \
 them. Write only what the game cannot: what you will do and why, inside <notes>...</notes>, under \
 these three headers:
 
-FINDINGS: up to 3 lessons from this segment that the rules and the event log do not state by \
-themselves: why something failed or hurt you, and what to do differently. Tie each to an event \
-(its turn) or a place. No general advice; write "none" if nothing was learned.
+FINDINGS: up to 3 lessons, one line each: \
+`N. <what went wrong, with its turn or place> because <the cause> -> <the fix> (PLAN k or SURVIVAL k)`. \
+If TURNS LOST counts 10 or more lost turns, finding 1 explains its first (largest) line. The cause \
+must be what really happened in this game (the event log and the game's messages show it), not a \
+guess about the rules; the fix must be carried out by the PLAN subgoal or SURVIVAL rule named at \
+the end. No general advice; write "none" only if nothing went wrong.
 
 PLAN: 2 to 4 numbered subgoals in order, one per line: \
 `N. <achievement or item count> at <place> - done when <what the HUD will show>`. \
@@ -112,10 +115,11 @@ from KNOWN PLACES.
 An example from a different game (its places and facts are not yours, do not copy them):
 <notes>
 FINDINGS:
-1. Turn 41: make_stone_pickaxe failed because I had used my last wood on a sword; keep 1 wood per craft.
-2. Turns 60-75: zombies hit me on open grass at night far from the table; be at the table by dusk.
+1. Turns 30-52: 14 moves blocked by water near F0 (18,30) because I kept walking west into the lake -> walk around it by the south shore (PLAN 1)
+2. Turn 41: make_stone_pickaxe failed because I had used my last wood on a sword -> gather 2 wood before crafting (PLAN 1)
+3. Turns 60-75: zombies hit me on open grass at night far from the table -> be at the table by dusk (SURVIVAL 2)
 PLAN:
-1. 2 wood at the tree F0 (22,31) - done when Wood:2
+1. 2 wood at the tree F0 (22,31), going by the south shore of the lake - done when Wood:2
 2. make_stone_pickaxe at the table F0 (25,30) - done when the HUD shows a stone pickaxe
 3. collect_iron at F0 (14,36) - done when Iron:1
 SURVIVAL:
@@ -140,6 +144,95 @@ def event_log(events: list[str], n: int = EVENT_LOG_LINES) -> str:
     tail = events[-n:]
     more = f"; the last {len(tail)} of {len(events)} notable events" if len(events) > len(tail) else ""
     return "\n".join([EVENT_LOG_HEADER.format(tail=more), *(tail or ["(nothing notable happened)"])])
+
+
+LOST_MIN = 10
+"""Fewer lost turns than this: no finding has to explain them (and the judge gives no `waste` score)."""
+
+LOST_KINDS = {
+    "forfeit": "forfeited turns (no action played)",
+    "bump": "moves into a blocked cell that did not even turn you",
+    "turn": "turns in place that the next action did not use",
+    "do": "DO with no effect",
+    "build": "failed crafts and placements",
+    "idle": "NOOP or no visible effect",
+}
+
+
+class TurnsLost:
+    """Turns that changed nothing, counted from the game's own feedback, by kind and detail. A blocked
+    move that turns the player is a turn in place: lost unless the next action uses it (a DO, a craft,
+    a placement that does something); a move on, or another turn, means it was not."""
+
+    def __init__(self) -> None:
+        self.counts: dict[tuple[str, str], int] = {}
+        self._turned: str | None = None  # the pending turn in place
+
+    def add(self, kind: str, detail: str, n: int = 1) -> None:
+        self.counts[(kind, detail)] = self.counts.get((kind, detail), 0) + n
+
+    def forfeit(self, why: str) -> None:
+        self._flush()
+        self.add("forfeit", why)
+
+    def _flush(self) -> None:
+        if self._turned is not None:
+            self.add("turn", self._turned)
+            self._turned = None
+
+    def observe(self, name: str, text: str, before: dict, after: dict) -> None:
+        """One played action; `text` is `CraftaxGame.feedback`'s sentence for it."""
+        what = text.split(": ", 1)[1] if ": " in text else text
+        what = what.rstrip(".").split("; ")[0]  # drop the vitals' changes
+        if after["floor"] != before["floor"]:
+            self._turned = None
+            return
+        if name.startswith("MOVE_"):
+            self._flush()  # moving on (or turning again) did not use the last turn
+            if after["pos"] == before["pos"]:
+                if after["facing"] == before["facing"]:
+                    self.add("bump", what)
+                else:
+                    self._turned = what
+            return
+        lost = None
+        if name == "DO" and what.startswith(("no effect", "nothing collected")):
+            lost = ("do", what)
+        elif what.startswith(("nothing made", "nothing placed")):
+            lost = ("build", f"{name}: {what}")
+        elif name == "NOOP" or what.startswith(("no visible effect", "no effect")):
+            lost = ("idle", name)
+        if lost is None:
+            self._turned = None  # this action used the turn
+        else:
+            self._flush()
+            self.add(*lost)
+
+    @property
+    def total(self) -> int:
+        return sum(self.counts.values())
+
+    def by_kind(self) -> list[tuple[str, int, list[tuple[str, int]]]]:
+        """[(kind, turns, [(detail, turns) largest first])], largest kind first."""
+        kinds: dict[str, list[tuple[str, int]]] = {}
+        for (kind, detail), n in self.counts.items():
+            kinds.setdefault(kind, []).append((detail, n))
+        out = [(k, sum(n for _, n in ds), sorted(ds, key=lambda d: -d[1])) for k, ds in kinds.items()]
+        return sorted(out, key=lambda k: -k[1])
+
+    def text(self, turns: int) -> str:
+        head = f"TURNS LOST in the previous segment (counted by the game): {self.total} of {turns} turns changed nothing"
+        rows = [f"- {n} {LOST_KINDS[k]}: " + ", ".join(f"{d} x{c}" for d, c in ds[:3]) + (", ..." if len(ds) > 3 else "")
+                for k, n, ds in self.by_kind()]
+        return "\n".join([head, *rows]) if rows else head
+
+    def as_dict(self) -> dict[str, dict[str, int]]:
+        return {k: dict(ds) for k, _, ds in self.by_kind()}
+
+
+def count_findings(lines: list[str]) -> int:
+    """Numbered lines of a FINDINGS section ("none" or unnumbered prose: 0)."""
+    return sum(1 for line in lines if re.match(r"\s*\d+\s*[.)]", line))
 
 
 SUMMARY_RETRY = """\

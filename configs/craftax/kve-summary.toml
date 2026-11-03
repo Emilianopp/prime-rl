@@ -8,7 +8,7 @@
 #
 # Thinking off (renderer), GlyphBench's plain-text reasoning format kept. A segment is ~64k
 # logical positions (env.segment_tokens; ~100 turns at ~600 tokens a turn), then the notes
-# turn under the 80k ceiling. The notes turn is masked out of the loss (train_on_notes = false).
+# turn under the 80k ceiling. The notes turn is trained (train_on_notes = true).
 # This file is arm A0 (progress only); jobs/craftax.sbatch kve-summary adds the notes judge
 # (JUDGE_BACKEND, arm A1) and adherence (ADHERENCE_WEIGHT, arm C). The sampler reads the
 # segment info key ("craftax") and the continuation header from the taskset's task info.
@@ -77,7 +77,7 @@ env.reward = "achievements"
 env.segment_turns = 200  # a backstop; the token cut below is the one that binds (~100 turns)
 env.segment_tokens = 64000  # logical positions, evicted tokens included
 env.summary_max_tokens = 16384  # the notes turn's cap, cut to what is left under max_total_tokens
-env.train_on_notes = false
+env.train_on_notes = true  # the notes turn gets the advantage too: the notes reward trains the notes it grades
 env.state_dir = "states"  # the job script sets the absolute path under the run dir
 env.judge_group_size = 4  # = orchestrator.train.group_size (judge_mode = "group")
 env.judge_group_timeout_s = 1800

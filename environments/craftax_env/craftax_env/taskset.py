@@ -39,6 +39,8 @@ from craftax_env.segments import (
     CONTINUATION_HEADER,
     NOTES_RETRY_REASONS,
     Timeline,
+    TurnsLost,
+    count_findings,
     NOTES_OPENER,
     SUMMARY_PROMPT,
     SUMMARY_RETRY,
@@ -657,6 +659,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         tracker = ForfeitTracker()  # forfeit kinds, streaks and collapse onset
         notes, retry_reason, notes_retried, continues = None, None, False, False
         facts: str | None = None  # code_facts: the known places + event log the notes turn showed
+        wasted = TurnsLost() if segmented and cfg.code_facts else None  # code_facts: turns that changed nothing
         sampled_before_notes = None  # sampled nodes before the notes request (train_on_notes = False)
         observation = opening
         async with agent.interaction(task) as interaction:
@@ -677,6 +680,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     tracker.update(classify(*reply_parts(segment, interaction.trace), failure))
                 else:
                     tracker.update(None)
+                if not indices and wasted is not None:
+                    wasted.forfeit("no <action> tag" if failure == "no_action_tag" else "an unknown action name")
                 if not indices and cfg.forfeit_mode == "freeze":
                     done = game.forfeit()
                     per_turn[0] += 1
@@ -686,13 +691,14 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         if example:
                             game.message += f" End your reply with one line such as <action>{glyph.EXAMPLE_ACTION}</action>."
                 else:
+                    counted = bool(indices)  # a forfeit's NOOP is already counted as a forfeit
                     indices = indices or [glyph.NOOP]
                     lines, reward_sum, unlocked, played = [], 0.0, [], 0
                     for index in indices:
                         played += 1
                         actions[glyph.ACTION_NAMES[index]] += 1
                         logged = segmented and _logs_feedback(index)
-                        before = game.snapshot() if feedback or logged else None
+                        before = game.snapshot() if feedback or logged or wasted is not None else None
                         floor_before = game.floor
                         ahead = game.block_ahead() if segmented and index in _PLACE_STATIONS else None
                         # The cell a DO hits, to tell the agent's own DO from an arrow when a station goes.
@@ -709,6 +715,9 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         for name in step.unlocked:
                             unlocked_at.setdefault(name, game.turn)
                         max_floor = max(max_floor, game.floor)
+                        if wasted is not None and counted:
+                            after = game.snapshot()
+                            wasted.observe(glyph.ACTION_NAMES[index], game.feedback(index, before, after), before, after)
                         if segmented:
                             for name in step.unlocked:
                                 timeline.add(game.turn, f"unlocked {name}")
@@ -803,7 +812,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 unlocked = ", ".join(sorted(game.achievements)) or "none"
                 if cfg.code_facts:  # the game's facts sit between the observation and the request
                     facts = await asyncio.to_thread(
-                        lambda: f"{world.known_places(game, explored)}\n\n{event_log(timeline.lines())}")
+                        lambda: f"{world.known_places(game, explored)}\n\n{wasted.text(turns)}\n\n{event_log(timeline.lines())}")
                     message = (f"{NOTES_OPENER}\n\nThe state at the end of the segment:\n\n{shown}\n\n{facts}\n\n"
                                f"[Achievements already unlocked]\n{unlocked}\n\n{cfg.summary_prompt or PLAN_PROMPT}")
                 else:
@@ -871,7 +880,9 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 check = check_plan(game, explored, sections["PLAN"], view=view)
                 judge_inputs.update({"plan_feasible": check.feasible, "plan_on_path": check.on_path,
                                      "critical_path": check.critical, "plan_check": check.text(),
-                                     "findings_weight": cfg.findings_weight})
+                                     "findings_weight": cfg.findings_weight, "findings_count": count_findings(sections["FINDINGS"]),
+                                     "turns_lost": wasted.as_dict() if wasted is not None else {},
+                                     "turns_lost_total": wasted.total if wasted is not None else 0})
         achievements = sorted(game.achievements)
         delta = game.achievement_score - score_before  # Craftax's 1/3/5/8 reward of this segment's unlocks
         score = total if cfg.reward == "return" else game.achievement_score
@@ -974,7 +985,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     "notes", "record", "notes_retry_reason", "record_before", "map_ascii", "nearest", "next_step",
                     "map_claims", "map_check", "map_claim_counts", "actions_hist", "forfeit_kinds", "adherence_digest",
                     "parent_plan_score", "code_facts", "facts", "plan_feasible", "plan_on_path", "critical_path",
-                    "plan_check") if k in info}
+                    "plan_check", "findings_count", "turns_lost", "turns_lost_total") if k in info}
                     | {"state_bytes": state_bytes, "explored_cells": int(explored.sum())})
             with open(cfg.episode_log, "a") as f:
                 f.write(json.dumps(line) + "\n")

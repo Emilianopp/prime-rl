@@ -73,13 +73,19 @@ def test_next_step_and_nearest(game):
     assert all(CANONICAL.fullmatch(p) for p in PLACE.findall(text))
 
 
-def _stub_single(monkeypatch, findings=0.8, plan=0.6, fail=False):
+def _stub_single(monkeypatch, findings=0.8, plan=0.6, fail=False, cf=None):
+    """`cf`: the verdict a code_facts judge returns (default: one true, applied lesson; deviation = plan)."""
+    from craftax_env.judge import CFNotesVerdict, FindingVerdict
+
     calls = []
 
     async def evaluate(self, *, trace=None, **fields):
         calls.append(self.build_messages(**fields))
         if fail:
             raise RuntimeError("judge down")
+        if self.schema is CFNotesVerdict:
+            return SimpleNamespace(parsed=cf or CFNotesVerdict(
+                findings=[FindingVerdict(n=1, truth="true", lesson=True, applied=True)], deviation=plan, rationale="stub"), usage=None)
         return SimpleNamespace(parsed=NotesVerdict(findings=findings, plan=plan, rationale="stub"), usage=None)
 
     monkeypatch.setattr(CraftaxNotesJudge, "evaluate", evaluate)
@@ -134,6 +140,33 @@ def test_group_judge_in_the_beam(tmp_path, monkeypatch):
     assert seen_n == [3]
     judged = [json.loads(l) for l in open(tmp_path / "episodes.jsonl") if '"craftax-judge"' in l]
     assert sorted(j["plan"] for j in judged) == pytest.approx([0.6, 0.8, 1.0]) and all(j["mode"] == "group" for j in judged)
+
+
+def test_group_judge_under_code_facts(tmp_path, monkeypatch):
+    """code_facts in group mode: the CF prompt and schema, per-finding verdicts scored by code."""
+    from test_segments import PLAN_NOTES
+
+    from craftax_env.judge import CFGroupNotesVerdict
+
+    seen = []
+
+    async def complete(self, messages, *, trace=None, schema=None, parse=None, **_):
+        n = len(re.findall(r"== Branch \d+ ==", messages))
+        seen.append((schema, "TURNS LOST" in messages, "truth" in messages))
+        truth = ["true", "unsupported", "false"]
+        return SimpleNamespace(parsed=CFGroupNotesVerdict(verdicts=[
+            {"branch": i, "findings": [{"n": 1, "truth": truth[i], "lesson": True, "applied": True}], "deviation": 1.0,
+             "rationale": f"b{i}"} for i in range(n)]), usage=None)
+
+    monkeypatch.setattr(CraftaxGroupNotesJudge, "complete", complete)
+    _stub_single(monkeypatch)
+    task, env = make(tmp_path, segment_turns=3, tree_depth=1, branches=3, keep=1, root_branches=3, code_facts=True,
+                     judge=CrafterJudgeConfig(model="stub"), judge_mode="group")
+    asyncio.run(env.run(task, SimpleNamespace(player=SegmentPlayer(first_notes=PLAN_NOTES))))
+    assert seen == [(CFGroupNotesVerdict, True, True)]
+    judged = [json.loads(l) for l in open(tmp_path / "episodes.jsonl") if '"craftax-judge"' in l]
+    assert sorted(j["findings"] for j in judged) == [0.0, 0.0, 1.0]  # false and unsupported both 0 (clipped)
+    assert all(j["mode"] == "group" and j["claims"] for j in judged)
 
 
 def test_group_failure_falls_back_to_single(tmp_path, monkeypatch):
@@ -205,16 +238,51 @@ def test_code_facts_verdict_mix():
 def test_code_facts_judge_reward(tmp_path, monkeypatch):
     from test_segments import PLAN_NOTES
 
-    calls = _stub_single(monkeypatch, findings=0.8, plan=0.0)
+    from craftax_env.judge import CFNotesVerdict, FindingVerdict
+
+    unapplied = CFNotesVerdict(findings=[FindingVerdict(n=1, truth="true", lesson=True, applied=False)], deviation=0.0)
+    calls = _stub_single(monkeypatch, cf=unapplied)
     task, env = make(tmp_path, segment_turns=4, code_facts=True, judge=CrafterJudgeConfig(model="stub"), notes_weight=0.5)
     out = asyncio.run(env.play_segment(task, SegmentPlayer(first_notes=PLAN_NOTES)))
     asyncio.run(env._judge_branch(out))
     info = out["trace"].info["craftax"]
     assert info["plan_on_path"] == 1.0 and info["plan_feasible"] == 1.0  # wood then a table: on the path, feasible
-    assert out["trace"].rewards["notes"] == pytest.approx(0.7 * 1.0 + 0.3 * 0.8)
+    assert info["findings_count"] == 1 and info["turns_lost_total"] < 10  # 4 turns: no waste score owed
+    assert out["trace"].rewards["notes"] == pytest.approx(0.7 * 1.0 + 0.3 * 0.6)  # a true lesson, fix not in the plan
+    assert info["judge"]["claims"] == [{"n": 1, "truth": "true", "lesson": True, "applied": False}]
     prompt = calls[0]
-    assert "KNOWN PLACES" in prompt and "Code check of the plan" in prompt and "critical path" in prompt
+    assert "KNOWN PLACES" in prompt and "TURNS LOST" in prompt and "Code check of the plan" in prompt and "critical path" in prompt
     assert "Code check of the MAP lines" not in prompt
+
+
+def test_findings_score_claims():
+    from craftax_env.judge import FindingVerdict, findings_score
+
+    def c(truth, lesson=True, applied=True):
+        return FindingVerdict(n=1, truth=truth, lesson=lesson, applied=applied)
+
+    assert findings_score([c("true")], 1, 0, False) == 1.0
+    assert findings_score([c("true"), c("false")], 2, 0, False) == 0.0  # a false finding cancels a good one
+    assert findings_score([c("true"), c("true"), c("false")], 3, 0, False) == pytest.approx(1 / 3)
+    assert findings_score([c("true", lesson=False)], 1, 0, False) == pytest.approx(0.2)  # a rule restated
+    assert findings_score([c("true", applied=False)], 1, 0, False) == pytest.approx(0.6)
+    assert findings_score([c("true")], 2, 0, False) == pytest.approx(0.5)  # one finding left unjudged counts 0
+    assert findings_score([], 0, 3, False) == 0.5 and findings_score([], 0, 30, False) == 0.2  # "none"
+    assert findings_score([], 0, 0, True) == 0.2
+
+
+def test_cf_verdict_waste():
+    from craftax_env.judge import CFNotesVerdict, FindingVerdict, cf_verdict
+
+    info = {"code_facts": True, "plan_feasible": 1.0, "plan_on_path": 1.0, "findings_weight": 0.3,
+            "findings_count": 1, "turns_lost_total": 40}
+    good = [FindingVerdict(n=1, truth="true", lesson=True, applied=True)]
+    v = cf_verdict(info, CFNotesVerdict(findings=good, waste=0.0, deviation=1.0))
+    assert v["waste"] == 0.0 and v["score"] == pytest.approx(0.7 + 0.3 * 0.5)  # findings 1, waste 0
+    v = cf_verdict(info, CFNotesVerdict(findings=good, waste=None, deviation=1.0))  # owed but not given
+    assert v["waste"] == 0.0
+    v = cf_verdict({**info, "turns_lost_total": 5}, CFNotesVerdict(findings=good, waste=0.0, deviation=1.0))
+    assert "waste" not in v and v["score"] == pytest.approx(1.0)  # few turns lost: no waste score
 
 
 def test_plan_check_material_runs_are_not_wasted(game):
