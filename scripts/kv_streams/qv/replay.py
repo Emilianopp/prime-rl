@@ -26,76 +26,17 @@ import subprocess
 import sys
 from collections import Counter
 
-import numpy as np
 import verifiers.v1 as vf
 from verifiers.v1.memory import Memory
 from verifiers.v1.types import AssistantMessage, UserMessage, content_text
 
 from craftax_env import glyph
+from craftax_env.qv import full_map, nearest, points, state_record  # noqa: F401  (re-exported for the scripts)
 from craftax_env.turn_rewards import SUMMARY_ASK
 
 SUMMARY = re.compile(r"<summary>(.*?)</summary>", re.S | re.I)
 POS = re.compile(r"Pos: \((\d+),(\d+)\)")
 INV = re.compile(r"\[Inventory\] (.*)")
-KEY_BLOCKS = ("tree", "water", "stone", "coal", "iron", "diamond", "sapphire", "ruby",
-              "crafting table", "furnace", "lava")
-
-
-def full_map(game: glyph.CraftaxGame) -> tuple[str, str]:
-    """The current floor's 48x48 map, every tile revealed, with row/column labels."""
-    import jax.numpy as jnp
-    from craftax.craftax import ascii_renderer
-    from craftax.craftax import glyphbench_api as api
-
-    seen = jnp.ones((9, 48, 48), dtype=bool)
-    chars = ascii_renderer.render_craftax_ascii_grid_full(game.state, seen)[0]
-    rows = api.unicode_grid_to_string(chars).split("\n")
-    head = "    " + "".join(str(c // 10) for c in range(48)) + "\n    " + "".join(str(c % 10) for c in range(48))
-    body = "\n".join(f"{r:>3} {row}" for r, row in enumerate(rows))
-    return head + "\n" + body, api.unicode_legend_from_char_grid(chars)
-
-
-def nearest(game: glyph.CraftaxGame) -> dict[str, list]:
-    """Nearest cell of each key block (and the down ladder) on this floor: [row, col, manhattan]."""
-    from craftax.craftax.constants import ItemType
-
-    level, (r, c) = game.floor, game.position
-    out = {}
-
-    def closest(name, cells):
-        if len(cells):
-            d = np.abs(cells - [r, c]).sum(1)
-            i = int(d.argmin())
-            out[name] = [int(cells[i][0]), int(cells[i][1]), int(d[i])]
-
-    grid = np.asarray(game.state.map[level])
-    for value, name in game._rt["block_names"].items():
-        if name in KEY_BLOCKS:
-            closest(name, np.argwhere(grid == value))
-    closest("ladder down", np.argwhere(np.asarray(game.state.item_map[level]) == ItemType.LADDER_DOWN.value))
-    return out
-
-
-def points(game: glyph.CraftaxGame) -> dict[str, float]:
-    """Every achievement's Craftax reward (1/3/5/8 by tier)."""
-    w = np.asarray(game._rt["weights"])
-    return {a.name.lower(): float(w[int(a.value)]) for a in game._rt["achievements"]}
-
-
-def state_record(game: glyph.CraftaxGame, deaths: int, kind: str, summary: str | None = None, k: int | None = None) -> dict:
-    """What the judge sees of a state."""
-    _legend, _grid, hud, _msg = game.render()
-    grid, legend = full_map(game)
-    pts = points(game)
-    return {
-        "kind": kind, "k": k, "turn": game.turn, "timestep": game.timestep,
-        "hud": hud, "map": grid, "legend": legend, "nearest": nearest(game),
-        "achievements": {a: pts[a] for a in sorted(game.achievements)},
-        "locked": {a: p for a, p in pts.items() if a not in game.achievements},
-        "B": float(game.achievement_score), "deaths": deaths, "summary": summary,
-    }
-
-
 def hud_check(game: glyph.CraftaxGame, obs: str) -> bool:
     _l, _g, hud, _m = game.render()
     a, b = POS.search(hud), POS.search(obs)

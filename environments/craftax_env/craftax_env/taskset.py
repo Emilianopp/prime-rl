@@ -36,7 +36,7 @@ from pydantic import Field
 import verifiers.v1 as vf
 from verifiers.v1.memory import Memory, tokens
 
-from craftax_env import glyph
+from craftax_env import glyph, qv
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,11 @@ class CraftaxEnvConfig(vf.EnvConfig):
     inherited summary. Counters (turns, deaths, achievements' turns, ...) carry over."""
     save_every: int = Field(50, ge=1)
     """Model turns between saves of a game with ``state_dir``."""
+    state_log: str | None = None
+    """A folder (environment variables expanded, e.g. ``$OUT/qv_states``) where the true
+    state is written at every segment boundary: ``{trace}.start.json`` when a segment
+    opens and ``{trace}.end.json`` (with the next segment's id) when it ends - what the
+    Q/V judge (``craftax_env.qv.score_segment``) grades."""
     max_segments: int = Field(0, ge=0)
     """Segments this run plays (0: no limit). At the next segment's first turn the run
     stops (``ended_by`` = ``segment_limit``) with that reply not played, so the game stays
@@ -205,6 +210,16 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         if memory is not None:
             kwargs["memory"] = memory
         async with agents.player.interaction(task, **kwargs) as interaction:
+            boundaries = self.config.state_log
+
+            def trace_id() -> str | None:
+                return getattr(interaction.trace, "id", None)
+
+            async def boundary(end_of: str | None, start_of: str | None) -> None:
+                if boundaries and (end_of or start_of):
+                    await asyncio.to_thread(qv.write_boundary, boundaries, game, len(deaths), end_of, start_of)
+
+            await boundary(None, trace_id())
             segment = await interaction.turn(opening)
             while not segment.terminated:
                 if deadline is not None and time.time() >= deadline:
@@ -287,7 +302,11 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         end = "won"
                     break
                 observation = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions)
+                before = trace_id()
                 segment = await interaction.turn(observation)
+                if trace_id() != before:  # a segment switch: the game is as the summary turn found it
+                    await boundary(before, trace_id())
+            await boundary(trace_id(), None)
             if path:
                 handoff = None
                 if end == "time_limit" and hasattr(interaction, "summarize"):

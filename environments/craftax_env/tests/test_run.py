@@ -345,3 +345,44 @@ def test_a_variant_saves_on_its_own_and_stops_after_its_segments(tmp_path):
     assert line["ended_by"] == "segment_limit" and line["turns"] == 3
     assert (tmp_path / f"{task.data.info['seed']}-1.pkl").exists()
     assert not (tmp_path / f"{task.data.info['seed']}.pkl").exists()
+
+
+def test_segment_boundaries_are_written_for_the_judge(tmp_path):
+    """With ``state_log`` the env writes the true state where each segment starts and
+    ends, the end naming the next segment, for craftax_env.qv.score_segment."""
+    task = next(iter(CraftaxTaskset(CraftaxConfig(num_examples=1, respawn=True)).load()))
+
+    class TwoTraces(ScriptedInteraction):
+        @property
+        def trace(self):
+            return self.traces[0] if len(self.received) <= 3 else self.traces[1]  # the 4th turn opens seg-b
+
+        @trace.setter
+        def trace(self, first):
+            first.id = "seg-a"
+            self.traces = [first, SimpleNamespace(**{**vars(first), "id": "seg-b"})]
+
+        @property
+        def segments(self):
+            return 1 + (len(self.received) > 3)
+
+    interaction = TwoTraces()
+
+    @asynccontextmanager
+    async def open_interaction(_task, **kwargs):
+        yield interaction
+
+    folder = tmp_path / "states"
+    env = SimpleNamespace(config=CraftaxEnvConfig(
+        episode_log=str(tmp_path / "e.jsonl"), state_log=str(folder), max_segments=1, max_episode_steps=0,
+        on_death="respawn",
+    ))
+    asyncio.run(CraftaxEnv.run(env, task, SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))))
+    files = sorted(p.name for p in folder.iterdir())
+    assert files == ["seg-a.end.json", "seg-a.start.json", "seg-b.end.json", "seg-b.start.json"]
+    a_end = json.loads((folder / "seg-a.end.json").read_text())
+    b_start = json.loads((folder / "seg-b.start.json").read_text())
+    assert a_end["next"] == "seg-b" and a_end["state"] == b_start["state"]
+    assert json.loads((folder / "seg-b.end.json").read_text())["next"] is None
+    state = b_start["state"]
+    assert state["hud"].startswith("Step:") and "Legend" not in state["map"] and len(state["map"].splitlines()) == 50

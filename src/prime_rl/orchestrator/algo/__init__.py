@@ -33,6 +33,7 @@ from prime_rl.orchestrator.algo.opsd import OPSDAlgorithm
 from prime_rl.orchestrator.algo.rae import RAEAlgorithm
 from prime_rl.orchestrator.algo.routing import assign_advantages, stamp_loss_routing
 from prime_rl.orchestrator.algo.sft import SFTDistillAlgorithm
+from prime_rl.orchestrator.algo.trace_credit import TraceCreditAlgorithm
 from prime_rl.orchestrator.algo.turn_credit import TurnCreditAlgorithm
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ ALGORITHM_CLASSES: dict[str, type[Algorithm]] = {
     "opsd": OPSDAlgorithm,
     "sft": SFTDistillAlgorithm,
     "debug": DebugAlgorithm,
+    "trace_credit": TraceCreditAlgorithm,
     "turn_credit": TurnCreditAlgorithm,
 }
 
@@ -76,6 +78,7 @@ __all__ = [
     "OPSDAlgorithm",
     "RAEAlgorithm",
     "SFTDistillAlgorithm",
+    "TraceCreditAlgorithm",
     "TurnCreditAlgorithm",
     "build_algorithm",
     "assign_advantages",
