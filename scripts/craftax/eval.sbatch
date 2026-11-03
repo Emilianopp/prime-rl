@@ -26,7 +26,8 @@
 # GlyphBench's plain-text reasoning format, as the RL configs train), TIME_LIMIT (seconds per
 # episode, default the config's 9000), STEPS (turns per episode, default 10000),
 # SEGMENTS (not on this branch: its verifiers has no segments; each episode is one trace
-# under a 256k token ceiling), SAFE_RADIUS (N: respawn at a free cell with no hostile mob
+# under a 256k token ceiling), CODE_FACTS (1: the game writes KNOWN PLACES + EVENT LOG, the notes only
+# FINDINGS / PLAN / SURVIVAL; env.code_facts), SAFE_RADIUS (N: respawn at a free cell with no hostile mob
 # within N tiles, env.respawn_safe; with CONTINUOUS),
 # CONTINUOUS (1: configs/craftax/eval-continuous.toml - respawn on death, no turn limit,
 # achievement reward; STEPS then sets a turn limit again), FEEDBACK (1: env.action_feedback - the
@@ -57,7 +58,7 @@ CONC=${CONC:-$((GPUS * PER_GPU))}
 STEPS=${STEPS:-}
 N=${N:-$([ -n "$STEPS" ] && echo $((3 * CONC)) || echo "$CONC")} SKIP=${SKIP:-0} TURN_TOKENS=${TURN_TOKENS:-2048} NO_THINKING=${NO_THINKING:-}
 DEADLINE_MARGIN=${DEADLINE_MARGIN:-600} MULTIPLEX=${MULTIPLEX:-}
-TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} SAFE_RADIUS=${SAFE_RADIUS:-}
+TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} SAFE_RADIUS=${SAFE_RADIUS:-} CODE_FACTS=${CODE_FACTS:-}
 [ -n "$SEGMENTS" ] && [ "$SEGMENTS" != off ] && { echo "SEGMENTS=$SEGMENTS: this branch's verifiers has no segments (use TREE_DEPTH)"; exit 2; }
 TREE_DEPTH=${TREE_DEPTH:-} TREE_CHUNK=${TREE_CHUNK:-} MAMBA_SLOTS=${MAMBA_SLOTS:-} BRANCHES=${BRANCHES:-4} BEAM_KEEP=${BEAM_KEEP:-2} SEGMENT_TURNS=${SEGMENT_TURNS:-100} SEGMENT_TOKENS=${SEGMENT_TOKENS:-96000}
 ROOT_BRANCHES=${ROOT_BRANCHES:-$((BRANCHES * BEAM_KEEP))}
@@ -70,7 +71,7 @@ JUDGE_MODEL=${JUDGE_MODEL:-$([ "$JUDGE_BACKEND" = openai ] && echo gemini-3.8-fl
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink$([ "$NO_THINKING" = text ] && echo -text)}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${SAFE_RADIUS:+_safe$SAFE_RADIUS}${TREE_DEPTH:+_tree$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-s$SEGMENT_TURNS}${JUDGE_BACKEND:+_judge-$JUDGE_MODE}$([ -n "$JUDGE_BACKEND" ] && [ "$ADHERENCE_WEIGHT" != 0 ] && echo _adh$ADHERENCE_WEIGHT)_skip$SKIP/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink$([ "$NO_THINKING" = text ] && echo -text)}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${SAFE_RADIUS:+_safe$SAFE_RADIUS}${CODE_FACTS:+_codefacts}${TREE_DEPTH:+_tree$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-s$SEGMENT_TURNS}${JUDGE_BACKEND:+_judge-$JUDGE_MODE}$([ -n "$JUDGE_BACKEND" ] && [ "$ADHERENCE_WEIGHT" != 0 ] && echo _adh$ADHERENCE_WEIGHT)_skip$SKIP/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY JAX_PLATFORMS=cpu
@@ -79,7 +80,7 @@ export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_thread
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/craftax_env:$REPO/environments/crafter_env:$REPO/deps/verifiers:$REPO/deps/renderers${CRAFTAX_PY:+:$CRAFTAX_PY}${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off} tree=$([ -n "$TREE_DEPTH" ] && echo "depth$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-r$ROOT_BRANCHES-s$SEGMENT_TURNS-t$SEGMENT_TOKENS-m$MAX_TOKENS" || echo off) judge=$([ -n "$JUDGE_BACKEND" ] && echo "$JUDGE_BACKEND:$JUDGE_MODEL/$JUDGE_MODE/w$NOTES_WEIGHT/adh$ADHERENCE_WEIGHT" || echo off)] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off} code_facts=${CODE_FACTS:-off} tree=$([ -n "$TREE_DEPTH" ] && echo "depth$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-r$ROOT_BRANCHES-s$SEGMENT_TURNS-t$SEGMENT_TOKENS-m$MAX_TOKENS" || echo off) judge=$([ -n "$JUDGE_BACKEND" ] && echo "$JUDGE_BACKEND:$JUDGE_MODEL/$JUDGE_MODE/w$NOTES_WEIGHT/adh$ADHERENCE_WEIGHT" || echo off)] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 # jobs/craftax_eval.sbatch unpacks the venv tarball here first: re-walking ~200k files on scratch costs minutes.
 [ -x "$SLURM_TMPDIR/sgl-venv/bin/python" ] || rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
@@ -145,6 +146,7 @@ if [ -n "$TREE_DEPTH" ]; then
     sed -i "s|^env.max_episode_steps = .*|&\n$JUDGE_LINES|" "$OUT/eval.toml"
   fi
 fi
+[ -n "$CODE_FACTS" ] && sed -i "s|^env.max_episode_steps = .*|&\nenv.code_facts = true|" "$OUT/eval.toml"
 [ -n "$SAFE_RADIUS" ] && sed -i "s|^env.max_episode_steps = .*|&\nenv.respawn_safe = true\nenv.respawn_safe_radius = $SAFE_RADIUS|" "$OUT/eval.toml"
 EVAL_ARGS=(--dashboard false --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "$CONC"
   --concurrency.max-inflight "$CONC" --concurrency.initial-inflight "$CONC")

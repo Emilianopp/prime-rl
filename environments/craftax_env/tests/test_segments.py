@@ -276,3 +276,60 @@ def test_summary_frame_roundtrip():
     text = summary_text("GAME RECORD", "MAP:\n- coal (6,7)")
     assert NOTES_FRAME in text and notes_of_summary(text) == "MAP:\n- coal (6,7)"
     assert notes_of_summary(summary_text("GAME RECORD", "")) == ""
+
+
+PLAN_NOTES = """<notes>
+FINDINGS:
+1. Turn 2: DO on grass did nothing; face a tree first.
+PLAN:
+1. 2 wood at the tree F0 (23,24) - done when Wood:2
+2. place_table near F0 (24,24) - done when the HUD shows a table
+SURVIVAL:
+if drink < 4 then drink at the water F0 (22,19)
+</notes>"""
+
+
+def test_code_facts_split(tmp_path):
+    """code_facts: the game writes KNOWN PLACES + EVENT LOG into the notes request and the next
+    segment's start; the model's notes hold only FINDINGS / PLAN / SURVIVAL."""
+    from craftax_env.segments import PLAN_PROMPT
+
+    task, env = make(tmp_path, segment_turns=6, code_facts=True)
+    player = SegmentPlayer(first_notes=PLAN_NOTES)
+    first = asyncio.run(env.play_segment(task, player))
+    request = player.received[-1]
+    assert request.startswith("END OF SEGMENT") and request.endswith(PLAN_PROMPT)
+    assert request.index("[Grid]") < request.index("KNOWN PLACES on F0") < request.index("EVENT LOG") < request.index(PLAN_PROMPT)
+    assert "<- needed next" in request  # collect_wood / place_table: trees are marked
+    summary = first["summary"]
+    assert summary.startswith("GAME RECORD") and "KNOWN PLACES on F0" in summary and "EVENT LOG" in summary
+    assert summary.index("EVENT LOG") < summary.index("YOUR NOTES FROM THE PREVIOUS SEGMENT:")
+    assert "1. 2 wood at the tree F0 (23,24)" in summary
+    assert first["trace"].metrics["notes_format"] == 1.0  # three sections, no MAP expected
+    assert first["code_facts"] and first["facts"].startswith("KNOWN PLACES")
+    assert first["map_claims"].startswith("(MAP written by the game")
+    node = {"id": first["node_id"], "parent": first["parent"], "depth": 1, "state_path": first["state_path"],
+            "state_sha256": first["state_sha256"], "summary": summary, "branch": 0}
+    second_player = SegmentPlayer(first_notes=PLAN_NOTES)
+    asyncio.run(env.play_segment(child_task(task, node), second_player))
+    assert "KNOWN PLACES on F0" in second_player.systems[0]
+    line = json.loads(open(tmp_path / "episodes.jsonl").readline())
+    assert line["code_facts"] and line["facts"].startswith("KNOWN PLACES")
+
+
+def test_known_places_and_critical_path():
+    from craftax_env import world
+
+    game = glyph.CraftaxGame(1000042, None)
+    seen = np.ones(np.asarray(game.state.map).shape, dtype=bool)
+    achs, mats, feats = world.critical_path(game, seen, steps=2)
+    assert achs == ["collect_wood", "place_table"] and mats == {"wood"} and feats == {"tree"}
+    text = world.known_places(game, seen)
+    lines = text.splitlines()
+    assert lines[0].startswith("KNOWN PLACES on F0") and lines[1].startswith("- tree:") and lines[1].endswith("<- needed next")
+    assert "ladder down" in text and "tiles south" in text
+    blind = np.zeros_like(seen)
+    assert "nothing notable seen yet" in world.known_places(game, blind)
+    assert "never seen on this floor: tree" in world.known_places(game, blind)
+    # a lost pickaxe puts its craft back on the path: the ladder looks at the inventory, not only achievements
+    assert world.direction(-5, 1) == "north" and world.direction(-5, -5) == "north-west" and world.direction(0, 3) == "east"

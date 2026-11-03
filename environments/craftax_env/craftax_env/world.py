@@ -349,3 +349,136 @@ def check_map_claims(game: Any, map_lines: list[str], explored: np.ndarray, defa
                 note = "; there is one there, but you never saw it" if guessed else ""
                 out.lines.append(f"x invented: {label} (nearest seen {feature} {truth}, {int(d[i])} tiles away{note})")
     return out
+
+
+# --- the known places (code-written MAP, `code_facts`) ----------------------------------
+# Under a turn-window eviction the model writes its notes from the last ~50 turns only, so its
+# MAP restates its own view (2026-11-02: 84% of the claims were view cells, 0 of 101 segments
+# located a needed resource out of view). The game writes the places instead, from every cell
+# the agent has seen; the notes keep what code cannot write (plan, lessons, survival rules).
+
+PROVIDES = {"make_wood_pickaxe": "pick1", "make_stone_pickaxe": "pick2", "make_iron_pickaxe": "pick3",
+            "make_diamond_pickaxe": "pick4", "place_table": "table", "place_furnace": "furnace"}
+"""The capability an achievement's craft or placement gives."""
+REQUIRES: dict[str, tuple[str, ...]] = {
+    "make_wood_pickaxe": ("table",), "make_wood_sword": ("table",),
+    "collect_stone": ("pick1",), "collect_coal": ("pick1",), "place_stone": ("pick1",), "place_furnace": ("pick1",),
+    "make_stone_pickaxe": ("table", "pick1"), "make_stone_sword": ("table", "pick1"), "make_arrow": ("table", "pick1"),
+    "make_torch": ("table", "pick1"), "collect_iron": ("pick2",),
+    "make_iron_pickaxe": ("table", "furnace", "pick2"), "make_iron_sword": ("table", "furnace", "pick2"),
+    "make_iron_armour": ("table", "furnace", "pick2"), "collect_diamond": ("pick3",),
+    "make_diamond_pickaxe": ("table", "pick3"), "make_diamond_sword": ("table", "pick3"),
+    "collect_sapphire": ("pick4",), "collect_ruby": ("pick4",),
+}
+"""The capabilities (pickaxe level, a table or furnace on the floor) an achievement needs; materials aside."""
+_CAP_PROVIDER = {v: k for k, v in PROVIDES.items()}
+_COST = {"make_wood_pickaxe": "MAKE_WOOD_PICKAXE", "make_stone_pickaxe": "MAKE_STONE_PICKAXE",
+         "make_iron_pickaxe": "MAKE_IRON_PICKAXE", "make_wood_sword": "MAKE_WOOD_SWORD",
+         "make_stone_sword": "MAKE_STONE_SWORD", "make_iron_sword": "MAKE_IRON_SWORD",
+         "make_diamond_pickaxe": "MAKE_DIAMOND_PICKAXE", "make_diamond_sword": "MAKE_DIAMOND_SWORD",
+         "make_arrow": "MAKE_ARROW", "make_torch": "MAKE_TORCH", "make_iron_armour": "MAKE_IRON_ARMOUR",
+         "place_table": "PLACE_TABLE", "place_furnace": "PLACE_FURNACE", "place_stone": "PLACE_STONE"}
+_MATERIAL_FEATURE = {"wood": "tree", "stone": "stone", "coal": "coal", "iron": "iron", "diamond": "diamond"}
+_COLLECT_FEATURE = {"collect_wood": "tree", "collect_stone": "stone", "collect_coal": "coal", "collect_iron": "iron",
+                    "collect_diamond": "diamond", "collect_sapphire": "sapphire", "collect_ruby": "ruby",
+                    "enter_dungeon": "ladder down"}
+KNOWN_FEATURES = ("tree", "water", "stone", "coal", "iron", "diamond", "sapphire", "ruby", "table", "furnace",
+                  "ladder down", "ladder up", "chest", "fountain", "enchantment table", "lava")
+"""What the known places list, in this order after the needed ones."""
+
+
+def capabilities(game: Any, explored: np.ndarray) -> set[str]:
+    """pick1..pick4 from the inventory's pickaxe level; table / furnace if one stands on a seen cell of this floor."""
+    items = game.snapshot()["items"]
+    out = {f"pick{k}" for k in range(1, int(items["pickaxe"]) + 1)}
+    for kind in ("table", "furnace"):
+        if (_feature_mask(game, game.floor, kind) & explored[game.floor]).any():
+            out.add(kind)
+    return out
+
+
+def _cost(name: str) -> dict[str, int]:
+    action = _COST.get(name)
+    if action in RECIPES:
+        return RECIPES[action][0]
+    return PLACEMENTS.get(action, {}) if action else {}
+
+
+def critical_path(game: Any, explored: np.ndarray, steps: int = 1) -> tuple[list[str], set[str], set[str]]:
+    """The next `steps` unmet LADDER steps (a pickaxe lost at a death counts as unmet) with, recursively,
+    the providers of the capabilities they lack: (achievements, materials still missing, features to find)."""
+    caps, have = capabilities(game, explored), set(game.achievements)
+    items = game.snapshot()["items"]
+    heads = []
+    for name, _ in LADDER:
+        lost = name in PROVIDES and PROVIDES[name].startswith("pick") and PROVIDES[name] not in caps
+        if name not in have or lost:
+            heads.append(name)
+            if len(heads) == steps:
+                break
+    achs: list[str] = []
+
+    def add(name: str, depth: int = 0) -> None:
+        if name in achs or depth > 6:
+            return
+        for cap in REQUIRES.get(name, ()):
+            if cap not in caps and cap in _CAP_PROVIDER:
+                add(_CAP_PROVIDER[cap], depth + 1)
+        achs.append(name)  # prerequisites first
+
+    for h in heads:
+        add(h)
+    mats = {k for a in achs for k, n in _cost(a).items() if items.get(k, 0) < n}
+    feats = {_MATERIAL_FEATURE[m] for m in mats if m in _MATERIAL_FEATURE} | {_COLLECT_FEATURE[a] for a in achs if a in _COLLECT_FEATURE}
+    return achs, mats, feats
+
+
+_COMPASS = {(-1, 0): "north", (1, 0): "south", (0, 1): "east", (0, -1): "west",
+            (-1, 1): "north-east", (-1, -1): "north-west", (1, 1): "south-east", (1, -1): "south-west"}
+
+
+def direction(dr: int, dc: int) -> str:
+    """A compass word for an offset (row grows south, col grows east); diagonal when neither axis dominates 2:1."""
+    if dr == dc == 0:
+        return "here"
+    sr = int(np.sign(dr)) if abs(dr) * 2 >= abs(dc) else 0
+    sc = int(np.sign(dc)) if abs(dc) * 2 >= abs(dr) else 0
+    return _COMPASS[(sr, sc)]
+
+
+def known_places(game: Any, explored: np.ndarray, per_feature: int = 2) -> str:
+    """The code-written MAP: for each feature, the nearest SEEN cells on the current floor (place, distance,
+    direction, whether it is in the 9x11 view); the features the next tech steps need come first, marked."""
+    floor = game.floor
+    pr, pc = (int(v) for v in game.position)
+    r0, c0 = pr - VIEW_CENTER[0], pc - VIEW_CENTER[1]
+    _, _, needed = critical_path(game, explored, steps=2)
+    if game.snapshot()["vitals"]["drink"] <= 4:
+        needed.add("water")
+    order = [f for f in KNOWN_FEATURES if f in needed] + [f for f in KNOWN_FEATURES if f not in needed]
+    lines, unseen = [], []
+    for feature in order:
+        cells = np.argwhere(_feature_mask(game, floor, feature) & explored[floor])
+        if not len(cells):
+            if feature in needed:
+                unseen.append(feature)
+            continue
+        d = np.maximum(np.abs(cells[:, 0] - pr), np.abs(cells[:, 1] - pc))
+        picks = []
+        for i in np.argsort(d, kind="stable"):
+            r, c = (int(v) for v in cells[i])
+            if any(max(abs(r - a), abs(c - b)) <= 2 for a, b in picks):  # one entry per patch
+                continue
+            picks.append((r, c))
+            if len(picks) == per_feature:
+                break
+        parts = []
+        for r, c in picks:
+            dist = max(abs(r - pr), abs(c - pc))
+            where = "in your view" if r0 <= r < r0 + VIEW_ROWS and c0 <= c < c0 + VIEW_COLS else direction(r - pr, c - pc)
+            parts.append(f"{place(floor, (r, c))} {dist} tiles {where}" if where != "in your view" else f"{place(floor, (r, c))} in your view")
+        lines.append(f"- {feature}: " + "; ".join(parts) + ("   <- needed next" if feature in needed else ""))
+    head = (f"KNOWN PLACES on F{floor} (written by the game from every cell you have seen on this floor; "
+            f"you are at {place(floor, (pr, pc))}; rows grow south, cols grow east)")
+    tail = [f"- needed next but never seen on this floor: {', '.join(unseen)} (search unexplored ground)"] if unseen else []
+    return "\n".join([head, *(lines or ["- nothing notable seen yet"]), *tail])

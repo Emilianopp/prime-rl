@@ -84,6 +84,64 @@ if it is night then wall in with stone next to the table and sleep
 
 Be factual and specific. Reply with <notes>...</notes> only, no <action> tag."""
 
+PLAN_SECTIONS = ("FINDINGS", "PLAN", "SURVIVAL")
+"""The notes' sections under `code_facts`: the game writes the places and the event log itself."""
+
+PLAN_PROMPT = """\
+Your notes for the next segment. This reply is not a game turn: no action will be played. \
+The game continues from exactly this state in a fresh context, which will show the game's own \
+record of your state, the KNOWN PLACES above and the segment's EVENT LOG, so do not copy any of \
+them. Write only what the game cannot: what you will do and why, inside <notes>...</notes>, under \
+these three headers:
+
+FINDINGS: up to 3 lessons from this segment that the rules and the event log do not state by \
+themselves: why something failed or hurt you, and what to do differently. Tie each to an event \
+(its turn) or a place. No general advice; write "none" if nothing was learned.
+
+PLAN: 2 to 4 numbered subgoals in order, one per line: \
+`N. <achievement or item count> at <place> - done when <what the HUD will show>`. \
+Take every place from KNOWN PLACES as written there, F<floor> (row,col); for something never \
+seen, give a direction to search. Start from the step that is marked "needed next" unless a \
+vital or a danger comes first, and say so. Plan only achievements that are not in \
+[Achievements already unlocked], or item counts you do not hold yet, and make sure each subgoal \
+has its tools and station from the inventory or an earlier subgoal.
+
+SURVIVAL: one or two rules, each `if <vital or condition> then <what to do, where>`, with places \
+from KNOWN PLACES.
+
+An example from a different game (its places and facts are not yours, do not copy them):
+<notes>
+FINDINGS:
+1. Turn 41: make_stone_pickaxe failed because I had used my last wood on a sword; keep 1 wood per craft.
+2. Turns 60-75: zombies hit me on open grass at night far from the table; be at the table by dusk.
+PLAN:
+1. 2 wood at the tree F0 (22,31) - done when Wood:2
+2. make_stone_pickaxe at the table F0 (25,30) - done when the HUD shows a stone pickaxe
+3. collect_iron at F0 (14,36) - done when Iron:1
+SURVIVAL:
+if drink < 4 then drink at the water F0 (27,26)
+if it is night then wall in with stone next to the table F0 (25,30) and sleep
+</notes>
+
+Be specific. Reply with <notes>...</notes> only, no <action> tag."""
+
+PLAN_RETRY = """\
+END OF SEGMENT, still: the game is paused and no action will be played now. Write the notes \
+for the next segment inside <notes>...</notes>, under the headers FINDINGS, PLAN and SURVIVAL as \
+asked above, with places as KNOWN PLACES writes them. Do not output an <action> tag."""
+
+EVENT_LOG_LINES = 15
+EVENT_LOG_HEADER = "EVENT LOG of the previous segment (written by the game{tail})"
+
+
+def event_log(events: list[str], n: int = EVENT_LOG_LINES) -> str:
+    """The game's own log of the segment for the next one: unlocks, failed crafts and why, stations
+    placed or destroyed, floors, sleeps, deaths (the timeline's lines, the last `n`)."""
+    tail = events[-n:]
+    more = f"; the last {len(tail)} of {len(events)} notable events" if len(events) > len(tail) else ""
+    return "\n".join([EVENT_LOG_HEADER.format(tail=more), *(tail or ["(nothing notable happened)"])])
+
+
 SUMMARY_RETRY = """\
 END OF SEGMENT, still: the game is paused and no action will be played now. Write the notes \
 for the next segment inside <notes>...</notes>, under the headers MAP, FINDINGS, PLAN and \
@@ -202,13 +260,15 @@ NOTES_FRAME = ("(Places written (row,col) in these notes are cells of the [Grid]
                "in this segment, where you are the arrow at (4,5); they shift as soon as you move.)")
 
 
-def summary_text(record: str, notes: str | None) -> str:
-    """What the next segment starts from: the record, then the notes. Its first observation
-    is the view the notes were written in, so their view-frame places read off it."""
+def summary_text(record: str, notes: str | None, facts: str | None = None) -> str:
+    """What the next segment starts from: the record, the game-written facts (`code_facts`: the
+    known places and the event log), then the notes. Its first observation is the view the notes
+    were written in, so their view-frame places read off it."""
     notes = (notes or "").strip()
+    head = f"{record}\n\n{facts.strip()}" if facts else record
     if not notes:
-        return f"{record}\n\n{NOTES_HEADER}\n(you wrote no notes)"
-    return f"{record}\n\n{NOTES_HEADER}\n{NOTES_FRAME}\n{notes}"
+        return f"{head}\n\n{NOTES_HEADER}\n(you wrote no notes)"
+    return f"{head}\n\n{NOTES_HEADER}\n{NOTES_FRAME}\n{notes}"
 
 
 def notes_of_summary(summary: str | None) -> str:
@@ -267,9 +327,9 @@ def parse_notes(notes: str) -> dict[str, list[str]]:
     return out
 
 
-def notes_format(sections: dict[str, list[str]]) -> float:
-    """The fraction of the four sections that hold at least one line."""
-    return sum(bool(sections.get(s)) for s in SECTIONS) / len(SECTIONS)
+def notes_format(sections: dict[str, list[str]], expected: tuple[str, ...] = SECTIONS) -> float:
+    """The fraction of the expected sections (the four, or PLAN_SECTIONS) that hold at least one line."""
+    return sum(bool(sections.get(s)) for s in expected) / len(expected)
 
 
 def floor_name(floor: int) -> str:

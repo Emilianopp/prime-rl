@@ -166,3 +166,62 @@ def test_empty_notes_are_logged_as_skipped(tmp_path, monkeypatch):
     assert not calls and out["trace"].rewards["notes"] == 0.0
     judged = [json.loads(l) for l in open(tmp_path / "episodes.jsonl") if '"craftax-judge"' in l]
     assert judged and judged[0]["mode"] == "skipped" and judged[0]["skipped"] == "no notes"
+
+
+def test_notes_score_without_map_under_code_facts():
+    assert notes_score(0.0, 0.8, 0.6, map_weight=0.0)["score"] == pytest.approx(0.5 * 0.8 + 0.5 * 0.6)
+    assert notes_score(1.0, 0.0, 0.0)["grounding"] == pytest.approx(0.6)
+
+
+def test_plan_check_feasible_and_path(game):
+    from craftax_env.plan_check import check_plan
+
+    seen = np.ones(np.asarray(game.state.map).shape, dtype=bool)
+    good = ["1. collect_wood at the tree F0 (23,24) - done when Wood:1", "2. place_table - done when a table is placed",
+            "3. make_iron_pickaxe - done when the HUD shows an iron pickaxe"]
+    check = check_plan(game, seen, good)
+    assert check.on_path == 1.0 and check.feasible == pytest.approx(2 / 3)  # the iron pickaxe lacks a furnace and pick2
+    assert check.critical == ["collect_wood"] and "lacks" in check.text()
+    side = ["1. make_wood_sword - done when the HUD shows a sword", "2. collect_wood at a tree - done when Wood:2"]
+    check = check_plan(game, seen, side)
+    assert check.on_path == 0.5 and check.feasible == pytest.approx(0.5)  # the sword lacks a table
+    assert check_plan(game, seen, []).on_path == 0.0 and check_plan(game, seen, []).feasible is None
+
+
+def test_code_facts_verdict_mix():
+    from craftax_env.judge import code_facts_verdict
+
+    off = {"code_facts": True, "plan_feasible": 1.0, "plan_on_path": 0.0, "findings_weight": 0.3}
+    v = code_facts_verdict(off, 0.6, 1.0, "", False)  # off the path, the judge says the departure is right
+    assert v["path"] == 1.0 and v["plan"] == 1.0 and v["score"] == pytest.approx(0.7 + 0.3 * 0.6)
+    v = code_facts_verdict(off, 0.6, 0.0, "", False)
+    assert v["path"] == 0.0 and v["plan"] == 0.5 and v["score"] == pytest.approx(0.7 * 0.5 + 0.3 * 0.6)
+    on = {**off, "plan_on_path": 1.0}
+    assert code_facts_verdict(on, 0.6, 0.0, "", False)["path"] == 1.0  # on the path: the verdict is ignored
+    failed = code_facts_verdict(off, 0.5, 0.5, "judge failed", True)  # no neutral 0.5: code only
+    assert failed["score"] == pytest.approx(0.5) and "deviation" not in failed
+
+
+def test_code_facts_judge_reward(tmp_path, monkeypatch):
+    from test_segments import PLAN_NOTES
+
+    calls = _stub_single(monkeypatch, findings=0.8, plan=0.0)
+    task, env = make(tmp_path, segment_turns=4, code_facts=True, judge=CrafterJudgeConfig(model="stub"), notes_weight=0.5)
+    out = asyncio.run(env.play_segment(task, SegmentPlayer(first_notes=PLAN_NOTES)))
+    asyncio.run(env._judge_branch(out))
+    info = out["trace"].info["craftax"]
+    assert info["plan_on_path"] == 1.0 and info["plan_feasible"] == 1.0  # wood then a table: on the path, feasible
+    assert out["trace"].rewards["notes"] == pytest.approx(0.7 * 1.0 + 0.3 * 0.8)
+    prompt = calls[0]
+    assert "KNOWN PLACES" in prompt and "Code check of the plan" in prompt and "critical path" in prompt
+    assert "Code check of the MAP lines" not in prompt
+
+
+def test_plan_check_material_runs_are_not_wasted(game):
+    from craftax_env.plan_check import check_plan
+
+    seen = np.ones(np.asarray(game.state.map).shape, dtype=bool)
+    game2 = glyph.CraftaxGame.restore(glyph.CraftaxGame.save(game), None)
+    game2.achievements = set(game2.achievements) | {"collect_wood"}  # unlocked once, wood spent since
+    check = check_plan(game2, seen, ["1. 2 wood at a tree - done when Wood:2"])
+    assert check.feasible == 1.0 and "already unlocked" not in check.text()

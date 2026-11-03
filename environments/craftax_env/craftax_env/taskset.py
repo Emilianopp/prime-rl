@@ -42,6 +42,11 @@ from craftax_env.segments import (
     NOTES_OPENER,
     SUMMARY_PROMPT,
     SUMMARY_RETRY,
+    PLAN_PROMPT,
+    PLAN_RETRY,
+    PLAN_SECTIONS,
+    SECTIONS,
+    event_log,
     continuation_prompt,
     extract_notes,
     floor_name,
@@ -56,6 +61,7 @@ from craftax_env.segments import (
 )
 from craftax_env import world
 from craftax_env.adherence import AdherenceTracker, parse_plan
+from craftax_env.plan_check import check_plan
 from craftax_env.judge import (
     CraftaxAdherenceJudge,
     CraftaxGroupAdherenceJudge,
@@ -172,6 +178,15 @@ class CraftaxEnvConfig(vf.EnvConfig):
     """Output cap for the notes turn only (cut to what the context still holds)."""
     summary_prompt: str | None = None
     """Overrides the default notes request (segments.SUMMARY_PROMPT)."""
+    code_facts: bool = False
+    """Split the notes between code and the model: the game writes the KNOWN PLACES (world.known_places,
+    from every cell seen on the floor) and the EVENT LOG (the segment's timeline) into the notes request
+    and into the next segment's start, and the model writes only FINDINGS / PLAN / SURVIVAL
+    (segments.PLAN_PROMPT); its MAP claims are no longer graded. False: the model writes all four sections."""
+    findings_weight: float = Field(0.3, ge=0.0, le=1.0)
+    """code_facts: the notes reward is (1 - w) x plan + w x findings, where plan = the code check
+    (plan_check: feasible, first subgoal on the critical path) raised by the judge's verdict on a
+    departure from that path, and findings = the judge's lesson score (dropped when the judge fails)."""
     summary_retry: bool = True
     """Ask once more (segments.SUMMARY_RETRY) when the notes reply holds no <notes> of 80+ characters."""
     train_on_notes: bool = False
@@ -641,6 +656,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         max_floor = game.floor
         tracker = ForfeitTracker()  # forfeit kinds, streaks and collapse onset
         notes, retry_reason, notes_retried, continues = None, None, False, False
+        facts: str | None = None  # code_facts: the known places + event log the notes turn showed
         sampled_before_notes = None  # sampled nodes before the notes request (train_on_notes = False)
         observation = opening
         async with agent.interaction(task) as interaction:
@@ -785,8 +801,14 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 # then the request last: what the model reads last is what it answers.
                 # The HUD shows only a count: name the unlocked ones, so the PLAN does not repeat them.
                 unlocked = ", ".join(sorted(game.achievements)) or "none"
-                message = (f"{NOTES_OPENER}\n\nThe state at the end of the segment:\n\n{shown}\n\n"
-                           f"[Achievements already unlocked]\n{unlocked}\n\n{cfg.summary_prompt or SUMMARY_PROMPT}")
+                if cfg.code_facts:  # the game's facts sit between the observation and the request
+                    facts = await asyncio.to_thread(
+                        lambda: f"{world.known_places(game, explored)}\n\n{event_log(timeline.lines())}")
+                    message = (f"{NOTES_OPENER}\n\nThe state at the end of the segment:\n\n{shown}\n\n{facts}\n\n"
+                               f"[Achievements already unlocked]\n{unlocked}\n\n{cfg.summary_prompt or PLAN_PROMPT}")
+                else:
+                    message = (f"{NOTES_OPENER}\n\nThe state at the end of the segment:\n\n{shown}\n\n"
+                               f"[Achievements already unlocked]\n{unlocked}\n\n{cfg.summary_prompt or SUMMARY_PROMPT}")
 
                 def notes_cap() -> int | None:
                     # summary_max_tokens, cut to what the context still holds: SGLang refuses a
@@ -808,7 +830,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     if cfg.summary_retry and retry_reason is not None and (cap is None or cap >= 256):
                         notes_retried = True
                         async with _turn_sampling(interaction, cap):
-                            reply = await interaction.turn(SUMMARY_RETRY)
+                            reply = await interaction.turn(PLAN_RETRY if cfg.code_facts else SUMMARY_RETRY)
                         if not reply.terminated:
                             content, thinking, _ = reply_parts(reply, interaction.trace)
                             notes = extract_notes(content, thinking) or notes
@@ -825,7 +847,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         if continues:
             record = game_record(game, stations=stations, record_stations=cfg.record_stations, depth=depth,
                                  first_turn=first_turn, deaths=deaths, death_inventory=cfg.death_inventory)
-            summary = summary_text(record, notes)
+            summary = summary_text(record, notes, facts)
             saved = {"game": game.save(), "explored": explored, "stations": stations, "seed": seed, "depth": depth}
             state_path, state_sha, state_bytes = await asyncio.to_thread(store.put, trace_id, saved)
         sections = parse_notes(notes or "")
@@ -839,12 +861,17 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "map_ascii": world.ascii_map(game, explored),
                 "nearest": world.nearest(game, explored, cfg.judge_world_radius),
                 "next_step": world.next_step(game, stations),
-                "map_claims": claims.text(),
+                "map_claims": "(MAP written by the game: not graded)" if cfg.code_facts else claims.text(),
                 "notes_view": world.view_note(view),
                 "map_check": claims.score,
                 "map_claim_counts": {"correct": claims.correct, "wrong": claims.wrong, "invented": claims.invented,
                                      "unchecked": claims.unchecked},
             }
+            if cfg.code_facts:
+                check = check_plan(game, explored, sections["PLAN"], view=view)
+                judge_inputs.update({"plan_feasible": check.feasible, "plan_on_path": check.on_path,
+                                     "critical_path": check.critical, "plan_check": check.text(),
+                                     "findings_weight": cfg.findings_weight})
         achievements = sorted(game.achievements)
         delta = game.achievement_score - score_before  # Craftax's 1/3/5/8 reward of this segment's unlocks
         score = total if cfg.reward == "return" else game.achievement_score
@@ -878,7 +905,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     "notes_masked_tokens": float(notes_masked["tokens"]),
                     "notes_retried": float(notes_retried),
                     **{f"notes_retry_{r}": float(notes_retried and retry_reason == r) for r in NOTES_RETRY_REASONS},
-                    "notes_format": notes_format(sections),
+                    "notes_format": notes_format(sections, PLAN_SECTIONS if cfg.code_facts else SECTIONS),
                     "explored_cells": float(explored.sum()),
                     "map_check": float(judge_inputs.get("map_check", 0.0)),
                     "map_claims_correct": float(judge_inputs["map_claim_counts"]["correct"]),
@@ -906,6 +933,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "summary": summary, "record": record, "notes": notes, "notes_sections": sections,
                 "notes_retry_reason": retry_reason if notes_retried else None,
                 "notes_masked": notes_masked, "train_on_notes": cfg.train_on_notes,
+                "code_facts": cfg.code_facts, "facts": facts,
                 # what the judges compare against (docs/craftax-segments-judge.md)
                 "first_turn": first_turn, "achievements_before": achievements_before,
                 "achievement_reward_delta": delta, "events": events[:80], "stations": stations,
@@ -945,7 +973,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     "achievements_before", "achievement_reward_delta", "events", "stations", "floor", "position",
                     "notes", "record", "notes_retry_reason", "record_before", "map_ascii", "nearest", "next_step",
                     "map_claims", "map_check", "map_claim_counts", "actions_hist", "forfeit_kinds", "adherence_digest",
-                    "parent_plan_score")}
+                    "parent_plan_score", "code_facts", "facts", "plan_feasible", "plan_on_path", "critical_path",
+                    "plan_check") if k in info}
                     | {"state_bytes": state_bytes, "explored_cells": int(explored.sum())})
             with open(cfg.episode_log, "a") as f:
                 f.write(json.dumps(line) + "\n")
