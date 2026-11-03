@@ -339,6 +339,26 @@ def test_known_places_and_critical_path():
     assert world.direction(-5, 1) == "north" and world.direction(-5, -5) == "north-west" and world.direction(0, 3) == "east"
 
 
+def test_known_places_frontiers_and_other_floors():
+    from craftax_env import world
+
+    game = glyph.CraftaxGame(1000042, None)
+    pr, pc = (int(v) for v in game.position)
+    seen = np.zeros(np.asarray(game.state.map).shape, dtype=bool)
+    seen[0, pr - 4:pr + 5, pc - 5:pc + 6] = True  # the first 9x11 view only
+    edges = world.frontiers(game, seen)
+    assert 1 <= len(edges) <= 3 and all(e.startswith("F0 (") and "tiles" in e for e in edges)
+    assert len({e.rsplit(" ", 1)[-1] for e in edges}) == len(edges)  # one per direction
+    assert "unexplored ground starts at: F0 (" in world.known_places(game, seen)
+    assert world.other_floors(game, seen) == []  # only the Overworld seen
+    seen[1] = True  # the whole Dungeon seen
+    lines = world.other_floors(game, seen)
+    assert len(lines) == 1 and lines[0].startswith("- F1 (") and "ladder up F1 (" in lines[0]
+    text = world.known_places(game, seen)
+    assert "Other floors you have seen (written by the game):" in text and "- F1 (" in text
+    assert world.frontiers(game, np.ones_like(seen)) == []  # nothing unseen inside the map
+
+
 def test_turns_lost_counts():
     from craftax_env.segments import TurnsLost, count_findings
 

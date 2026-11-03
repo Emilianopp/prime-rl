@@ -370,7 +370,9 @@ NOTES_HEADER = "YOUR NOTES FROM THE PREVIOUS SEGMENT:"
 NOTES_FRAME = ("(Places written (row,col) in these notes are cells of the [Grid] of your first observation "
                "in this segment, where you are the arrow at (4,5); they shift as soon as you move.)")
 FACTS_NOTES_FRAME = ("(Places in these notes are F<floor> (row,col) as KNOWN PLACES writes them: the HUD's Floor "
-                     "and Pos, fixed on the map.)")
+                     "and Pos, fixed on the map. Your [Grid] and HUD are always the truth; these notes and places "
+                     "may be stale (a station can be destroyed, creatures move). If your recent moves keep "
+                     "returning to the same cells, stop and try another way.)")
 
 
 def summary_text(record: str, notes: str | None, facts: str | None = None) -> str:

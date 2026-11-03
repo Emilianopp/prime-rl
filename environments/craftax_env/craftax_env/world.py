@@ -450,6 +450,59 @@ def direction(dr: int, dc: int) -> str:
     return _COMPASS[(sr, sc)]
 
 
+OTHER_FLOOR_FEATURES = ("ladder up", "ladder down", "table", "furnace", "fountain", "enchantment table")
+"""What KNOWN PLACES lists for the other floors seen (with the features needed next)."""
+
+
+def frontiers(game: Any, explored: np.ndarray, n: int = 3) -> list[str]:
+    """Where unexplored ground starts: seen walkable cells of this floor with an unseen up/down/left/right
+    neighbour inside the map (GlyphBench's frontier). The nearest one per compass direction, nearest first."""
+    floor = game.floor
+    seen = explored[floor]
+    walk = ~game._rt["not_walkable"][np.asarray(game.state.map[floor])]
+    unseen = ~seen
+    border = np.zeros_like(seen)
+    border[1:, :] |= unseen[:-1, :]
+    border[:-1, :] |= unseen[1:, :]
+    border[:, 1:] |= unseen[:, :-1]
+    border[:, :-1] |= unseen[:, 1:]
+    cells = np.argwhere(seen & walk & border)
+    if not len(cells):
+        return []
+    pr, pc = (int(v) for v in game.position)
+    d = np.maximum(np.abs(cells[:, 0] - pr), np.abs(cells[:, 1] - pc))
+    best: dict[str, tuple[int, int, int]] = {}
+    for i in np.argsort(d, kind="stable"):
+        r, c = (int(v) for v in cells[i])
+        way = direction(r - pr, c - pc)
+        if way != "here" and way not in best:
+            best[way] = (r, c, int(d[i]))
+    picks = sorted(best.items(), key=lambda kv: kv[1][2])[:n]
+    return [f"{place(floor, (r, c))} {dist} tiles {way}" for way, (r, c, dist) in picks]
+
+
+def other_floors(game: Any, explored: np.ndarray, needed: set[str] | frozenset = frozenset()) -> list[str]:
+    """One line per OTHER floor the player has seen: its ladders, stations and the features needed next,
+    one seen cell each (the one nearest that floor's up-ladder, where a descent arrives)."""
+    from craftax_env.glyph import FLOOR_NAMES
+
+    out = []
+    for f in range(explored.shape[0]):
+        if f == game.floor or not explored[f].any():
+            continue
+        up = np.argwhere(_feature_mask(game, f, "ladder up") & explored[f])
+        ref = up[0] if len(up) else np.array([24, 24])
+        parts = []
+        for feature in [x for x in KNOWN_FEATURES if x in OTHER_FLOOR_FEATURES or x in needed]:
+            cells = np.argwhere(_feature_mask(game, f, feature) & explored[f])
+            if len(cells):
+                r, c = (int(v) for v in cells[np.argmin(np.abs(cells - ref).max(axis=1))])
+                parts.append(f"{feature} {place(f, (r, c))}" + (" <- needed next" if feature in needed else ""))
+        name = FLOOR_NAMES[f] if f < len(FLOOR_NAMES) else str(f)
+        out.append(f"- F{f} ({name}): " + ("; ".join(parts) or "no ladder or station seen"))
+    return out
+
+
 def known_places(game: Any, explored: np.ndarray, per_feature: int = 2) -> str:
     """The code-written MAP: for each feature, the nearest SEEN cells on the current floor (place, distance,
     direction, whether it is in the 9x11 view); the features the next tech steps need come first, marked."""
@@ -485,4 +538,10 @@ def known_places(game: Any, explored: np.ndarray, per_feature: int = 2) -> str:
     head = (f"KNOWN PLACES on F{floor} (written by the game from every cell you have seen on this floor; "
             f"you are at {place(floor, (pr, pc))}; rows grow south, cols grow east)")
     tail = [f"- needed next but never seen on this floor: {', '.join(unseen)} (search unexplored ground)"] if unseen else []
+    edges = frontiers(game, explored)
+    if edges:
+        tail.append("- unexplored ground starts at: " + "; ".join(edges))
+    others = other_floors(game, explored, needed)
+    if others:
+        tail += ["Other floors you have seen (written by the game):", *others]
     return "\n".join([head, *(lines or ["- nothing notable seen yet"]), *tail])
