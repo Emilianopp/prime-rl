@@ -15,8 +15,8 @@
 # ENVS (environments/ packages on PYTHONPATH, default textworld_env), REPO
 # (prime-rl checkout, deps/ submodules checked out), VENV, SGLANG_VENV, OUT_ROOT,
 # RUN (a fixed run name for a chain of jobs: one output dir, a checkpoint every CKPT_INTERVAL
-# steps (default 1), and each job resumes from the latest checkpoint; a job that finds none
-# starts the run over), CKPT_INTERVAL, CKPT_KEEP (checkpoints kept, default 2).
+# steps (default 1), and each job resumes from the latest complete checkpoint, trainer and
+# orchestrator both; a job that finds none starts the run over), CKPT_INTERVAL, CKPT_KEEP (checkpoints kept, default 2).
 set -u
 CONFIG=${CONFIG:?set CONFIG} STEPS=${STEPS:-} ENVS=${ENVS:-textworld_env} RUN=${RUN:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
@@ -46,7 +46,12 @@ export CUDA_HOME=$($SGL_PY -c "import site; print(site.getsitepackages()[0])")/n
 START=(--clean)
 if [ -n "$RUN" ]; then
   START=(--run.name "$RUN" --ckpt.interval "${CKPT_INTERVAL:-1}" --ckpt.keep-last "${CKPT_KEEP:-2}")
-  if ls -d "$OUT/run/$RUN/checkpoints"/step_* > /dev/null 2>&1; then START+=(--resume); else START+=(--clean); fi
+  # Resume from the newest step that holds BOTH halves: a job cut off by its wall clock can leave
+  # the orchestrator's next checkpoint without the trainer's, and a bare --resume picks that
+  # step (FileNotFoundError: .../step_N/trainer) on every later job of the chain.
+  STEP=$(ls -d "$OUT/run/$RUN/checkpoints"/step_* 2>/dev/null | sort -V | while read -r d; do
+    [ -d "$d/trainer" ] && [ -d "$d/orchestrator" ] && basename "$d"; done | tail -1)
+  if [ -n "$STEP" ]; then START+=(--resume.step "${STEP#step_}"); else START+=(--clean); fi
   echo "run $RUN: ${START[*]} (job ${SLURM_JOB_ID:-local})" | tee -a "$OUT/cell.txt"
 fi
 uv run rl @ "$CONFIG" "${START[@]}" --output-dir "$OUT/run" --inference.sglang.python "$SGL_PY" \
