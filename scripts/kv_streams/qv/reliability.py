@@ -8,7 +8,10 @@ states, and ICC(1) = the share of the variance that is between states rather tha
 repeat noise (1: perfectly repeatable; 0: pure noise). Flaws: the mean count's spread
 and the Jaccard overlap of flaw types between two repeats.
 
-    GEMINI_API_KEY=... python reliability.py <replay.jsonl> <out.json> [games] [repeats]
+    GEMINI_API_KEY=... python reliability.py <replay.jsonl> <out.json> [games] [repeats] [model]
+
+The fifth argument names the judge model (default judge.MODEL); compare_judges.py sets
+runs of different models side by side.
 """
 
 from __future__ import annotations
@@ -50,6 +53,7 @@ def main():
     src, out = sys.argv[1], sys.argv[2]
     games = int(sys.argv[3]) if len(sys.argv) > 3 else 6
     repeats = int(sys.argv[4]) if len(sys.argv) > 4 else 5
+    model = sys.argv[5] if len(sys.argv) > 5 else judge.MODEL
     eps = [json.loads(line) for line in open(src)][:games]
     jobs = {}
     for ep in eps:
@@ -59,7 +63,7 @@ def main():
             text = judge.prompt(ep["rules"], s, s["kind"] == "reset", s.get("summary"), prev)
             for i in range(repeats):
                 jobs[f"{ep['seed']}:{k}:r{i}"] = text
-    replies = asyncio.run(judge.judge_all(jobs, out + ".calls.jsonl", 12))
+    replies = asyncio.run(judge.judge_all(jobs, out + ".calls.jsonl", 12, model))
 
     per = {q: [] for q in ("tool", "ready", "safe", "near", "P", "V", "G_star", "D", "Q", "R", "n_flaws")}
     jaccard = []
@@ -92,7 +96,7 @@ def main():
             per["R"].append([judge.segment_reward(a, b) for a, b in pairs if a and b])
     report = {q: summarize(g) for q, g in per.items()}
     report["flaw_type_jaccard"] = st.mean(jaccard) if jaccard else None
-    report["games"], report["repeats"], report["calls"] = len(eps), repeats, len(jobs)
+    report["games"], report["repeats"], report["calls"], report["model"] = len(eps), repeats, len(jobs), model
     json.dump({"report": report, "groups": per}, open(out, "w"))
     for q, r in report.items():
         print(q, json.dumps(r) if isinstance(r, dict) else r)

@@ -171,8 +171,8 @@ def segment_reward(start: dict, end: dict) -> float:
     return max(-1.0, min(1.0, (end["Q"] - start["Q"]) / max(start["G_star"], 1.0)))
 
 
-async def call(client: httpx.AsyncClient, text: str) -> tuple[dict, dict]:
-    body = {"model": MODEL, "messages": [{"role": "user", "content": text}],
+async def call(client: httpx.AsyncClient, text: str, model: str = MODEL) -> tuple[dict, dict]:
+    body = {"model": model, "messages": [{"role": "user", "content": text}],
             "response_format": {"type": "json_object"}, "temperature": 0.2}
     for attempt in range(5):
         try:
@@ -191,7 +191,7 @@ async def call(client: httpx.AsyncClient, text: str) -> tuple[dict, dict]:
     raise RuntimeError("unreachable")
 
 
-async def judge_all(jobs: dict, cache_path: str, concurrency: int = 8) -> dict:
+async def judge_all(jobs: dict, cache_path: str, concurrency: int = 8, model: str = MODEL) -> dict:
     """Run `jobs` ({key: prompt text}) through the judge, `key` a JSON-able id; replies are
     appended to `cache_path` and reused on a rerun. Returns {key: reply}."""
     cache = {}
@@ -209,7 +209,7 @@ async def judge_all(jobs: dict, cache_path: str, concurrency: int = 8) -> dict:
                 async with sem:
                     t0 = time.time()
                     try:
-                        j, usage = await call(client, text)
+                        j, usage = await call(client, text, model)
                     except Exception as exc:
                         print(f"{key}: FAILED {type(exc).__name__}: {str(exc)[:200]}", flush=True)
                         return
