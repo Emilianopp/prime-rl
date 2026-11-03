@@ -159,6 +159,31 @@ def test_beam_runs_and_checkpoints(tmp_path):
     assert len(left) == 1  # only the kept node of the last level stays (for a deeper run)
 
 
+def test_beam_survives_a_deadline_cut(tmp_path):
+    """A level the job's deadline cuts is dropped whole: the parents' states and the checkpoint
+    of the last full level stay, and the next job resumes from there."""
+    import time
+
+    shape = dict(segment_turns=3, branches=2, keep=1, root_branches=2)
+    task, env = make(tmp_path, tree_depth=2, **shape)
+    asyncio.run(env.run(task, SimpleNamespace(player=SegmentPlayer())))
+    beam_file = tmp_path / "state" / "beam" / f"{task.data.info['seed']}.json"
+    kept = json.load(open(beam_file))["beam"][0]["state_path"]
+    _, env = make(tmp_path, tree_depth=3, episode_deadline=time.time() - 1, **shape)  # every segment cut at once
+    asyncio.run(env.run(task, SimpleNamespace(player=SegmentPlayer())))
+    beam = json.load(open(beam_file))
+    assert beam["depth"] == 2 and beam["beam"][0]["state_path"] == kept and os.path.exists(kept)
+    assert len([f for f in os.listdir(tmp_path / "state") if f.endswith(".pkl")]) == 1  # the cut branches are gone
+    _, env = make(tmp_path, tree_depth=3, **shape)
+    asyncio.run(env.run(task, SimpleNamespace(player=SegmentPlayer())))
+    depths = [json.loads(l)["depth"] for l in open(tmp_path / "episodes.jsonl")]
+    assert json.load(open(beam_file))["depth"] == 3 and depths.count(3) == 4  # 2 cut + 2 played at depth 3
+    before = json.load(open(beam_file))
+    _, env = make(tmp_path, tree_depth=2, **shape)  # a chunk below where the beam is: nothing played or rewritten
+    asyncio.run(env.run(task, SimpleNamespace(player=SegmentPlayer())))
+    assert json.load(open(beam_file)) == before and os.path.exists(before["beam"][0]["state_path"])
+
+
 def test_notes_helpers():
     assert extract_notes("", NOTES).startswith("MAP:")  # notes written inside the thinking count
     assert extract_notes(NOTES + "\n<action>DO</action>").startswith("MAP:")

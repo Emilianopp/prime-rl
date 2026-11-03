@@ -34,7 +34,7 @@ limit = 8  # roots
 
 [sampling]
 max_completion_tokens = 2048
-temperature = 1.0
+temperature = 0.7  # as configs/craftax/kve-summary.toml trains (1.0: 17% vs 2.6% forfeits, jobs 11498361 vs 11498876)
 
 [[source]]
 name = "craftax"

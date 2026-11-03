@@ -505,9 +505,18 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             if nodes:
                 beam, start_depth = nodes, int(saved["depth"]) + 1
                 logger.info("seed %d: resuming the beam from depth %d with %d nodes", seed, saved["depth"], len(nodes))
-        found = None
+        if start_depth > cfg.tree_depth:  # already past this run's cap (a chunked run): leave the checkpoint as it is
+            logger.info("seed %d: the beam is at depth %d, at or past tree_depth %d", seed, start_depth - 1, cfg.tree_depth)
+            return
+        found, last_level_s = None, None
         for depth in range(start_depth, cfg.tree_depth + 1):
             level_started = time.time()
+            # A level the job's deadline would cut is not started: the checkpoint stays at the
+            # last full level, and the next job (STATE_DIR, RESUME_FROM) goes on from there.
+            if cfg.episode_deadline is not None and last_level_s is not None and level_started + 1.1 * last_level_s > cfg.episode_deadline:
+                logger.info("seed %d: depth %d would not finish before the deadline (the last level took %.1f min); "
+                            "the beam stays at depth %d for a resume", seed, depth, last_level_s / 60, depth - 1)
+                return
             fanout = root_fanout if depth == 1 else cfg.branches
             jobs = [(node, b) for node in beam for b in range(fanout)]
 
@@ -527,6 +536,15 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 outcomes = [o for outs in per_node for o in outs]
             else:
                 outcomes = await asyncio.gather(*(branch(node, b) for node, b in jobs), return_exceptions=True)
+            if any(not isinstance(o, BaseException) and o.get("ended_by") == "deadline" for o in outcomes):
+                # The deadline cut this level: its branches are partial, so none of them is a child.
+                # Drop them and keep the parents' states and the checkpoint of the last full level.
+                for o in outcomes:
+                    if not isinstance(o, BaseException) and o.get("state_path"):
+                        store.delete(o["state_path"])
+                logger.info("seed %d: the deadline cut depth %d; dropped its branches, the beam stays at depth %d "
+                            "for a resume", seed, depth, depth - 1)
+                return
             for node in beam:  # every branch restored it; the beam never revisits
                 if node.get("state_path"):
                     store.delete(node["state_path"])
@@ -555,6 +573,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         seed, depth, len(results), len(kept), max((float(r.get("reward", 0.0)) for r in kept), default=float("nan")),
                         max((len(r.get("achievements") or []) for r in kept), default=0), (time.time() - level_started) / 60)
             _write_beam(beam_file, {"seed": seed, "depth": depth, "beam": beam, "done": None, "at": time.time()})
+            last_level_s = time.time() - level_started
             gc.collect()
             gc.freeze()  # finished levels stay in the episode; keep the cyclic GC off them
             if not beam:

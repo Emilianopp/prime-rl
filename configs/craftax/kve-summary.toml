@@ -61,7 +61,7 @@ thinking_retention = "all"
 
 [orchestrator.train.sampling]
 max_completion_tokens = 1024  # per turn; the notes turn raises its own cap (env.summary_max_tokens)
-temperature = 1.0
+temperature = 0.7  # 1.0 collapses thinking-off replies (sampled mid-sentence <|im_end|>, then copied): 17% vs 2.6% forfeits, jobs 11498361 vs 11498876
 
 [[orchestrator.train.source]]
 name = "craftax"

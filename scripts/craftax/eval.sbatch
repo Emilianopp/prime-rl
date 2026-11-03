@@ -41,7 +41,7 @@
 # 131072; under the engine's 262144), TREE_CHUNK (levels per eval process, unset: all in one; a
 # beam is one episode that keeps every segment's trace in host memory, so a long run plays
 # TREE_CHUNK levels per eval and the next one resumes from the beam checkpoints); saved games
-# in $OUT/state. MAMBA_SLOTS (the engine's DeltaNet state slots, default 400: 3 per open
+# in $OUT/state (STATE_DIR: elsewhere, e.g. one a later job resumes from). MAMBA_SLOTS (the engine's DeltaNet state slots, default 400: 3 per open
 # segment suffice, and each slot left unused is ~24 MB of GPU memory the KV pool loses).
 # The notes judge (with TREE_DEPTH): JUDGE_BACKEND (unset: no judge, arm A0; capi: the Copilot
 # API with ~/.copilot/config.json; openai: Gemini's endpoint with ~/.gemini_key), JUDGE_MODEL
@@ -138,7 +138,7 @@ if [ -n "$TREE_DEPTH" ]; then
   sed -i "s/^env.tree_depth = .*/env.tree_depth = $TREE_DEPTH/; s/^env.branches = .*/env.branches = $BRANCHES/; s/^env.keep = .*/env.keep = $BEAM_KEEP/;
           s/^env.segment_turns = .*/env.segment_turns = $SEGMENT_TURNS/; s/^env.segment_tokens = .*/env.segment_tokens = $SEGMENT_TOKENS/;
           s/^env.max_concurrent_agents = .*/env.max_concurrent_agents = $MAXC/; s/^env.player.max_total_tokens = .*/env.player.max_total_tokens = $MAX_TOKENS/" "$OUT/eval.toml"
-  sed -i "s|^env.max_episode_steps = .*|&\nenv.root_branches = $ROOT_BRANCHES\nenv.state_dir = \"$OUT/state\"|" "$OUT/eval.toml"
+  sed -i "s|^env.max_episode_steps = .*|&\nenv.root_branches = $ROOT_BRANCHES\nenv.state_dir = \"${STATE_DIR:-$OUT/state}\"|" "$OUT/eval.toml"
   if [ -n "$JUDGE_BACKEND" ]; then
     JUDGE_LINES="env.judge.backend = \"$JUDGE_BACKEND\"\nenv.judge.model = \"$JUDGE_MODEL\"\nenv.judge.sampling.temperature = 0.0\nenv.judge_mode = \"$JUDGE_MODE\"\nenv.notes_weight = $NOTES_WEIGHT\nenv.adherence_weight = $ADHERENCE_WEIGHT"
     [ "$JUDGE_BACKEND" = openai ] && JUDGE_LINES="$JUDGE_LINES\nenv.judge.base_url = \"https://generativelanguage.googleapis.com/v1beta/openai/\"\nenv.judge.api_key_var = \"GEMINI_API_KEY\""
@@ -149,15 +149,18 @@ fi
 EVAL_ARGS=(--dashboard false --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "$CONC"
   --concurrency.max-inflight "$CONC" --concurrency.initial-inflight "$CONC")
 if [ -n "$TREE_DEPTH" ] && [ -n "$TREE_CHUNK" ]; then
-  for ((d = TREE_CHUNK; ; d += TREE_CHUNK)); do
+  # A resumed run (STATE_DIR seeded by an earlier job) starts at the chunk above its shallowest beam.
+  D0=$($VENV/bin/python -c 'import glob, json, sys; d = [int(json.load(open(f)).get("depth") or 0) for f in glob.glob(sys.argv[1] + "/*.json")]; c = int(sys.argv[2]); print((min(d) // c + 1) * c if d else c)' "${STATE_DIR:-$OUT/state}/beam" "$TREE_CHUNK")
+  for ((d = D0; ; d += TREE_CHUNK)); do
     [ "$d" -gt "$TREE_DEPTH" ] && d=$TREE_DEPTH
     sed -i "s/^env.tree_depth = .*/env.tree_depth = $d/" "$OUT/eval.toml"
     uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run-d$d" "${EVAL_ARGS[@]}" >> "$OUT/eval.log" 2>&1
     echo "eval to depth $d exit $? $(date +%T)"
     [ "$d" -ge "$TREE_DEPTH" ] && break
     [ -n "${JOB_END:-}" ] && [ "$(date +%s)" -ge $((JOB_END - DEADLINE_MARGIN)) ] && break
-    # go on while some beam stopped at this depth's cap (the others reached the goal or emptied)
-    $VENV/bin/python -c 'import glob, json, sys; sys.exit(not any(b.get("done") == "tree_depth" and int(b.get("depth") or 0) >= int(sys.argv[2]) for b in map(json.load, map(open, glob.glob(sys.argv[1] + "/*.json")))))' "$OUT/state/beam" "$d" || break
+    # go on while some beam can go deeper: stopped at a cap, or left mid-chunk by the deadline check
+    # (the others reached the goal or emptied)
+    $VENV/bin/python -c 'import glob, json, sys; sys.exit(not any(b.get("done") in (None, "tree_depth") for b in map(json.load, map(open, glob.glob(sys.argv[1] + "/*.json")))))' "${STATE_DIR:-$OUT/state}/beam" || break
   done
 else
   uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" "${EVAL_ARGS[@]}" > "$OUT/eval.log" 2>&1
