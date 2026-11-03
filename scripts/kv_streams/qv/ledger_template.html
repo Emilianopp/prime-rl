@@ -135,6 +135,15 @@ R_t  = clip((Q_{t+1} − Q_t) / max(G*_t, 1), −1, 1)              segment t ru
     </div>
   </section>
 
+  <section id="branch" hidden>
+    <h2>Does the handoff matter? Branch test</h2>
+    <p class="lede" style="margin:0 0 12px">At each test reset the game was frozen and played on for one segment from six handoffs: four summaries the model wrote again at that moment, the judge's ideal handoff, and none. Same state, same memory, same policy; only the handoff differs.</p>
+    <div class="tiles" id="b-tiles"></div>
+    <div class="panel" style="margin-top:14px"><h3>Progress after each handoff</h3><div id="c-branch"></div>
+      <p class="note">One row per test reset. Each dot is one branch: ΔV over the segment that followed. Hover for details, click to read the handoff. ρ: rank correlation of D with ΔV among that reset's four sampled summaries (negative means lower damage, more progress).</p></div>
+    <div class="panel" id="b-detail" style="margin-top:14px"><p class="muted">Click a dot to read that handoff and the judge's flaws.</p></div>
+  </section>
+
   <section class="explorer">
     <h2>Games</h2>
     <div class="chips" id="seeds" role="group" aria-label="Game seed"></div>
@@ -342,4 +351,46 @@ function detail(ep, k) {
     <h3 style="margin-top:14px">Judge's diagnosis</h3><div class="text">${esc(j.diagnosis)}</div>`;
 }
 if (EP.length) select(EP[0].seed, 1);
+
+(function branchTest() {
+  const BR = DATA.branch; if (!BR) return;
+  $("#branch").hidden = false;
+  const st = BR.stats, ci = (x, d = 2) => x && x[0] != null ? `${x[0] >= 0 ? "+" : "−"}${Math.abs(x[0]).toFixed(d)}` : "—";
+  const rng = (x, d = 2) => x && x[1] != null ? `95% CI ${x[1].toFixed(d)} to ${x[2].toFixed(d)}` : "";
+  $("#b-tiles").innerHTML = [
+    ["Ideal − empty handoff", ci(st.ideal_minus_empty_dV), `ΔV points · ${rng(st.ideal_minus_empty_dV)}`],
+    ["Model summaries − empty", ci(st.sampled_minus_empty_dV), `ΔV points · ${rng(st.sampled_minus_empty_dV)}`],
+    ["ρ(D, ΔV) within reset", ci(st.rho_D_dV_within), rng(st.rho_D_dV_within)],
+    ["Play noise", fmt(st.sd_sampled_dV[0]), "sd of ΔV across the 4 sampled summaries"],
+    ["Test resets", st.resets, `${st.resets * 6} branches, one segment each`],
+  ].map(([k, v, s]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
+  const KINDS = [["sample", "var(--v)", "model summary"], ["judge ideal", "var(--q)", "judge's ideal handoff"], ["empty", "var(--muted)", "no handoff"]];
+  const kindOf = (l) => l.startsWith("sample") ? KINDS[0] : l === "judge ideal" ? KINDS[1] : KINDS[2];
+  const G = BR.groups, W = 900, rowH = 22, m = { l: 128, r: 64, t: 30, b: 34 }, H = m.t + m.b + G.length * rowH;
+  const all = G.flatMap((g) => g.branches.map((b) => b.dV));
+  const X = nice(Math.min(...all, -1), Math.max(...all, 1), 8);
+  const sx = (v) => m.l + (v - X.a) / (X.b - X.a) * (W - m.l - m.r);
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Progress after each handoff, per test reset" });
+  for (const t of X.ticks) { el("line", { x1: sx(t), x2: sx(t), y1: m.t - 6, y2: H - m.b, stroke: t === 0 ? "var(--axis)" : "var(--line)" }, svg);
+    el("text", { x: sx(t), y: H - m.b + 16, "text-anchor": "middle" }, svg).textContent = t; }
+  el("text", { x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle", class: "lbl" }, svg).textContent = "ΔV over the next segment (judge points)";
+  el("text", { x: W - m.r + 8, y: m.t - 12, class: "lbl" }, svg).textContent = "ρ";
+  KINDS.forEach(([_, c, name], i) => { const x = m.l + i * 190; el("circle", { cx: x, cy: 10, r: 5, fill: c }, svg);
+    el("text", { x: x + 10, y: 14, class: "lbl" }, svg).textContent = name; });
+  G.forEach((g, i) => { const y = m.t + i * rowH + rowH / 2;
+    el("text", { x: m.l - 10, y: y + 4, "text-anchor": "end" }, svg).textContent = `seed ${g.seed} · r${g.k}`;
+    el("text", { x: W - m.r + 8, y: y + 4 }, svg).textContent = g.rho == null ? "—" : fmt(g.rho);
+    const seen = {};
+    g.branches.forEach((b) => { const key = b.dV.toFixed(2); const off = (seen[key] = (seen[key] ?? -1) + 1);
+      const [, c] = kindOf(b.label);
+      const dot = el("circle", { cx: sx(b.dV), cy: y + (off % 2 ? 1 : -1) * Math.ceil(off / 2) * 4, r: 5, fill: c, stroke: "var(--surface)", "stroke-width": 1.5, class: "rs", tabindex: 0 }, svg);
+      const html = `${esc(b.label)} · D ${fmt(b.D)}<br>ΔV ${fmt(b.dV, 1)} · ΔB ${fmt(b.dB, 0)} · deaths ${b.deaths}<br>unlocked: ${esc(b.unlocked.join(", ") || "none")}`;
+      dot.addEventListener("mousemove", (e) => showTip(e, html)); dot.addEventListener("mouseleave", hideTip);
+      const open = () => { $("#b-detail").innerHTML = `<h3>Seed ${g.seed} · reset ${g.k} · ${esc(b.label)}</h3>
+        <div class="seg"><span>D ${fmt(b.D)}</span><span>ΔV ${fmt(b.dV, 1)}</span><span>achievement points +${fmt(b.dB, 0)}</span><span>deaths ${b.deaths}</span><span>unlocked: ${esc(b.unlocked.join(", ") || "none")}</span></div>
+        <div class="twocol" style="margin-top:10px"><div><h3>Handoff</h3><div class="text">${esc(b.summary || "(empty)")}</div></div>
+        <div><h3>Flaws (${b.flaws.length})</h3>${b.flaws.map((f) => `<div class="flaw"><div class="t">${esc(f.type)}</div>${f.quote ? `<div><q>${esc(f.quote)}</q></div>` : ""}<div class="f">${esc(f.fact)}</div></div>`).join("") || '<p class="muted">None listed.</p>'}</div></div>`; };
+      dot.addEventListener("click", open); dot.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); }); }); });
+  const host = $("#c-branch"); host.style.overflowX = "auto"; host.appendChild(svg);
+})();
 </script>

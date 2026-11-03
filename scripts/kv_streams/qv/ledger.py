@@ -1,6 +1,9 @@
 """Build the Handoff Ledger page (one HTML file, data inlined) from judge.py output.
 
-    python ledger.py <judged.json> <out.html>
+    python ledger.py <judged.json> <out.html> [branch results.json]
+
+With branch_test.py's results it adds the branch test: per test reset, the progress of
+the six handoffs played on from it.
 """
 import json
 import sys
@@ -69,8 +72,18 @@ def main():
         "rho_D_dB": spearman([p["D"] for p in with_d], [p["dB"] for p in with_d]),
         "flaws": dict(sorted(flaw_counts.items(), key=lambda x: -x[1])),
     }
+    branch = None
+    if len(sys.argv) > 3:
+        res = json.load(open(sys.argv[3]))
+        branch = {"stats": res["stats"], "groups": [
+            {"seed": g["seed"], "k": g["k"], "V0": g["V0"], "turn": g["state"]["turn"], "B": g["state"]["B"],
+             "original": g["original"], "rho": g["rho_D_dV"], "branches": [
+                 {"label": b["label"], "summary": b["summary"], "D": b["start"]["D"], "flaws": b["start"]["flaws"],
+                  "dV": b["dV"], "dB": b["dB"], "deaths": b["deaths"], "Vend": b["end"]["V"],
+                  "unlocked": sorted(set(b["end_state"]["achievements"]) - set(g["state"]["achievements"]))}
+                 for b in g["branches"]]} for g in res["groups"]]}
     html = (Path(__file__).parent / "ledger_template.html").read_text()
-    html = html.replace("/*__DATA__*/null", json.dumps({"episodes": data, "points": pts, "stats": stats}))
+    html = html.replace("/*__DATA__*/null", json.dumps({"episodes": data, "points": pts, "stats": stats, "branch": branch}))
     open(sys.argv[2], "w").write(html)
     print(json.dumps(stats, indent=1))
 
