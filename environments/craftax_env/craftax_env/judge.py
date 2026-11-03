@@ -197,6 +197,7 @@ CF_SINGLE_PROMPT = CF_TASK + """
 
 == What happened in this segment ({steps} turns) ==
 {events}
+actions played: {actions}; forfeited turns: {forfeits}
 
 == What the game wrote for the next segment ==
 {facts}
@@ -234,6 +235,7 @@ CF_BRANCH_BLOCK = """\
 {record_after}
 -- what happened ({steps} turns) --
 {events}
+actions played: {actions}; forfeited turns: {forfeits}
 -- what the game wrote for the next segment --
 {facts}
 -- its notes --
@@ -302,7 +304,7 @@ class CraftaxGroupNotesJudge(_CrafterJudge[GroupNotesVerdict]):
             f = judge_fields(info)
             if code_facts:
                 blocks.append(CF_BRANCH_BLOCK.format(branch=i, **{k: f[k] for k in (
-                    "record_after", "steps", "events", "facts", "notes", "plan_check")}))
+                    "record_after", "steps", "events", "actions", "forfeits", "facts", "notes", "plan_check")}))
             else:
                 blocks.append(BRANCH_BLOCK.format(branch=i, **{k: f[k] for k in (
                     "record_after", "steps", "events", "actions", "forfeits", "map_ascii", "nearest",
