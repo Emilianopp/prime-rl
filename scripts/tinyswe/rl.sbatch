@@ -1,11 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=tinyswe-rl
-#SBATCH --partition=long
-#SBATCH --gres=gpu:4
-#SBATCH --constraint=80gb
+#SBATCH --partition=short-unkillable
+#SBATCH --gres=gpu:a100l:4
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=256G
-#SBATCH --time=4:00:00
+#SBATCH --time=2:59:00
 #SBATCH --output=%x-%j.out
 # tinyswe RL on one 4-GPU node: podman + the store image, then scripts/kv_streams/rl.sbatch
 # with configs/tinyswe/rl.toml. The sandboxes share the node's CPUs with the engines,
@@ -14,6 +13,7 @@
 #
 #   STEPS=10 CONC=768 sbatch scripts/tinyswe/rl.sbatch
 #   FIXED=160 INDEX=index.filtered.jsonl sbatch --time=1:30:00 scripts/tinyswe/rl.sbatch
+#   RUN=tinyswe-r1 bash scripts/tinyswe/rl_chain.sh 5   # 5 chained 3 h jobs, checkpoint + resume
 #
 # Env: CONFIG (default configs/tinyswe/rl.toml), STEPS, CONC (in-flight ceiling; the run starts
 # at half of it), FIXED (pin in-flight episodes: the controller neither grows nor trims, to
@@ -24,7 +24,7 @@ export REPO=${REPO:-$SCRATCH/kv-race/prl-tinyswe-wt}
 export VENV=${VENV:-$SCRATCH/kv-race/prime-rl-kvs/.venv}
 export ENVS=tinyswe_env OUT_ROOT=${OUT_ROOT:-$SCRATCH/kv-race/rl}
 CONFIG=${CONFIG:-configs/tinyswe/rl.toml} CONC=${CONC:-} FIXED=${FIXED:-} INDEX=${INDEX:-}
-OUT=$OUT_ROOT/tinyswe-rl/${SLURM_JOB_ID:-local}
+OUT=$OUT_ROOT/tinyswe-rl/${RUN:-${SLURM_JOB_ID:-local}}
 mkdir -p "$OUT"
 source "$REPO/scripts/tinyswe/podman_env.sh"
 
