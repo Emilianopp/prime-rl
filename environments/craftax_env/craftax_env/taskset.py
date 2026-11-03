@@ -63,6 +63,7 @@ from craftax_env.segments import (
 )
 from craftax_env import world
 from craftax_env.adherence import AdherenceTracker, parse_plan
+from craftax_env.navigation import ExplorationTracker, exploration_aid, observe_game
 from craftax_env.plan_check import check_plan
 from craftax_env.judge import (
     CraftaxAdherenceJudge,
@@ -180,6 +181,10 @@ class CraftaxEnvConfig(vf.EnvConfig):
     """Output cap for the notes turn only (cut to what the context still holds)."""
     summary_prompt: str | None = None
     """Overrides the default notes request (segments.SUMMARY_PROMPT)."""
+    exploration_aid: bool = False
+    """Show GlyphBench's [Exploration Aid] (navigation.py: visits, recent route, frontiers, last-seen
+    features on this floor, computed from the observations) after every observation, as its Pro harness
+    does. False (GlyphBench's Basic condition): it appears only in the code_facts facts at a segment's end."""
     code_facts: bool = False
     """Split the notes between code and the model: the game writes the KNOWN PLACES (world.known_places,
     from every cell seen on the floor) and the EVENT LOG (the segment's timeline) into the notes request
@@ -623,15 +628,25 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             game = await asyncio.to_thread(glyph.CraftaxGame.restore, saved["game"], max_turns)
             # A station destroyed in an earlier segment (DO facing it, an arrow) is dropped here.
             explored, stations = saved["explored"], standing_stations(game, list(saved.get("stations") or []))
+            nav = saved.get("nav")
         else:
             game = await asyncio.to_thread(_new_game, seed, max_turns)
-            explored, stations = None, []
+            explored, stations, nav = None, [], None
         if segmented:
             task = task.with_data(system_prompt=with_notes_protocol(task.data.system_prompt))
             if explored is None:
                 explored = np.zeros(np.asarray(game.state.map).shape, dtype=bool)
             floor, mask = game.visible()
             explored[floor] |= mask
+        if segmented and (cfg.code_facts or cfg.exploration_aid):  # the route and visits carry across segments
+            nav = nav or ExplorationTracker()
+            await asyncio.to_thread(observe_game, nav, game)
+        else:
+            nav = None
+
+        def aid() -> str | None:
+            return exploration_aid(nav, game.floor) if nav is not None and cfg.exploration_aid else None
+
         first_turn = game.turn
         record_before = game_record(game, stations=stations, record_stations=cfg.record_stations, depth=int(node.get("depth", 0)),
                                     first_turn=first_turn, deaths=[], death_inventory=cfg.death_inventory, previous=False) if segmented else None
@@ -646,7 +661,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                                   view=(game.floor, *map(int, game.position)))
             adherence = AdherenceTracker(subgoals, game, achievements_before, explored, cfg.map_claim_tolerance)
             parent_plan_score = self._parent_plan_score(node)
-        opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example)
+        opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example, aid())
         total, done, end = 0.0, False, "terminated"  # terminated: the run stopped answering
         forfeits: Counter[str] = Counter()
         actions: Counter[str] = Counter()
@@ -792,7 +807,9 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     else:
                         end = "won"
                     break
-                observation = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example)
+                if nav is not None:
+                    await asyncio.to_thread(observe_game, nav, game)
+                observation = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example, aid())
                 # The cut comes before the next action is sampled: the last observation goes
                 # to the model with the notes request instead.
                 if segmented and cfg.segment_turns is not None and turns >= cfg.segment_turns:
@@ -812,7 +829,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 unlocked = ", ".join(sorted(game.achievements)) or "none"
                 if cfg.code_facts:  # the game's facts sit between the observation and the request
                     facts = await asyncio.to_thread(
-                        lambda: f"{world.known_places(game, explored)}\n\n{wasted.text(turns)}\n\n{event_log(timeline.lines())}")
+                        lambda: (f"{world.known_places(game, explored)}\n\n{exploration_aid(nav, game.floor)}\n\n"
+                                 f"{wasted.text(turns)}\n\n{event_log(timeline.lines())}"))
                     message = (f"{NOTES_OPENER}\n\nThe state at the end of the segment:\n\n{shown}\n\n{facts}\n\n"
                                f"[Achievements already unlocked]\n{unlocked}\n\n{cfg.summary_prompt or PLAN_PROMPT}")
                 else:
@@ -857,7 +875,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             record = game_record(game, stations=stations, record_stations=cfg.record_stations, depth=depth,
                                  first_turn=first_turn, deaths=deaths, death_inventory=cfg.death_inventory)
             summary = summary_text(record, notes, facts)
-            saved = {"game": game.save(), "explored": explored, "stations": stations, "seed": seed, "depth": depth}
+            saved = {"game": game.save(), "explored": explored, "stations": stations, "seed": seed, "depth": depth, "nav": nav}
             state_path, state_sha, state_bytes = await asyncio.to_thread(store.put, trace_id, saved)
         sections = parse_notes(notes or "")
         events = timeline.lines()

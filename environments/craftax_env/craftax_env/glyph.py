@@ -809,10 +809,11 @@ class CraftaxGame:
 
 
 def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1, closing: bool = True,
-              action_example: bool = False) -> str:
+              action_example: bool = False, aid: str | None = None) -> str:
     """The per-turn message; `closing = False` leaves out the closing request for an
     action (the notes turn shows the last observation without it). `action_example`: the
-    closing request shows the exact tag format (see EXAMPLE_ACTION)."""
+    closing request shows the exact tag format (see EXAMPLE_ACTION). `aid`: a block shown after
+    the observation (GlyphBench's [Exploration Aid], env.exploration_aid)."""
     legend, grid, hud, message = game.render()
     parts = []
     if legend:
@@ -823,6 +824,8 @@ def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1, closing:
     if message:
         current.append(f"[Message]\n{message.strip()}")
     parts.append("\n".join(current))
+    if aid:
+        parts.append(aid)
     if not closing:
         return "\n\n".join(parts)
     if action_example:

@@ -299,8 +299,9 @@ def test_code_facts_split(tmp_path):
     first = asyncio.run(env.play_segment(task, player))
     request = player.received[-1]
     assert request.startswith("END OF SEGMENT") and request.endswith(PLAN_PROMPT)
-    assert (request.index("[Grid]") < request.index("KNOWN PLACES on F0") < request.index("TURNS LOST")
-            < request.index("EVENT LOG") < request.index(PLAN_PROMPT))
+    assert (request.index("[Grid]") < request.index("KNOWN PLACES on F0") < request.index("[Exploration Aid]")
+            < request.index("TURNS LOST") < request.index("EVENT LOG") < request.index(PLAN_PROMPT))
+    assert not any("[Exploration Aid]" in m for m in player.received[:-1])  # Basic: not in the turns
     assert "<- needed next" in request  # collect_wood / place_table: trees are marked
     summary = first["summary"]
     assert summary.startswith("GAME RECORD") and "KNOWN PLACES on F0" in summary and "EVENT LOG" in summary
@@ -339,24 +340,38 @@ def test_known_places_and_critical_path():
     assert world.direction(-5, 1) == "north" and world.direction(-5, -5) == "north-west" and world.direction(0, 3) == "east"
 
 
-def test_known_places_frontiers_and_other_floors():
+def test_known_places_other_floors():
     from craftax_env import world
 
     game = glyph.CraftaxGame(1000042, None)
     pr, pc = (int(v) for v in game.position)
     seen = np.zeros(np.asarray(game.state.map).shape, dtype=bool)
     seen[0, pr - 4:pr + 5, pc - 5:pc + 6] = True  # the first 9x11 view only
-    edges = world.frontiers(game, seen)
-    assert 1 <= len(edges) <= 3 and all(e.startswith("F0 (") and "tiles" in e for e in edges)
-    assert len({e.rsplit(" ", 1)[-1] for e in edges}) == len(edges)  # one per direction
-    assert "unexplored ground starts at: F0 (" in world.known_places(game, seen)
     assert world.other_floors(game, seen) == []  # only the Overworld seen
     seen[1] = True  # the whole Dungeon seen
     lines = world.other_floors(game, seen)
     assert len(lines) == 1 and lines[0].startswith("- F1 (") and "ladder up F1 (" in lines[0]
     text = world.known_places(game, seen)
     assert "Other floors you have seen (written by the game):" in text and "- F1 (" in text
-    assert world.frontiers(game, np.ones_like(seen)) == []  # nothing unseen inside the map
+
+
+def test_exploration_tracker_port():
+    """GlyphBench's tracker, fed our [Grid] and position: frontiers, the route, visits, per floor."""
+    from craftax_env.navigation import ExplorationTracker, exploration_aid, observe_game
+
+    game = glyph.CraftaxGame(1000042, None)
+    nav = ExplorationTracker()
+    observe_game(nav, game)
+    for name in ("MOVE_LEFT", "MOVE_RIGHT", "MOVE_LEFT", "MOVE_RIGHT"):
+        game.step(glyph.action_index(name))
+        observe_game(nav, game)
+    text = exploration_aid(nav, game.floor)
+    r, c = (int(v) for v in game.position)
+    assert text.startswith("[Exploration Aid]\nDerived only from previously visible observations")
+    assert f"Current ({r}, {c})" in text and "Recent route: (" in text and " -> " in text
+    assert "visible frontier tiles (each borders unseen space): (" in text
+    assert len(nav.areas["0"].seen) >= 99  # at least the 9x11 view
+    assert "No coordinate-bearing observation" in exploration_aid(nav, 1)  # another floor: nothing yet
 
 
 def test_turns_lost_counts():
@@ -393,3 +408,18 @@ def test_turns_lost_counts():
     assert "- 2 failed crafts and placements: MAKE_WOOD_PICKAXE: nothing made: needs a table within one step x2" in text
     assert "nothing collected: stone needs a wood pickaxe x1" in text  # the vitals' change is dropped
     assert count_findings(["1. a", "2) b", "more prose"]) == 2 and count_findings(["none"]) == 0
+
+
+def test_exploration_aid_every_turn(tmp_path):
+    """env.exploration_aid: GlyphBench's block after every observation; the route carries to the child."""
+    task, env = make(tmp_path, segment_turns=3, exploration_aid=True)
+    player = SegmentPlayer()
+    first = asyncio.run(env.play_segment(task, player))
+    turns = [m for m in player.received if "[Grid]" in m and not m.startswith("END OF SEGMENT")]
+    assert turns and all("[Exploration Aid]" in m and m.index("[HUD]") < m.index("[Exploration Aid]") for m in turns)
+    node = {"id": first["node_id"], "parent": first["parent"], "depth": 1, "state_path": first["state_path"],
+            "state_sha256": first["state_sha256"], "summary": first["summary"], "branch": 0}
+    child = SegmentPlayer()
+    asyncio.run(env.play_segment(child_task(task, node), child))
+    opening = next(m for m in [*child.systems, *child.received] if "[Exploration Aid]" in m)
+    assert "visits here=" in opening
