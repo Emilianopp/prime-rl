@@ -10,8 +10,8 @@ precision and finding-event matching anti-predicted (0.41 / 0.40), so they are n
   achievement already unlocked whose capability is still held is wasted (infeasible). None: no
   subgoal names an achievement.
 - on_path (P3): 1 if the first subgoal is on the critical path (world.critical_path: the next
-  ladder step and the providers of the capabilities it lacks, their missing materials, the features
-  to find them), 0.5 if only the second one is, else 0.
+  ladder step and the providers of the capabilities it lacks; the materials still missing for the
+  next two steps, summed, and the features to find them), 0.5 if only the second one is, else 0.
 """
 from __future__ import annotations
 
@@ -53,7 +53,10 @@ def _on_path(s: Subgoal, achs: list[str], mats: set[str], feats: set[str]) -> bo
 def check_plan(game: Any, explored: np.ndarray, plan_lines: list[str], view: tuple[int, int, int] | None = None) -> PlanCheck:
     names = [a.name.lower() for a in game._rt["achievements"]]
     subgoals = parse_plan(plan_lines, names, game.floor, view=view)
-    achs, mats, feats = world.critical_path(game, explored, steps=1)
+    achs, _, _ = world.critical_path(game, explored, steps=1)
+    # The materials and features of the next TWO steps count: wood for the pickaxe right after the
+    # table is on the path; a named craft still has to be the next step itself.
+    _, mats, feats = world.critical_path(game, explored, steps=2)
     caps, have = world.capabilities(game, explored), set(game.achievements)
     lines, held, ok, named = [], set(caps), 0, 0
     for s in subgoals:

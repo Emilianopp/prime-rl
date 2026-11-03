@@ -294,3 +294,22 @@ def test_plan_check_material_runs_are_not_wasted(game):
     game2.achievements = set(game2.achievements) | {"collect_wood"}  # unlocked once, wood spent since
     check = check_plan(game2, seen, ["1. 2 wood at a tree - done when Wood:2"])
     assert check.feasible == 1.0 and "already unlocked" not in check.text()
+
+
+def test_on_path_counts_the_next_two_steps_materials(game):
+    """2 wood, no table: the table (2 wood) is next, then the wood pickaxe (1 wood): a wood run is on
+    the path (3 wood summed), a pickaxe craft as the first subgoal is not (the table comes first)."""
+    import numpy as np
+
+    from craftax_env import world
+    from craftax_env.plan_check import check_plan
+
+    seen = np.ones(np.asarray(game.state.map).shape, dtype=bool)
+    g = glyph.CraftaxGame.restore(glyph.CraftaxGame.save(game), None)
+    g.state = g.state.replace(inventory=g.state.inventory.replace(wood=2))
+    g.achievements = set(g.achievements) | {"collect_wood"}
+    achs, mats, _ = world.critical_path(g, seen, steps=2)
+    assert achs[:2] == ["place_table", "make_wood_pickaxe"] and "wood" in mats
+    assert world.critical_path(g, seen, steps=1)[1] == set()  # the table alone: 2 wood held, nothing missing
+    assert check_plan(g, seen, ["1. 1 wood at a tree - done when Wood:3"]).on_path == 1.0
+    assert check_plan(g, seen, ["1. make_wood_pickaxe at a table - done when a pickaxe"]).on_path == 0.0

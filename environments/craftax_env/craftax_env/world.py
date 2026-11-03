@@ -428,7 +428,11 @@ def critical_path(game: Any, explored: np.ndarray, steps: int = 1) -> tuple[list
 
     for h in heads:
         add(h)
-    mats = {k for a in achs for k, n in _cost(a).items() if items.get(k, 0) < n}
+    need: dict[str, int] = {}  # summed over the steps: 2 wood for the table + 1 for the pickaxe = 3
+    for a in achs:
+        for k, n in _cost(a).items():
+            need[k] = need.get(k, 0) + n
+    mats = {k for k, n in need.items() if items.get(k, 0) < n}
     feats = {_MATERIAL_FEATURE[m] for m in mats if m in _MATERIAL_FEATURE} | {_COLLECT_FEATURE[a] for a in achs if a in _COLLECT_FEATURE}
     return achs, mats, feats
 

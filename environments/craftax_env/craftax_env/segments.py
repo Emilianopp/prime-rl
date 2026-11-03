@@ -95,17 +95,19 @@ them. Write only what the game cannot: what you will do and why, inside <notes>.
 these three headers:
 
 FINDINGS: up to 3 lessons, one line each: \
-`N. <what went wrong, with its turn or place> because <the cause> -> <the fix> (PLAN k or SURVIVAL k)`. \
+`N. <what went wrong, with its turn or place> because <the cause> -> <the fix> (in PLAN k or SURVIVAL k)`. \
 If TURNS LOST counts 10 or more lost turns, finding 1 explains its first (largest) line. The cause \
 must be what really happened in this game (the event log and the game's messages show it), not a \
-guess about the rules; the fix must be carried out by the PLAN subgoal or SURVIVAL rule named at \
-the end. No general advice; write "none" only if nothing went wrong.
+guess about the rules. Carry each fix out in the plan: in how a subgoal is done (the way you go, \
+what you face first) or as a SURVIVAL rule, and name where at the end. Do not add a subgoal just \
+for a fix. No general advice; write "none" only if nothing went wrong.
 
 PLAN: 2 to 4 numbered subgoals in order, one per line: \
 `N. <achievement or item count> at <place> - done when <what the HUD will show>`. \
 Take every place from KNOWN PLACES as written there, F<floor> (row,col); for something never \
-seen, give a direction to search. Start from the step that is marked "needed next" unless a \
-vital or a danger comes first, and say so. Plan only achievements that are not in \
+seen, give a direction to search. Subgoal 1 is the step that is marked "needed next" unless a \
+vital or a danger comes first, and then say so; your fixes change how you do the subgoals, not \
+which comes first. Plan only achievements that are not in \
 [Achievements already unlocked], or item counts you do not hold yet, and make sure each subgoal \
 has its tools and station from the inventory or an earlier subgoal.
 
@@ -115,9 +117,9 @@ from KNOWN PLACES.
 An example from a different game (its places and facts are not yours, do not copy them):
 <notes>
 FINDINGS:
-1. Turns 30-52: 14 moves blocked by water near F0 (18,30) because I kept walking west into the lake -> walk around it by the south shore (PLAN 1)
-2. Turn 41: make_stone_pickaxe failed because I had used my last wood on a sword -> gather 2 wood before crafting (PLAN 1)
-3. Turns 60-75: zombies hit me on open grass at night far from the table -> be at the table by dusk (SURVIVAL 2)
+1. Turns 30-52: 14 moves blocked by water near F0 (18,30) because I kept walking west into the lake -> walk around it by the south shore (in PLAN 1)
+2. Turn 41: make_stone_pickaxe failed because I had used my last wood on a sword -> keep 1 wood for each craft (in PLAN 1)
+3. Turns 60-75: zombies hit me on open grass at night far from the table -> be at the table by dusk (in SURVIVAL 2)
 PLAN:
 1. 2 wood at the tree F0 (22,31), going by the south shore of the lake - done when Wood:2
 2. make_stone_pickaxe at the table F0 (25,30) - done when the HUD shows a stone pickaxe

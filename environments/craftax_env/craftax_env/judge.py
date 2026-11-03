@@ -179,8 +179,8 @@ contradict it (a rule that does not exist, a cause the events rule out, an event
 not happen); "unsupported" when you cannot tell.
   - lesson: true when it names a cause and a fix specific to what happened in this segment; false \
 for a rule of the game restated, a copied event, or generic advice ("explore more").
-  - applied: true when the PLAN subgoal or SURVIVAL rule it names carries out its fix; false when \
-it names none, or the one it names does something else.
+  - applied: true when the PLAN (in a subgoal or in how one is done, e.g. the way to go) or a \
+SURVIVAL rule carries out its fix; false when nothing in them does.
 - waste (0 to 1, or null): null when TURNS LOST counts fewer than 10 lost turns. Otherwise: does \
 finding 1 explain the first (largest) TURNS LOST line? 1: it names that loss, a cause the events \
 support and a fix that would stop it. 0.5: it names the loss, but its cause or fix is vague or \
