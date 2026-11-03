@@ -56,6 +56,12 @@ losing the whole inventory; achievements, XP and placed tables and furnaces stay
 furnace is destroyed (it becomes path, nothing comes back) by DO facing it or by an arrow; \
 the events say when one was, and the record lists only the stations that still stand."""
 
+# Under code_facts the notes take their places from KNOWN PLACES: map places, nothing to convert.
+CF_GUIDE = CRAFTAX_GUIDE.replace(
+    "The agent's notes and plans write places differently: (row,col) in the 9x11 view it saw when it wrote "
+    "them, itself at (4,5), or a direction from itself; code converts each view place to a map place and shows both.",
+    "The agent's notes take their places from KNOWN PLACES, in the same F<floor> (row,col) form.")
+
 NOTES_JUDGE_PROMPT = """\
 You are grading the notes a language-model agent wrote at the end of one segment of a \
 Craftax game. The agent plays in segments of about 100 turns. The next segment starts from \
@@ -290,6 +296,7 @@ class CraftaxNotesJudge(_CrafterJudge[NotesVerdict]):
     def build_messages(self, **fields: Any) -> str:
         if fields.get("code_facts"):
             self.prompt, self.schema = CF_SINGLE_PROMPT, CFNotesVerdict
+            return super().build_messages(guide=CF_GUIDE, **fields)
         return super().build_messages(guide=CRAFTAX_GUIDE, **fields)
 
 
@@ -312,7 +319,8 @@ class CraftaxGroupNotesJudge(_CrafterJudge[GroupNotesVerdict]):
         if code_facts:
             self.prompt, self.schema = CF_GROUP_PROMPT, CFGroupNotesVerdict
         shared = judge_fields(infos[0])
-        return vf.Judge.build_messages(self, guide=CRAFTAX_GUIDE, n=len(infos), record_before=shared["record_before"],
+        return vf.Judge.build_messages(self, guide=CF_GUIDE if code_facts else CRAFTAX_GUIDE, n=len(infos),
+                                       record_before=shared["record_before"],
                                        branches="\n\n".join(blocks))
 
 

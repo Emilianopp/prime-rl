@@ -253,6 +253,7 @@ def test_code_facts_judge_reward(tmp_path, monkeypatch):
     prompt = calls[0]
     assert "KNOWN PLACES" in prompt and "TURNS LOST" in prompt and "Code check of the plan" in prompt and "critical path" in prompt
     assert "Code check of the MAP lines" not in prompt
+    assert "from KNOWN PLACES, in the same F<floor> (row,col) form" in prompt and "itself at (4,5)" not in prompt
 
 
 def test_findings_score_claims():

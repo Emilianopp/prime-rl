@@ -306,6 +306,9 @@ def test_code_facts_split(tmp_path):
     assert summary.startswith("GAME RECORD") and "KNOWN PLACES on F0" in summary and "EVENT LOG" in summary
     assert summary.index("EVENT LOG") < summary.index("YOUR NOTES FROM THE PREVIOUS SEGMENT:")
     assert "1. 2 wood at the tree F0 (23,24)" in summary
+    assert "as KNOWN PLACES writes them" in summary and "[Grid] of your first observation" not in summary
+    from craftax_env.segments import notes_of_summary
+    assert notes_of_summary(summary).startswith("FINDINGS:")
     assert first["trace"].metrics["notes_format"] == 1.0  # three sections, no MAP expected
     assert first["code_facts"] and first["facts"].startswith("KNOWN PLACES")
     assert first["map_claims"].startswith("(MAP written by the game")

@@ -367,23 +367,26 @@ class Timeline:
 NOTES_HEADER = "YOUR NOTES FROM THE PREVIOUS SEGMENT:"
 NOTES_FRAME = ("(Places written (row,col) in these notes are cells of the [Grid] of your first observation "
                "in this segment, where you are the arrow at (4,5); they shift as soon as you move.)")
+FACTS_NOTES_FRAME = ("(Places in these notes are F<floor> (row,col) as KNOWN PLACES writes them: the HUD's Floor "
+                     "and Pos, fixed on the map.)")
 
 
 def summary_text(record: str, notes: str | None, facts: str | None = None) -> str:
     """What the next segment starts from: the record, the game-written facts (`code_facts`: the
     known places and the event log), then the notes. Its first observation is the view the notes
-    were written in, so their view-frame places read off it."""
+    were written in, so their view-frame places read off it; under `code_facts` the notes take their
+    places from KNOWN PLACES, map places that do not shift."""
     notes = (notes or "").strip()
     head = f"{record}\n\n{facts.strip()}" if facts else record
     if not notes:
         return f"{head}\n\n{NOTES_HEADER}\n(you wrote no notes)"
-    return f"{head}\n\n{NOTES_HEADER}\n{NOTES_FRAME}\n{notes}"
+    return f"{head}\n\n{NOTES_HEADER}\n{FACTS_NOTES_FRAME if facts else NOTES_FRAME}\n{notes}"
 
 
 def notes_of_summary(summary: str | None) -> str:
     """The parent's notes inside a summary (what `summary_text` wrote), else ""."""
     _, sep, notes = (summary or "").partition(NOTES_HEADER)
-    notes = notes.strip().removeprefix(NOTES_FRAME).strip()
+    notes = notes.strip().removeprefix(NOTES_FRAME).removeprefix(FACTS_NOTES_FRAME).strip()
     return "" if not sep or notes == "(you wrote no notes)" else notes
 
 
