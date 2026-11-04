@@ -456,3 +456,27 @@ def test_action_from_reasoning(tmp_path):
             assert line["actions_from_reasoning"] == 4 and not line["forfeits"] and out["trace"].metrics["actions_from_reasoning"] == 4.0
         else:
             assert line["actions_from_reasoning"] == 0 and sum(line["forfeits"].values()) == 4
+
+
+def test_turn_log_replays_a_lineage(tmp_path):
+    """Two chained segments write turns/<node_id>.json.gz; replaying them from the seed rebuilds
+    the exact game (every turn's position, both end hashes)."""
+    from craftax_env import turn_log
+
+    task, env = make(tmp_path, segment_turns=7)
+    player = SegmentPlayer()  # one player: distinct trace ids (seg1, seg2)
+    first = asyncio.run(env.play_segment(task, player))
+    node = {"id": first["node_id"], "parent": first["parent"], "depth": 1, "state_path": first["state_path"],
+            "state_sha256": first["state_sha256"], "summary": first["summary"], "branch": 0}
+    second = asyncio.run(env.play_segment(child_task(task, node), player))
+    logs = [turn_log.read(str(tmp_path / "turns" / f"{r['node_id']}.json.gz")) for r in (first, second)]
+    assert logs[1]["parent"] == first["node_id"] and logs[1]["first_turn"] == 7
+    assert [r["i"] for r in logs[0]["turns"]] == list(range(1, 8)) and logs[0]["turns"][0]["obs"].startswith("[")
+    assert logs[0]["turns"][1]["acts"] == [glyph.ACTION_NAMES.index("DO")] and logs[0]["notes"][0]["content"] == NOTES
+    seen = []
+    game = turn_log.replay(logs, on_turn=lambda k, row, g: seen.append((k, row and row["turn"])))
+    assert game.turn == 14 and turn_log.state_hash(game) == logs[1]["end_hash"]
+    assert seen[0] == (0, None) and seen[8] == (1, None) and len(seen) == 16
+    logs[1]["turns"][2]["acts"] = [glyph.ACTION_NAMES.index("MOVE_RIGHT")]
+    with pytest.raises(turn_log.ReplayMismatch):
+        turn_log.replay(logs)

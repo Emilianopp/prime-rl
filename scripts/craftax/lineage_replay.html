@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Craftax Lineage Replay</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e2e0db;
+  --accent: #2f6fde; --death: #d23c3c; --unlock: #d99a00; --band-a: #ebe9e4; --band-b: #dcd9d2;
+  --code: #f1efea; --chip: #eef3fd;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141416; --panel: #1d1d20; --ink: #ececef; --muted: #9a9aa2; --line: #2e2e33;
+    --accent: #6d9cf0; --death: #ef6a6a; --unlock: #f0bd3c; --band-a: #26262b; --band-b: #34343a;
+    --code: #232327; --chip: #232c3d;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141416; --panel: #1d1d20; --ink: #ececef; --muted: #9a9aa2; --line: #2e2e33;
+  --accent: #6d9cf0; --death: #ef6a6a; --unlock: #f0bd3c; --band-a: #26262b; --band-b: #34343a;
+  --code: #232327; --chip: #232c3d;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 650; }
+header label { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+select { max-width: min(420px, 90vw); text-overflow: ellipsis; }
+select, button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+button { cursor: pointer; min-width: 34px; }
+button:hover { border-color: var(--accent); }
+button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+main { display: grid; grid-template-columns: minmax(320px, 560px) 1fr; gap: 16px; padding: 16px; max-width: 1500px; margin: 0 auto; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+#screen { width: 100%; image-rendering: pixelated; background: #000; border-radius: 6px; display: block; aspect-ratio: 176 / 208; }
+.controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
+.controls .grow { flex: 1; }
+#counter { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+#timeline { width: 100%; height: 44px; margin-top: 10px; cursor: pointer; display: block; }
+#tip { font-size: 12px; color: var(--muted); min-height: 18px; }
+.stats { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; margin-bottom: 8px; }
+.stats b { font-weight: 600; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 6px 0 10px; }
+.tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 6px 10px; }
+.tabs button.on { color: var(--accent); border-bottom-color: var(--accent); background: none; }
+.chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 1px 9px; margin: 0 4px 4px 0; font-size: 12.5px; font-weight: 600; }
+.chip.death { background: var(--death); color: #fff; }
+.chip.unlock { background: var(--unlock); color: #1d1d1f; }
+.chip.forfeit { background: var(--muted); color: var(--bg); }
+h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 4px; font-weight: 600; }
+pre { background: var(--code); border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; word-break: break-word; margin: 0; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 420px; overflow: auto; }
+pre.grid { white-space: pre; word-break: normal; }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 10px; }
+#map { width: 100%; image-rendering: pixelated; border-radius: 6px; background: #000; }
+.muted { color: var(--muted); }
+ul.events { margin: 0; padding-left: 18px; font-size: 12.5px; max-height: 300px; overflow: auto; }
+ul.events li.cur { font-weight: 700; color: var(--accent); }
+.empty { padding: 40px; text-align: center; color: var(--muted); }
+kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Craftax lineage replay</h1>
+  <label>Run <select id="run"></select></label>
+  <label>World <select id="seed"></select></label>
+  <label>Leaf <select id="leaf"></select></label>
+  <span class="muted" style="font-size:12px"><kbd>←</kbd><kbd>→</kbd> step · <kbd>⇧</kbd>×10 · <kbd>space</kbd> play · <kbd>[</kbd><kbd>]</kbd> segment</span>
+</header>
+<main>
+  <section class="panel">
+    <canvas id="screen" width="176" height="208"></canvas>
+    <canvas id="timeline"></canvas>
+    <div id="tip"></div>
+    <div class="controls">
+      <button id="first" title="Start (Home)">|&lsaquo;</button>
+      <button id="prevSeg" title="Previous segment ([)">&laquo; seg</button>
+      <button id="prev" title="Back (←)">&lsaquo;</button>
+      <button id="play" title="Play (space)">Play</button>
+      <button id="next" title="Forward (→)">&rsaquo;</button>
+      <button id="nextSeg" title="Next segment (])">seg &raquo;</button>
+      <button id="last" title="End (End)">&rsaquo;|</button>
+      <label class="muted" style="font-size:13px">fps <select id="speed"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option><option>32</option><option>60</option></select></label>
+      <span class="grow"></span>
+      <span id="counter"></span>
+    </div>
+  </section>
+  <section class="panel">
+    <div class="stats" id="stats"></div>
+    <div class="tabs">
+      <button data-tab="turn" class="on">Turn</button>
+      <button data-tab="segment">Segment</button>
+      <button data-tab="map">Map</button>
+    </div>
+    <div id="tab-turn"></div>
+    <div id="tab-segment" hidden></div>
+    <div id="tab-map" hidden><canvas id="map"></canvas><div class="muted" id="mapnote" style="font-size:12px;margin-top:6px"></div></div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const S = { runs: [], data: null, run: null, seed: null, leaf: null, lineage: [], frames: [], f: 0, playing: null, tab: "turn",
+            turnCache: new Map(), imgCache: new Map() };
+
+async function getJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error(url + ": " + r.status); return r.json(); }
+function base() { return `data/${encodeURIComponent(S.run)}/${S.seed}`; }
+
+// ---------- selection ----------
+async function init() {
+  const hash = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
+  try { S.runs = await getJSON("data/runs.json"); } catch (e) { document.querySelector("main").innerHTML = `<div class="empty">No data/runs.json: run scripts/craftax/lineage_replay.py first.</div>`; return; }
+  $("run").innerHTML = S.runs.map((r) => `<option value="${esc(r.name)}">${esc(r.name)}${r.cell ? " · " + esc(r.cell.replace(/^\[|\]$/g, "").slice(0, 60)) : ""}</option>`).join("");
+  if (hash.run && S.runs.some((r) => r.name === hash.run)) $("run").value = hash.run;
+  await selectRun(hash);
+}
+async function selectRun(hash = {}) {
+  S.run = $("run").value;
+  const run = S.runs.find((r) => r.name === S.run);
+  $("seed").innerHTML = run.seeds.map((s) => `<option value="${s.seed}">${s.seed} · d${s.max_depth} · best ${s.best} ach${s.replayed ? "" : " · no frames"}</option>`).join("");
+  if (hash.seed && run.seeds.some((s) => String(s.seed) === hash.seed)) $("seed").value = hash.seed;
+  await selectSeed(hash);
+}
+async function selectSeed(hash = {}) {
+  S.seed = $("seed").value;
+  S.data = await getJSON(`data/${encodeURIComponent(S.run)}/${S.seed}.json`);
+  S.turnCache.clear(); S.imgCache.clear();
+  $("leaf").innerHTML = S.data.leaves.map((l) => `<option value="${l.id}">d${l.depth} · ${l.achievements} ach · ${l.deaths} deaths${l.survivor ? " · in beam" : ""} · ${l.id.slice(0, 8)}</option>`).join("");
+  if (hash.leaf && S.data.leaves.some((l) => l.id === hash.leaf)) $("leaf").value = hash.leaf;
+  selectLeaf(hash.f ? +hash.f : null);
+}
+function selectLeaf(frame = null) {
+  S.leaf = $("leaf").value;
+  const nodes = S.data.nodes, path = [];
+  for (let id = S.leaf; id && nodes[id]; id = nodes[id].parent) path.push(id);
+  S.lineage = path.reverse();
+  // Global frame list: the root's start frame, then one frame per turn (or one card per segment without frames).
+  S.frames = [];
+  S.lineage.forEach((id, k) => {
+    const fr = nodes[id].frames;
+    if (fr) {
+      for (let j = (k === 0 ? 0 : 1); j < fr.n; j++) S.frames.push({ k, j });
+    } else S.frames.push({ k, j: null });
+  });
+  S.marks = null;
+  stop();
+  go(frame ?? S.frames.length - 1);
+  loadMarks();
+}
+
+// ---------- per-segment turn data ----------
+async function turnsOf(k) {
+  const id = S.lineage[k];
+  if (!S.data.nodes[id].frames) return null;
+  if (!S.turnCache.has(id)) S.turnCache.set(id, getJSON(`${base()}/${id}.json`));
+  return S.turnCache.get(id);
+}
+function sheet(id, idx) {
+  const key = id + "-" + idx;
+  if (!S.imgCache.has(key)) {
+    const img = new Image();
+    img.src = `${base()}/${id}-${idx}.webp`;
+    S.imgCache.set(key, new Promise((ok, bad) => { img.onload = () => ok(img); img.onerror = bad; }));
+  }
+  return S.imgCache.get(key);
+}
+async function loadMarks() {
+  // Deaths and unlocks per frame for the timeline, from each segment's turn file.
+  const marks = [];
+  const lineage = S.lineage;
+  for (let k = 0; k < lineage.length; k++) {
+    const t = await turnsOf(k);
+    if (lineage !== S.lineage) return;
+    if (!t) {  // no turn log: the segment's deaths and unlocks on its card
+      const node = S.data.nodes[lineage[k]], f = frameIndex(k, null);
+      const gained = (node.achievements || []).length > (node.achievements_before || []).length;
+      if ((node.deaths || []).length || gained) marks.push({ f, death: (node.deaths || []).length > 0, unlock: gained });
+      continue;
+    }
+    t.turns.forEach((row, i) => {
+      if (row.death || row.new) marks.push({ f: frameIndex(k, i + 1), death: !!row.death, unlock: !!row.new });
+    });
+  }
+  S.marks = marks; drawTimeline();
+}
+function frameIndex(k, j) { return S.frames.findIndex((fr) => fr.k === k && fr.j === j); }
+
+// ---------- rendering ----------
+const COLORS = { G: "#5a9e3a", W: "#3d6fd1", S: "#8a8a8a", T: "#2d6b2a", P: "#c9b48a", C: "#2b2b2b", I: "#d8a07a", D: "#bff4ff",
+  Z: "#2e56c9", R: "#c0303b", A: "#e3d38f", L: "#ff6a1a", Q: "#9fdc6a", X: "#4a4a4a", Y: "#777", K: "#0b0b0b", V: "#9c958a",
+  B: "#8b5a2b", F: "#5c3c2c", E: "#9b59d0", H: "#b8862b", O: "#6fd6e0", N: "#7d2fa0", M: "#666", ">": "#ffffff", "<": "#ffffff",
+  "@": "#9a9aa2", "#": "#000", "?": "#000" };
+function parseMap(ascii) { return ascii ? ascii.split("\n").slice(2).map((l) => l.slice(4)) : null; }
+function drawAscii(canvas, ascii, trail = [], here = null, cell = 8) {
+  const rows = parseMap(ascii);
+  if (!rows) { canvas.width = canvas.height = 1; return; }
+  canvas.width = rows[0].length * cell; canvas.height = rows.length * cell;
+  const g = canvas.getContext("2d");
+  rows.forEach((line, r) => [...line].forEach((ch, c) => {
+    const up = ch.toUpperCase();
+    g.fillStyle = COLORS[up] || "#000";
+    g.globalAlpha = ch !== up ? 0.28 : 1;  // lowercase: never seen by the player
+    g.fillRect(c * cell, r * cell, cell, cell);
+  }));
+  g.globalAlpha = 1;
+  if (trail.length) {
+    g.strokeStyle = "rgba(255,255,255,.85)"; g.lineWidth = Math.max(1, cell / 4); g.beginPath();
+    trail.forEach(([r, c], i) => { const x = c * cell + cell / 2, y = r * cell + cell / 2; i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke();
+  }
+  if (here) { g.strokeStyle = "#ff2d55"; g.lineWidth = Math.max(2, cell / 3); g.strokeRect(here[1] * cell - 2, here[0] * cell - 2, cell + 4, cell + 4); }
+}
+async function drawScreen() {
+  const fr = S.frames[S.f], id = S.lineage[fr.k], node = S.data.nodes[id], cv = $("screen");
+  if (fr.j === null) {  // a segment without frames: its end map
+    drawAscii(cv, node.map_ascii, [], node.position || null, 4);
+    cv.style.aspectRatio = `${cv.width} / ${cv.height}`;
+    return;
+  }
+  const m = node.frames, idx = Math.floor(fr.j / m.per_sheet), local = fr.j % m.per_sheet;
+  const want = S.f;
+  const img = await sheet(id, idx);
+  if (want !== S.f) return;
+  if (cv.width !== m.w) { cv.width = m.w; cv.height = m.h; }
+  cv.style.aspectRatio = `${m.w} / ${m.h}`;
+  const g = cv.getContext("2d");
+  g.imageSmoothingEnabled = false;
+  g.drawImage(img, (local % m.cols) * m.w, Math.floor(local / m.cols) * m.h, m.w, m.h, 0, 0, m.w, m.h);
+  // preload the next sheet
+  if (local > m.per_sheet - 20 && (idx + 1) * m.per_sheet < m.n) sheet(id, idx + 1);
+  else if (fr.k + 1 < S.lineage.length && S.data.nodes[S.lineage[fr.k + 1]].frames && fr.j > m.n - 20) sheet(S.lineage[fr.k + 1], 0);
+}
+function drawTimeline() {
+  const cv = $("timeline"), w = cv.clientWidth, h = 44, dpr = devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext("2d"); g.scale(dpr, dpr);
+  const n = S.frames.length, x = (f) => (n <= 1 ? 0 : (f / (n - 1)) * (w - 2) + 1);
+  let start = 0;
+  for (let f = 1; f <= n; f++) {
+    if (f === n || S.frames[f].k !== S.frames[start].k) {
+      g.fillStyle = S.frames[start].k % 2 ? css("--band-b") : css("--band-a");
+      g.fillRect(x(start), 8, Math.max(2, x(f - 1) - x(start) + (n > 1 ? w / n : w)), 22);
+      start = f;
+    }
+  }
+  for (const m of S.marks || []) {
+    if (m.death) { g.fillStyle = css("--death"); g.fillRect(x(m.f) - 1, 4, 2, 30); }
+    if (m.unlock) { g.fillStyle = css("--unlock"); g.beginPath(); g.arc(x(m.f), 38, 3.2, 0, 7); g.fill(); }
+  }
+  g.fillStyle = css("--accent"); g.fillRect(x(S.f) - 1.5, 0, 3, 34);
+}
+function fmtPos(p) { return p ? `F${p[0]} (${p[1]},${p[2]})` : "?"; }
+
+async function drawPanel() {
+  const fr = S.frames[S.f], id = S.lineage[fr.k], node = S.data.nodes[id];
+  const t = await turnsOf(fr.k);
+  if (S.frames[S.f] !== fr) return;
+  const row = t && fr.j > 0 ? t.turns[fr.j - 1] : null;
+  const gained = (node.achievements || []).filter((a) => !(node.achievements_before || []).includes(a));
+  $("stats").innerHTML = [
+    `<span>Segment <b>${fr.k + 1}</b>/${S.lineage.length}</span>`,
+    `<span>Game turn <b>${row ? row.turn + 1 : fr.j === 0 ? node.first_turn : (node.game_steps ?? "?")}</b></span>`,
+    row ? `<span>At <b>${fmtPos(row.pos)}</b></span>` : node.position ? `<span>At <b>${fmtPos([node.floor, ...node.position])}</b></span>` : "",
+    row && row.health != null ? `<span>HP <b>${(+row.health).toFixed(1)}</b></span>` : "",
+    `<span>Achievements <b>${(node.achievements || []).length}</b> (+${gained.length} this seg)</span>`,
+  ].join("");
+  // Turn tab
+  let html = "";
+  if (!t) {
+    html = `<div class="muted">This run has no turn logs (env.turn_log came later): the screen shows the floor map at the end of each segment. See the Segment tab.</div>`;
+  } else if (!row) {
+    html = `<div class="muted">Start of the game, before the first turn.</div><h3>First observation</h3><pre class="grid">${esc(t.turns[0]?.obs)}</pre>`;
+  } else {
+    const chips = [
+      ...row.acts.map((a) => `<span class="chip">${esc(a)}</span>`),
+      row.frozen || row.forfeit ? `<span class="chip forfeit">forfeit: ${esc(row.forfeit || "frozen")}</span>` : "",
+      row.death ? `<span class="chip death">died at ${fmtPos([row.death.floor, ...row.death.pos])} → respawn (${row.death.respawn})</span>` : "",
+      ...(row.new || []).map((a) => `<span class="chip unlock">★ ${esc(a)}</span>`),
+    ].join("");
+    html = `<div>${chips}</div>
+      ${row.message ? `<h3>Game message</h3><pre>${esc(row.message)}</pre>` : ""}
+      <h3>Reply</h3><pre>${esc(row.content)}</pre>
+      ${row.reasoning ? `<h3>Reasoning <span class="muted">(${row.reasoning.length} chars)</span></h3><pre>${esc(row.reasoning)}</pre>` : ""}
+      <details><summary>Observation the model answered</summary><pre class="grid">${esc(row.obs)}</pre></details>`;
+  }
+  if (t && fr.j === node.frames.n - 1 && t.notes.length) {
+    html += `<h3>Notes turn (end of segment)</h3><pre>${esc(t.notes[t.notes.length - 1].content)}</pre>`;
+  }
+  if (t && t.problems && t.problems.length) html += `<h3 style="color:var(--death)">Replay mismatches</h3><pre>${esc(t.problems.join("\n"))}</pre>`;
+  $("tab-turn").innerHTML = html;
+  // Segment tab
+  const j = node.judge, a = node.adherence;
+  const curTurn = row ? row.turn + 1 : -1;
+  const events = (node.events || []).map((e) => { const m = /^turn (\d+)/.exec(e); const cur = m && +m[1] === curTurn; return `<li class="${cur ? "cur" : ""}">${esc(e)}</li>`; }).join("");
+  $("tab-segment").innerHTML = `
+    <div>${gained.map((x) => `<span class="chip unlock">★ ${esc(x)}</span>`).join("") || '<span class="muted">no new achievements</span>'}</div>
+    <div class="stats" style="margin-top:8px">
+      <span>Depth <b>${node.depth}</b></span><span>Turns <b>${node.turns}</b> (game ${node.first_turn}→${node.game_steps})</span>
+      <span>Ended by <b>${esc(node.ended_by)}</b></span><span>Deaths <b>${(node.deaths || []).length}</b></span>
+      <span>Children <b>${node.children}</b></span>
+      ${node.achievement_score != null ? `<span>Score <b>${node.achievement_score}</b></span>` : ""}
+      ${node.state_value != null ? `<span>State value <b>${(+node.state_value).toFixed(2)}</b></span>` : ""}
+    </div>
+    ${j ? `<h3>Judge</h3><pre>${esc(Object.entries(j).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join("\n"))}</pre>` : ""}
+    ${a ? `<h3>Adherence</h3><pre>${esc(Object.entries(a).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join("\n"))}</pre>` : ""}
+    <h3>Events</h3><ul class="events">${events || "<li class='muted'>none</li>"}</ul>
+    <h3>Notes written at the end</h3><pre>${esc(node.notes || "(none)")}</pre>
+    <details><summary>Game record at the end</summary><pre>${esc(node.record)}</pre></details>
+    <details><summary>Game record at the start</summary><pre>${esc(node.record_before)}</pre></details>
+    <details><summary>Actions</summary><pre>${esc(JSON.stringify(node.actions_hist || {}, null, 1))}</pre></details>`;
+  // Map tab: the floor at the end of the segment, the trail so far in this segment
+  if (S.tab === "map") {
+    const floor = row ? row.pos[0] : node.floor;
+    const ascii = t ? t.maps[String(floor)] : node.map_ascii;
+    const trail = t ? t.turns.slice(0, Math.max(0, fr.j)).filter((r) => r.pos && r.pos[0] === floor).map((r) => [r.pos[1], r.pos[2]]) : [];
+    drawAscii($("map"), ascii, trail, row ? [row.pos[1], row.pos[2]] : (node.position || null), 10);
+    $("mapnote").textContent = `Floor ${floor} as it stood at the end of this segment (dim: never seen). Line: this segment's path up to now.`;
+  }
+}
+function go(f) {
+  S.f = Math.max(0, Math.min(S.frames.length - 1, f));
+  const fr = S.frames[S.f];
+  $("counter").textContent = `frame ${S.f + 1} / ${S.frames.length}`;
+  drawScreen(); drawTimeline(); drawPanel();
+  history.replaceState(null, "", `#run=${encodeURIComponent(S.run)}&seed=${S.seed}&leaf=${S.leaf}&f=${S.f}`);
+}
+function segStart(f, dir) {
+  const k = S.frames[f].k + dir;
+  if (k < 0) return 0;
+  if (k >= S.lineage.length) return S.frames.length - 1;
+  return S.frames.findIndex((fr) => fr.k === k);
+}
+function stop() { if (S.playing) clearInterval(S.playing); S.playing = null; $("play").textContent = "Play"; $("play").classList.remove("on"); }
+function play() {
+  if (S.playing) return stop();
+  $("play").textContent = "Pause"; $("play").classList.add("on");
+  if (S.f >= S.frames.length - 1) go(0);
+  S.playing = setInterval(() => { if (S.f >= S.frames.length - 1) stop(); else go(S.f + 1); }, 1000 / +$("speed").value);
+}
+
+// ---------- events ----------
+$("run").onchange = () => selectRun();
+$("seed").onchange = () => selectSeed();
+$("leaf").onchange = () => selectLeaf();
+$("first").onclick = () => go(0);
+$("last").onclick = () => go(S.frames.length - 1);
+$("prev").onclick = () => go(S.f - 1);
+$("next").onclick = () => go(S.f + 1);
+$("prevSeg").onclick = () => go(S.frames[S.f].j > 1 && S.frames[S.f].k > 0 ? segStart(S.f, 0) : segStart(S.f, -1));
+$("nextSeg").onclick = () => go(segStart(S.f, 1));
+$("play").onclick = play;
+$("speed").onchange = () => { if (S.playing) { stop(); play(); } };
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
+  S.tab = b.dataset.tab;
+  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  for (const t of ["turn", "segment", "map"]) $("tab-" + t).hidden = t !== S.tab;
+  drawPanel();
+});
+const tl = $("timeline");
+const seekAt = (e) => { const r = tl.getBoundingClientRect(); return Math.round(((e.clientX - r.left) / r.width) * (S.frames.length - 1)); };
+let dragging = false;
+tl.onmousedown = (e) => { dragging = true; stop(); go(seekAt(e)); };
+window.addEventListener("mouseup", () => dragging = false);
+tl.onmousemove = (e) => {
+  const f = Math.max(0, Math.min(S.frames.length - 1, seekAt(e))), fr = S.frames[f];
+  if (dragging) go(f);
+  const node = S.data.nodes[S.lineage[fr.k]];
+  $("tip").textContent = `segment ${fr.k + 1} (depth ${node.depth})${fr.j !== null ? `, turn ${fr.j} of ${node.frames.n - 1}` : ""} · ${(node.achievements || []).length} achievements at its end`;
+};
+tl.onmouseleave = () => $("tip").textContent = "";
+window.addEventListener("resize", drawTimeline);
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "SELECT") return;
+  const n = e.shiftKey ? 10 : 1;
+  if (e.key === "ArrowRight") { stop(); go(S.f + n); e.preventDefault(); }
+  else if (e.key === "ArrowLeft") { stop(); go(S.f - n); e.preventDefault(); }
+  else if (e.key === " ") { play(); e.preventDefault(); }
+  else if (e.key === "]") $("nextSeg").click();
+  else if (e.key === "[") $("prevSeg").click();
+  else if (e.key === "Home") go(0);
+  else if (e.key === "End") go(S.frames.length - 1);
+});
+init();
+</script>
+</body>
+</html>
