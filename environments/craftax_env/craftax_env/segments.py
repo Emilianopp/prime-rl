@@ -94,13 +94,14 @@ record of your state, the KNOWN PLACES, TURNS LOST and EVENT LOG above, so do no
 them. Write only what the game cannot: what you will do and why, inside <notes>...</notes>, under \
 these three headers:
 
-FINDINGS: up to 3 lessons, one line each: \
-`N. <what went wrong, with its turn or place> because <the cause> -> <the fix> (in PLAN k or SURVIVAL k)`. \
+FINDINGS: at most 2 lessons, one line each, and only for something that really cost you this \
+segment: `N. <what went wrong, with its turn or place> because <the cause> -> <the fix> (in PLAN k or SURVIVAL k)`. \
 If TURNS LOST counts 10 or more lost turns, finding 1 explains its first (largest) line. The cause \
 must be what really happened in this game (the event log and the game's messages show it), not a \
 guess about the rules. Carry each fix out in the plan: in how a subgoal is done (the way you go, \
 what you face first) or as a SURVIVAL rule, and name where at the end. Do not add a subgoal just \
-for a fix. No general advice; write "none" only if nothing went wrong.
+for a fix. No general advice, and no finding for its own sake: "none" is a normal answer when \
+nothing worth a lesson happened.
 
 PLAN: 2 to 4 numbered subgoals in order, one per line: \
 `N. <achievement or item count> at <place> - done when <what the HUD will show>`. \
@@ -118,8 +119,7 @@ An example from a different game (its places and facts are not yours, do not cop
 <notes>
 FINDINGS:
 1. Turns 30-52: 14 moves blocked by water near F0 (18,30) because I kept walking west into the lake -> walk around it by the south shore (in PLAN 1)
-2. Turn 41: make_stone_pickaxe failed because I had used my last wood on a sword -> keep 1 wood for each craft (in PLAN 1)
-3. Turns 60-75: zombies hit me on open grass at night far from the table -> be at the table by dusk (in SURVIVAL 2)
+2. Turns 60-75: zombies hit me on open grass at night far from the table -> be at the table by dusk (in SURVIVAL 2)
 PLAN:
 1. 2 wood from the trees near F0 (22,31), going by the south shore of the lake - done when Wood:2
 2. make_stone_pickaxe at the table F0 (25,30) - done when the HUD shows a stone pickaxe

@@ -275,8 +275,10 @@ materials and stations each step needs; findings whose cause the events support 
 or a survival rule carries out; survival rules that address what actually hurt or killed the agent. \
 Rank the branches' notes by how much they would help the next segment make progress, best first. A \
 polished restart of steps already done ranks below a rougher plan that reaches something new. Also mark \
-every finding whose cause the rules, the events or the record contradict: the next segment reads it as \
-advice from its past self.
+the findings that are wrong: the next segment reads them as advice from its past self. A finding is \
+false only when it states a rule of the game the rules above contradict, or an event, place or cause \
+the events and the record rule out. A cause the events allow but do not prove, an imprecise turn \
+number, or a lesson you would have phrased differently is not false. Findings that say "none" are fine.
 
 {guide}
 
@@ -290,9 +292,9 @@ Give your verdict:
 - verdicts: one per branch, with the branch number as given:
   - rank: 1 for the best notes, 2 for the next, ... every branch a different rank.
   - findings: one entry per numbered FINDING, in order (an empty list when the FINDINGS say "none"): \
-n and truth ("true" when the rules, the events and the record support its cause; "false" when they \
-contradict it: a rule that does not exist, a cause the events rule out, an event or place that did not \
-happen; "unsupported" when you cannot tell)."""
+n and truth ("true" when the rules, the events and the record support its cause; "false" only when \
+they contradict it: a rule that does not exist, an event or place that did not happen, a cause the \
+events rule out; "unsupported" when you cannot tell, which costs the agent nothing)."""
 
 CF_RANK_BRANCH_BLOCK = """\
 == Branch {branch} ==
@@ -511,8 +513,10 @@ def cf_verdict(info: dict[str, Any], parsed: CFNotesVerdict, **extra: Any) -> di
 
 JUDGE_WEIGHT = 0.5
 """notes_judge = "rank": notes = (1 - w) x plan (code: feasible, on_track) + w x rank score."""
-FALSE_FINDING_PENALTY = 0.3
-"""notes_judge = "rank": taken off the notes score per false finding, as a fraction of the findings."""
+FALSE_FINDING_PENALTY = 0.2
+"""notes_judge = "rank": taken off the notes score per false finding, as a fraction of the findings
+(0.3 until 2026-11-04: with the 3-finding request Gemini judged 42% of findings false and the penalty
+decided the lower half of every group)."""
 
 
 def _track_plan(info: dict[str, Any]) -> float:

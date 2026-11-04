@@ -53,7 +53,7 @@
 # adherence judge grades how each segment followed its parent's PLAN, same JUDGE_MODE).
 # The 2026-11-04 reward (docs/craftax-reward-v2.md): NOTES_JUDGE (rank: one comparative call per parent
 # ranks the siblings' notes; verdict: the per-finding judge), JUDGE_WEIGHT (0.5, the rank's share of the
-# notes reward), FALSE_PENALTY (0.3 per false finding), ADHERENCE_MODE (code: statuses by code, no call,
+# notes reward), FALSE_PENALTY (0.2 per false finding), ADHERENCE_MODE (code: statuses by code, no call,
 # no gate; judge), STATE_WEIGHT (1: the held tools' achievement points as the `state` term; 0: off),
 # BEAM_CUMULATIVE (1: the beam ranks by the lineage's total achievement score + the segment's terms;
 # 0: the segment's reward alone, as before).
@@ -74,7 +74,7 @@ MAX_TOKENS=${MAX_TOKENS:-$((SEGMENT_TOKENS + 35072 > 131072 ? SEGMENT_TOKENS + 3
 MAXC=$((ROOT_BRANCHES > BRANCHES * BEAM_KEEP ? ROOT_BRANCHES : BRANCHES * BEAM_KEEP))  # a level's branches play together
 if [ -n "$TREE_DEPTH" ]; then ROOTS=${ROOTS:-2}; N=$ROOTS; CONC=$ROOTS; fi
 JUDGE_BACKEND=${JUDGE_BACKEND:-} JUDGE_MODE=${JUDGE_MODE:-single} NOTES_WEIGHT=${NOTES_WEIGHT:-0.5} ADHERENCE_WEIGHT=${ADHERENCE_WEIGHT:-0}
-NOTES_JUDGE=${NOTES_JUDGE:-rank} JUDGE_WEIGHT=${JUDGE_WEIGHT:-0.5} FALSE_PENALTY=${FALSE_PENALTY:-0.3} ADHERENCE_MODE=${ADHERENCE_MODE:-code}
+NOTES_JUDGE=${NOTES_JUDGE:-rank} JUDGE_WEIGHT=${JUDGE_WEIGHT:-0.5} FALSE_PENALTY=${FALSE_PENALTY:-0.2} ADHERENCE_MODE=${ADHERENCE_MODE:-code}
 STATE_WEIGHT=${STATE_WEIGHT:-1} BEAM_CUMULATIVE=${BEAM_CUMULATIVE:-1}
 JUDGE_MODEL=${JUDGE_MODEL:-$([ "$JUDGE_BACKEND" = openai ] && echo gemini-3.8-flash || echo gpt-4.1)}
 [ "$JUDGE_BACKEND" = openai ] && [ -z "${GEMINI_API_KEY:-}" ] && [ -r "$HOME/.gemini_key" ] && export GEMINI_API_KEY=$(cat "$HOME/.gemini_key")

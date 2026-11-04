@@ -61,7 +61,7 @@ from craftax_env.segments import (
     summary_text,
     with_notes_protocol,
 )
-from craftax_env import world
+from craftax_env import turn_log, world
 from craftax_env.adherence import AdherenceTracker, parse_plan
 from craftax_env.navigation import ExplorationTracker, exploration_aid, observe_game
 from craftax_env.plan_check import check_plan
@@ -169,6 +169,10 @@ class CraftaxEnvConfig(vf.EnvConfig):
     moved) and when a reply was forfeited. Off: GlyphBench's message (reward only)."""
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, return, achievements) to this file."""
+    turn_log: bool = True
+    """With episode_log: also write every turn (observation, reasoning, reply, actions played,
+    position) of each episode or segment to turns/<node_id>.json.gz beside it, for
+    scripts/craftax/lineage_replay.py (craftax_env/turn_log.py)."""
     # Segments (docs/craftax-segments-judge.md): the game continues across episodes. A
     # segment restores the game its parent saved, plays until the cut, writes notes in the
     # same session and saves the game; the next one starts from the game's record of the
@@ -209,8 +213,9 @@ class CraftaxEnvConfig(vf.EnvConfig):
     with plan = mean(feasible, on_path raised by deviation); see docs/craftax-reward-code-facts.md."""
     judge_weight: float = Field(0.5, ge=0.0, le=1.0)
     """notes_judge = "rank": the rank score's weight in the notes reward."""
-    false_finding_penalty: float = Field(0.3, ge=0.0, le=1.0)
-    """notes_judge = "rank": taken off the notes reward per false finding (as a fraction of the findings)."""
+    false_finding_penalty: float = Field(0.2, ge=0.0, le=1.0)
+    """notes_judge = "rank": taken off the notes reward per false finding (as a fraction of the findings;
+    "unsupported" costs nothing). The notes request asks for at most 2 findings and allows "none"."""
     state_weight: float = Field(1.0, ge=0.0)
     """Segments: weight of the `state` reward, the achievement points of what the player holds at the cut
     (world.state_value: pickaxe and sword tier, a table or furnace standing on a seen cell). Under the
@@ -727,6 +732,10 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         wasted = TurnsLost() if segmented and cfg.code_facts else None  # code_facts: turns that changed nothing
         sampled_before_notes = None  # sampled nodes before the notes request (train_on_notes = False)
         observation = opening
+        logging_turns = bool(cfg.episode_log and cfg.turn_log)
+        turn_rows: list[dict[str, Any]] = []  # turn_log: one row per model turn
+        notes_rows: list[dict[str, Any]] = []  # turn_log: the notes request(s) and reply(ies)
+        start_hash = turn_log.state_hash(game) if logging_turns else None
         async with agent.interaction(task) as interaction:
             segment = await interaction.turn(opening)
             while not segment.terminated:
@@ -747,6 +756,12 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                             from_reasoning += 1
                 if adherence is not None:
                     adherence.reply(*reply_parts(segment, interaction.trace)[:2])
+                row: dict[str, Any] | None = None
+                if logging_turns:
+                    content, thinking, finish = reply_parts(segment, interaction.trace)
+                    row = {"i": turns, "turn": game.turn, "obs": observation, "reasoning": thinking,
+                           "content": content if content is not None else segment.last_reply, "finish": finish,
+                           "acts": [], "forfeit": None if indices else failure, "_before": set(game.achievements)}
                 if not indices:
                     forfeits[failure] += 1
                     tracker.update(classify(*reply_parts(segment, interaction.trace), failure))
@@ -757,6 +772,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 if not indices and cfg.forfeit_mode == "freeze":
                     done = game.forfeit()
                     per_turn[0] += 1
+                    if row is not None:
+                        row["frozen"] = True
                     if feedback:
                         why = "no <action> tag" if failure == "no_action_tag" else "an unknown action name"
                         game.message = f"Your last reply had {why}, so the turn was forfeited: the world did not move."
@@ -769,6 +786,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     for index in indices:
                         played += 1
                         actions[glyph.ACTION_NAMES[index]] += 1
+                        if row is not None:
+                            row["acts"].append(int(index))
                         logged = segmented and _logs_feedback(index)
                         before = game.snapshot() if feedback or logged or wasted is not None else None
                         floor_before = game.floor
@@ -780,6 +799,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         except Exception as exc:  # a broken step must not kill the rollout
                             logger.warning("Craftax step error: %s", exc)
                             step = glyph.Step(0.0, False, [], 0)
+                            if row is not None:
+                                row.setdefault("step_errors", []).append(len(row["acts"]) - 1)
                         total += step.reward
                         reward_sum += step.reward
                         unlocked += step.unlocked
@@ -854,6 +875,13 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         f"mana, and {lost[cfg.death_inventory]}. Unlocked achievements stay unlocked."
                     )
                     done = False
+                    if row is not None:
+                        row["death"] = deaths[-1]
+                if row is not None:
+                    new = sorted(game.achievements - row.pop("_before"))
+                    row.update({"pos": turn_log.where(game), "timestep": game.timestep, "health": game.health,
+                                "message": game.message, **({"new": new} if new else {})})
+                    turn_rows.append(row)
                 if adherence is not None:
                     adherence.observe(game, unlocked_at)
                 if done:
@@ -906,6 +934,9 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 sampled_before_notes = sum(1 for n in (getattr(interaction.trace, "nodes", None) or []) if getattr(n, "sampled", False))
                 async with _turn_sampling(interaction, notes_cap()):
                     reply = await interaction.turn(message)
+                if logging_turns and not reply.terminated:
+                    content, thinking, _ = reply_parts(reply, interaction.trace)
+                    notes_rows.append({"obs": message, "reasoning": thinking, "content": content})
                 if not reply.terminated:
                     content, thinking, _ = reply_parts(reply, interaction.trace)
                     notes = extract_notes(content, thinking)
@@ -917,6 +948,9 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                             reply = await interaction.turn(PLAN_RETRY if cfg.code_facts else SUMMARY_RETRY)
                         if not reply.terminated:
                             content, thinking, _ = reply_parts(reply, interaction.trace)
+                            if logging_turns:
+                                notes_rows.append({"obs": PLAN_RETRY if cfg.code_facts else SUMMARY_RETRY,
+                                                   "reasoning": thinking, "content": content})
                             notes = extract_notes(content, thinking) or notes
                 if reply.terminated:
                     end = "terminated_at_summary"
@@ -1078,6 +1112,22 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     | {"state_bytes": state_bytes, "explored_cells": int(explored.sum())})
             with open(cfg.episode_log, "a") as f:
                 f.write(json.dumps(line) + "\n")
+            if logging_turns:
+                payload = {
+                    "node_id": trace_id if segmented else None, "parent": node.get("id") if segmented else None,
+                    "depth": depth, "seed": seed, "max_turns": max_turns, "first_turn": first_turn,
+                    "start_state_sha256": node.get("state_sha256"), "start_hash": start_hash,
+                    "on_death": cfg.on_death, "death_inventory": cfg.death_inventory,
+                    "respawn_safe_radius": cfg.respawn_safe_radius if cfg.respawn_safe else None,
+                    "forfeit_mode": cfg.forfeit_mode, "ended_by": end, "end_turn": game.turn,
+                    "end_pos": turn_log.where(game), "end_hash": turn_log.state_hash(game),
+                    "turns": turn_rows, "notes": notes_rows,
+                }
+                path = os.path.join(turn_log.directory(cfg.episode_log), f"{trace_id}.json.gz")
+                try:
+                    await asyncio.to_thread(turn_log.write, path, payload)
+                except OSError as exc:  # a full disk must not kill the rollout
+                    logger.warning("turn log %s: %s", path, exc)
         out = {**info, "trace": trace, "reward": float(getattr(trace, "reward", reward))}
         if segmented:
             out["beam_score"] = self._beam_score(out)

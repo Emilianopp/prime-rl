@@ -84,12 +84,12 @@ unsupported).
 ```
 rank_score = (n - rank) / (n - 1)                                    best 1, worst 0
 notes      = (1 - judge_weight) x plan + judge_weight x rank_score
-             - false_finding_penalty x (false findings / findings)    clipped to [0, 1]
+             - false_finding_penalty x (false findings / findings)    clipped to [0, 1]; unsupported costs nothing
 notes      = plan        with no siblings in one call (single mode, a group fallback, a failed call)
 notes      = 0           when the notes are empty after the retry (no call)
 ```
 
-`judge_weight` 0.5, `false_finding_penalty` 0.3. The rank is only ever used inside the parent's group;
+`judge_weight` 0.5, `false_finding_penalty` 0.2 (0.3 in the 2026-11-04 smokes). The rank is only ever used inside the parent's group;
 across parents the beam is decided by `beam_score`'s progress and state. Judge line fields: `rank`,
 `rank_score`, `false_findings`, `plan`, `plan_feasible`, `plan_on_track`, `plan_on_path`, `claims`
 (`[{n, truth}]`), `mode` (`group`, or `code` when ranked alone).
@@ -122,7 +122,7 @@ Config (`CraftaxEnvConfig`): `notes_judge` (`rank` | `verdict`), `judge_weight`,
 
 Eval / beam, `scripts/craftax/eval.sbatch` (through `jobs/craftax_eval.sbatch CODE_REPO=$AGENT_RL/wt-codemap`
 until the main checkout has this code): `NOTES_JUDGE` (rank), `JUDGE_WEIGHT` (0.5), `FALSE_PENALTY`
-(0.3), `ADHERENCE_MODE` (code), `ADHERENCE_WEIGHT` (0), `STATE_WEIGHT` (1), `BEAM_CUMULATIVE` (1).
+(0.2), `ADHERENCE_MODE` (code), `ADHERENCE_WEIGHT` (0), `STATE_WEIGHT` (1), `BEAM_CUMULATIVE` (1).
 Adherence, state and the beam rule are written whenever `TREE_DEPTH` is set; the judge lines when
 `JUDGE_BACKEND` is.
 
@@ -146,14 +146,45 @@ modes pinned (`notes_judge="verdict"`, `adherence_mode="judge"`): craftax 77, cr
 
 ## The prompts (verbatim from the code at 4039d67ab)
 
-The notes request the model answers (`NOTES_OPENER`, `PLAN_PROMPT`, `PLAN_RETRY`) and what the next
-segment starts from (`summary_text`) are unchanged from `craftax-reward-code-facts.md`. The judge's
+The notes request the model answers (`PLAN_PROMPT`) now asks for **at most 2 findings** and says
+"none" is a normal answer (it asked for up to 3 and "none only if nothing went wrong" until
+2026-11-04, when the smokes showed every branch writing 3 and Gemini judging 42% of them false); its
+opener, retry and what the next segment starts from (`summary_text`) are unchanged from
+`craftax-reward-code-facts.md`. The judge's
 guide `CF_GUIDE` is unchanged too. Placeholders in `{braces}` are filled by `judge.judge_fields`.
+
+### `PLAN_PROMPT` (the notes request, since 2026-11-04)
+
+```text
+Your notes for the next segment. This reply is not a game turn: no action will be played. The game continues from exactly this state in a fresh context, which will show the game's own record of your state, the KNOWN PLACES, TURNS LOST and EVENT LOG above, so do not copy any of them. Write only what the game cannot: what you will do and why, inside <notes>...</notes>, under these three headers:
+
+FINDINGS: at most 2 lessons, one line each, and only for something that really cost you this segment: `N. <what went wrong, with its turn or place> because <the cause> -> <the fix> (in PLAN k or SURVIVAL k)`. If TURNS LOST counts 10 or more lost turns, finding 1 explains its first (largest) line. The cause must be what really happened in this game (the event log and the game's messages show it), not a guess about the rules. Carry each fix out in the plan: in how a subgoal is done (the way you go, what you face first) or as a SURVIVAL rule, and name where at the end. Do not add a subgoal just for a fix. No general advice, and no finding for its own sake: "none" is a normal answer when nothing worth a lesson happened.
+
+PLAN: 2 to 4 numbered subgoals in order, one per line: `N. <achievement or item count> at <place> - done when <what the HUD will show>`. Take every place from KNOWN PLACES as written there, F<floor> (row,col); for something never seen, give a direction to search. Subgoal 1 is the step that is marked "needed next" unless a vital or a danger comes first, and then say so; your fixes change how you do the subgoals, not which comes first. Plan only achievements that are not in [Achievements already unlocked], or item counts you do not hold yet, and make sure each subgoal has its tools and station from the inventory or an earlier subgoal.
+
+SURVIVAL: one or two rules, each `if <vital or condition> then <what to do, where>`, with places from KNOWN PLACES.
+
+An example from a different game (its places and facts are not yours, do not copy them):
+<notes>
+FINDINGS:
+1. Turns 30-52: 14 moves blocked by water near F0 (18,30) because I kept walking west into the lake -> walk around it by the south shore (in PLAN 1)
+2. Turns 60-75: zombies hit me on open grass at night far from the table -> be at the table by dusk (in SURVIVAL 2)
+PLAN:
+1. 2 wood from the trees near F0 (22,31), going by the south shore of the lake - done when Wood:2
+2. make_stone_pickaxe at the table F0 (25,30) - done when the HUD shows a stone pickaxe
+3. collect_iron at F0 (14,36) - done when Iron:1
+SURVIVAL:
+if drink < 4 then drink at the water F0 (27,26)
+if it is night then wall in with stone next to the table F0 (25,30) and sleep
+</notes>
+
+Be specific. Reply with <notes>...</notes> only, no <action> tag.
+```
 
 ### `CF_RANK_PROMPT` (one call per parent, `judge_mode = "group"`, `notes_judge = "rank"`)
 
 ```text
-You are comparing the notes a language-model agent wrote at the end of a segment of a Craftax game, for the next segment. The branches below all started from the same saved world and the same notes, then each played its own segment and wrote its own notes. The game itself writes the places the agent has seen (KNOWN PLACES), the turns that changed nothing (TURNS LOST) and the segment's events (EVENT LOG) into the next segment, so the notes are worth only what they add beyond those: a plan whose subgoals are in the right order for the next achievement this lineage lacks, with real places and the materials and stations each step needs; findings whose cause the events support and whose fix the plan or a survival rule carries out; survival rules that address what actually hurt or killed the agent. Rank the branches' notes by how much they would help the next segment make progress, best first. A polished restart of steps already done ranks below a rougher plan that reaches something new. Also mark every finding whose cause the rules, the events or the record contradict: the next segment reads it as advice from its past self.
+You are comparing the notes a language-model agent wrote at the end of a segment of a Craftax game, for the next segment. The branches below all started from the same saved world and the same notes, then each played its own segment and wrote its own notes. The game itself writes the places the agent has seen (KNOWN PLACES), the turns that changed nothing (TURNS LOST) and the segment's events (EVENT LOG) into the next segment, so the notes are worth only what they add beyond those: a plan whose subgoals are in the right order for the next achievement this lineage lacks, with real places and the materials and stations each step needs; findings whose cause the events support and whose fix the plan or a survival rule carries out; survival rules that address what actually hurt or killed the agent. Rank the branches' notes by how much they would help the next segment make progress, best first. A polished restart of steps already done ranks below a rougher plan that reaches something new. Also mark the findings that are wrong: the next segment reads them as advice from its past self. A finding is false only when it states a rule of the game the rules above contradict, or an event, place or cause the events and the record rule out. A cause the events allow but do not prove, an imprecise turn number, or a lesson you would have phrased differently is not false. Findings that say "none" are fine.
 
 {guide}
 
@@ -166,7 +197,7 @@ Give your verdict:
 - rationale: two or three lines, written first: what separates the best notes from the worst.
 - verdicts: one per branch, with the branch number as given:
   - rank: 1 for the best notes, 2 for the next, ... every branch a different rank.
-  - findings: one entry per numbered FINDING, in order (an empty list when the FINDINGS say "none"): n and truth ("true" when the rules, the events and the record support its cause; "false" when they contradict it: a rule that does not exist, a cause the events rule out, an event or place that did not happen; "unsupported" when you cannot tell).
+  - findings: one entry per numbered FINDING, in order (an empty list when the FINDINGS say "none"): n and truth ("true" when the rules, the events and the record support its cause; "false" only when they contradict it: a rule that does not exist, an event or place that did not happen, a cause the events rule out; "unsupported" when you cannot tell, which costs the agent nothing).
 ```
 
 ### `CF_RANK_BRANCH_BLOCK` (one per branch inside `{branches}`)
