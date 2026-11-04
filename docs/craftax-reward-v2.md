@@ -144,9 +144,87 @@ fallback, code adherence from a digest and in a beam without a judge, the cumula
 `select_children` and `play_segment`, the routing request. The older suites still pass with the old
 modes pinned (`notes_judge="verdict"`, `adherence_mode="judge"`): craftax 77, crafter 58, orchestrator 17.
 
+## The prompts (verbatim from the code at 4039d67ab)
+
+The notes request the model answers (`NOTES_OPENER`, `PLAN_PROMPT`, `PLAN_RETRY`) and what the next
+segment starts from (`summary_text`) are unchanged from `craftax-reward-code-facts.md`. The judge's
+guide `CF_GUIDE` is unchanged too. Placeholders in `{braces}` are filled by `judge.judge_fields`.
+
+### `CF_RANK_PROMPT` (one call per parent, `judge_mode = "group"`, `notes_judge = "rank"`)
+
+```text
+You are comparing the notes a language-model agent wrote at the end of a segment of a Craftax game, for the next segment. The branches below all started from the same saved world and the same notes, then each played its own segment and wrote its own notes. The game itself writes the places the agent has seen (KNOWN PLACES), the turns that changed nothing (TURNS LOST) and the segment's events (EVENT LOG) into the next segment, so the notes are worth only what they add beyond those: a plan whose subgoals are in the right order for the next achievement this lineage lacks, with real places and the materials and stations each step needs; findings whose cause the events support and whose fix the plan or a survival rule carries out; survival rules that address what actually hurt or killed the agent. Rank the branches' notes by how much they would help the next segment make progress, best first. A polished restart of steps already done ranks below a rougher plan that reaches something new. Also mark every finding whose cause the rules, the events or the record contradict: the next segment reads it as advice from its past self.
+
+{guide}
+
+== Where every branch started ==
+{record_before}
+
+{branches}
+
+Give your verdict:
+- rationale: two or three lines, written first: what separates the best notes from the worst.
+- verdicts: one per branch, with the branch number as given:
+  - rank: 1 for the best notes, 2 for the next, ... every branch a different rank.
+  - findings: one entry per numbered FINDING, in order (an empty list when the FINDINGS say "none"): n and truth ("true" when the rules, the events and the record support its cause; "false" when they contradict it: a rule that does not exist, a cause the events rule out, an event or place that did not happen; "unsupported" when you cannot tell).
+```
+
+### `CF_RANK_BRANCH_BLOCK` (one per branch inside `{branches}`)
+
+```text
+== Branch {branch} ==
+-- the game record at the end --
+{record_after}
+-- what happened ({steps} turns) --
+{events}
+actions played: {actions}; forfeited turns: {forfeits}
+-- what the game wrote for the next segment --
+{facts}
+-- its notes --
+{notes}
+```
+
+`{facts}` is what the game writes for the next segment (KNOWN PLACES, TURNS LOST, EVENT LOG and the
+exploration aid), `{events}` the segment's timeline, `{record_after}` the GAME RECORD at the cut.
+Compared with the verdict judge's prompt: no floor map, no plan check, no per-finding lesson /
+applied, no waste, no deviation.
+
+### Response format (`CFRankVerdict`)
+
+```json
+{
+  "rationale": "Branch 1 plans the stone pickaxe with the wood and stone it still lacks in order; branch 0 restarts at the table it already has.",
+  "verdicts": [
+    {"branch": 0, "rank": 2, "findings": [{"n": 1, "truth": "true"}, {"n": 2, "truth": "false"}]},
+    {"branch": 1, "rank": 1, "findings": [{"n": 1, "truth": "true"}]}
+  ]
+}
+```
+
+`rank` must be a permutation of 1..n (else the call is rejected and every branch gets the code half
+alone); `truth` is one of "true", "false", "unsupported". Code turns this into the reward (section
+"notes" above): here branch 1 gets rank_score 1 and branch 0 gets rank_score 0 with one false finding
+of two, so notes = 0.5 x plan + 0 - 0.3 x 0.5.
+
+### Adherence by code: what is checked
+
+Per PLAN subgoal of the parent, from `adherence.AdherenceTracker` (the digest the judge mode also read):
+the named achievement unlocked in this segment, the item count reached (`Wood:2`), the floor's kills
+reached for a ladder, the closest distance to the subgoal's seen place. No prompt: `code_adherence_verdict`.
+
+## Smoke runs (2026-11-04)
+
+Eval (100-turn segments, depth 3, 2 branches, keep 2, 4 worlds, Gemini rank judge, code adherence 0.25,
+state 1, cumulative beam): Mila 11534874 (short-unkillable, cn-g003, from `wt-codemap`), fir 2478665
+(from `wt-rw2`). Train (kve-summary, 4 steps, batch 16, 20k-token segments, depth 3, same reward):
+Mila 11535178, fir 2486117. Earlier Mila attempts died on a cluster-wide Slurm task-prolog error
+(cn-g010/12/13/14/20) and once on a duplicate `env.adherence_weight` the job script wrote (11534833,
+fixed in jobs/craftax.sbatch and jobs/alliance/craftax.alliance.sbatch). Results go under
+`$SCRATCH/factory/runs/craftax-eval/<job>` and `.../craftax-kve-summary/<job>`.
+
 ## Not done
 
 - Offline check of `on_track` against the 2026-11-04 run (needs the kept nodes' saved games).
-- A smoke run of the rank judge against the real Gemini endpoint (schema accepted, ranks a permutation).
+- The smoke runs above: Gemini accepts the schema, ranks are permutations, the four trainer steps run with routed advantages (pending).
 - The main checkout `prime-rl` is still at a63920c8b-equivalent; the beam race keeps running from the
   frozen `wt-beam`.
