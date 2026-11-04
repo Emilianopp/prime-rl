@@ -127,6 +127,10 @@ class GroupState:
     emitted: int = 0
     policy_version_at_start: int = 0
     group_id: uuid.UUID | None = None
+    reserved: int = 0
+    """Permits taken for this group's not-yet-dispatched episodes (atomic group admission:
+    a group is admitted whole or not at all, so a member that finishes and then waits for
+    its siblings, e.g. in a group judge, never waits for a sibling the cap keeps out)."""
 
 
 @dataclass

@@ -464,6 +464,27 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         before = float(result.get("achievement_score_before") or 0.0) if self.config.beam_cumulative else 0.0
         return float(result["trace"].reward) + before
 
+    def _group_meets(self) -> bool:
+        """The RL pipeline's group judges meet on disk (a branch of a node waits for its siblings)."""
+        cfg = self.config
+        return bool(cfg.state_dir) and cfg.tree_depth == 0 and cfg.judge is not None and cfg.judge_mode == "group"
+
+    def _mark_gone(self, task, member: str) -> None:
+        """A branch that brings no judge inputs (it failed, or its episode was cancelled): tell the
+        node's other branches so they are judged without it instead of waiting out the timeout."""
+        if not self._group_meets():
+            return
+        node = (task.data.info or {}).get("node") or {}
+        key = str(node.get("id") or "")
+        if not key:
+            return
+        try:
+            self._rendezvous().mark_gone(key, member)
+            if self.adhering() and self.config.adherence_mode == "judge":
+                self._adherence_rendezvous().mark_gone(key, member)
+        except OSError as exc:
+            logger.warning("could not mark branch %s of node %s gone: %s", member, key, exc)
+
     async def finalize(self, task, episode) -> None:
         """The RL pipeline's judges: grade each segment the run left ungraded (notes, and
         adherence when on) and leave its plan score for its children. The in-env beam grades
@@ -474,6 +495,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         for trace in episode.traces:
             info = trace.info.get("craftax") or {}
             if not info or not getattr(trace, "ok", True) or "node_id" not in info:
+                self._mark_gone(task, str(info.get("node_id") or getattr(trace, "id", None) or uuid.uuid4().hex))
                 continue
             jobs = [self._grade_adherence(trace, rendezvous=True)]
             if cfg.judge is not None and "judge" not in info:
@@ -558,7 +580,11 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         if self.config.tree_depth > 0:
             await self._run_tree(task, agents)
             return
-        await self.play_segment(task, agents.player)
+        try:
+            await self.play_segment(task, agents.player)
+        except asyncio.CancelledError:  # the orchestrator dropped the group or cut the pool: finalize never runs
+            self._mark_gone(task, f"cancelled-{uuid.uuid4().hex}")
+            raise
 
     # --- the frozen beam inside one run (arm A0 of docs/craftax-segments-judge.md) ---
     async def _run_tree(self, task, agents) -> None:

@@ -253,9 +253,32 @@ Mila 11535178, fir 2486117. Earlier Mila attempts died on a cluster-wide Slurm t
 fixed in jobs/craftax.sbatch and jobs/alliance/craftax.alliance.sbatch). Results go under
 `$SCRATCH/factory/runs/craftax-eval/<job>` and `.../craftax-kve-summary/<job>`.
 
+## Width 8 and the group-judge deadlock (fixed 2026-11-04)
+
+In the 2026-11-02 fir sweep, width 8 with a group judge deadlocked (1943388: 128 in flight, every
+group judged after the 1800 s timeout with 2 to 7 of 8 members, 66 segments running at the peak).
+Two causes, both fixed:
+
+- **Partial groups.** The dispatcher took one permit per member as it dispatched, so under a shrinking
+  cap (the KV concurrency controller) or a burst of fresh groups a node's branches could be half in
+  flight. A branch that finished waited in `finalize` for siblings the cap kept out, holding the permit
+  they needed. Now a fresh group opens only when every one of its `group_size` permits is free, the
+  permits are reserved on the group (`GroupState.reserved`, `Dispatcher._take_permit`), its members
+  dispatch on them without competing, and a dropped group hands unused permits back. The tree sampler's
+  node is only popped once the group can start.
+- **Dead siblings.** A branch that failed, or whose episode was cancelled, never wrote its judge inputs,
+  so its siblings waited the full timeout. Now `finalize` marks a failed branch gone and `run` marks a
+  cancelled one gone (`GroupRendezvous.mark_gone`: `gone_<member>.json`); gone members count toward the
+  set, the present ones are judged together at once, and a member left alone is judged alone (code half
+  only under the rank judge) without a call.
+
+Tests: `tests/unit/orchestrator/test_group_admission.py`, `environments/craftax_env/tests/test_group_gone.py`.
+Not yet exercised at width 8 on a GPU: the next throughput sweep cell should be w8 (WIDTH=8).
+
 ## Not done
 
 - Offline check of `on_track` against the 2026-11-04 run (needs the kept nodes' saved games).
 - The smoke runs above: Gemini accepts the schema, ranks are permutations, the four trainer steps run with routed advantages (pending).
-- The main checkout `prime-rl` is still at a63920c8b-equivalent; the beam race keeps running from the
-  frozen `wt-beam`.
+- The main checkout `prime-rl` is still at a63920c8b-equivalent; the first beam race keeps running from
+  the frozen `wt-beam`, the v2 race from `wt-beam2` (d5e345f5d).
+- A width-8 training cell with the group-admission fix.

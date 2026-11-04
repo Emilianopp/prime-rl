@@ -6,6 +6,13 @@
   burst-capped so a raised (or drained) cap never lands all its prefills at
   once.
 - Optional rate limiting via ``AsyncLimiter(dispatch_per_minute, 60)``, one token per episode.
+- Groups are admitted atomically: a fresh group opens only when every one of its
+  ``group_size`` permits is free, and those permits are reserved on the group at once
+  (``GroupState.reserved``); its members then dispatch over the next passes without
+  competing for permits. Without this, a shrinking cap or a burst of fresh groups left
+  groups half dispatched, and a member that finished and waited for its siblings (the
+  craftax group judge meets in the env's finalize) held a permit the missing siblings
+  needed: at group size 8 every group timed out (fir 1943388, 2026-11-02).
 - Every dispatched attempt reaches ``out_q`` exactly once: as the native
   episode returned by the environment, as a ``DispatchFailure`` when no
   episode was produced, or under the group's ``GroupCancellation`` when the
@@ -451,7 +458,9 @@ class Dispatcher:
         while True:
             if self.policy_update_pending:
                 return
-            if self.available_permits <= 0 or self.admission_budget() <= 0:
+            if self.admission_budget() <= 0:
+                return
+            if self.available_permits <= 0 and not self.reserved_work:
                 return
 
             async with self.scheduling_lock:
@@ -498,14 +507,36 @@ class Dispatcher:
         for gid, group in list(self.groups.items()):
             if group.kind != kind or group.episodes_to_schedule <= 0:
                 continue
+            if group.reserved <= 0 and self.available_permits <= 0:
+                return False  # a group admitted before reservation existed: it still needs a permit
             return await self.schedule_group_episode(gid, group)
 
+        # A fresh group is admitted whole: its permits are reserved here, before its task leaves
+        # the source (the tree sampler pops a node per task; a group it cannot start would lose it).
+        if self.available_permits < self.fresh_group_size(kind, envs):
+            return False
         fresh = self.next_fresh_group(kind, envs)
         if fresh is None:
             return False
+        reserve = min(fresh.episodes_to_schedule, self.available_permits)
+        self.current_inflight += reserve
+        fresh.reserved = reserve
         gid = fresh.group_id or uuid.uuid4()
         self.groups[gid] = fresh
         return await self.schedule_group_episode(gid, fresh)
+
+    def fresh_group_size(self, kind: WorkKind, envs) -> int:
+        """The permits a fresh group of ``kind`` needs: the largest ``group_size`` among its envs
+        (a request may ask for fewer rollouts; the surplus permits are not reserved then)."""
+        configs = getattr(envs, "configs", None) if envs is not None else None
+        sizes = [int(getattr(cfg, "group_size", 0) or 0) for cfg in (configs or [])]
+        sizes = [n for n in sizes if n > 0] or [self.min_burst]
+        return max(1, max(sizes))
+
+    @property
+    def reserved_work(self) -> bool:
+        """A group with reserved permits still has members to dispatch."""
+        return any(g.episodes_to_schedule > 0 and g.reserved > 0 for g in self.groups.values())
 
     def next_fresh_group(self, kind: WorkKind, envs) -> GroupState | None:
         """Pop the next task from the corresponding source and wrap it in
@@ -564,9 +595,7 @@ class Dispatcher:
         else:
             cache_salt = None
 
-        group.episodes_to_schedule -= 1
-        await self.acquire()
-        self.admissions_in_window += 1
+        await self._take_permit(group)
         meta = InflightEpisode(
             kind=group.kind,
             env_name=group.env_name,
@@ -622,6 +651,18 @@ class Dispatcher:
         self.inflight[task] = meta
         self.live_events.append(live.pending_event(meta))
         return True
+
+    async def _take_permit(self, group: GroupState) -> None:
+        """Account one dispatch of ``group``: a reserved permit if the group was admitted whole
+        (``GroupState.reserved``), else a fresh one; the burst window counts it either way."""
+        group.episodes_to_schedule -= 1
+        if group.reserved > 0:
+            group.reserved -= 1
+            if self.rate_limiter is not None:
+                await self.rate_limiter.acquire()
+        else:
+            await self.acquire()
+        self.admissions_in_window += 1
 
     async def acquire(self) -> None:
         """Reserve one permit + rate-limit it. Caller must precheck
@@ -758,6 +799,9 @@ class Dispatcher:
 
         inflight_cancelled = len(claimed)
         unscheduled_cancelled = group.episodes_to_schedule if group is not None else 0
+        if group is not None and group.reserved > 0:  # never-dispatched members hand their permits back
+            self.current_inflight -= group.reserved
+            group.reserved = 0
         cancelled = inflight_cancelled + unscheduled_cancelled
 
         if cancelled > 0:
@@ -795,6 +839,9 @@ class Dispatcher:
             self.retire(meta)
         tasks = list(self.inflight.keys())
         self.inflight.clear()
+        for group in self.groups.values():
+            self.current_inflight -= group.reserved
+            group.reserved = 0
         self.groups.clear()
         if tasks:
             await safe_cancel_all(tasks)

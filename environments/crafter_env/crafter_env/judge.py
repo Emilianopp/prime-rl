@@ -529,8 +529,11 @@ class GroupRendezvous:
     Each branch writes its judge inputs as `<dir>/<node>/<member>.json`. The branch
     that completes the set takes the leader lock (an O_EXCL file), makes the one
     comparative call and writes `result.json`; the others poll for it. A branch that
-    waits longer than `timeout_s` (a sibling failed or was cancelled) gives up and is
-    judged alone. Directories older than two hours are swept by later leaders."""
+    waits longer than `timeout_s` gives up and is judged alone. A branch that fails or is
+    cancelled marks itself gone (`mark_gone`: `<dir>/<node>/gone_<member>.json`); gone
+    members count toward the set but bring no inputs, so the others are judged as soon as
+    everyone has either arrived or gone (one member left alone is judged alone at once).
+    Directories older than two hours are swept by later leaders."""
 
     def __init__(self, root: str, size: int, timeout_s: float, poll_s: float = 2.0) -> None:
         self.root, self.size, self.timeout_s, self.poll_s = root, size, timeout_s, poll_s
@@ -542,6 +545,13 @@ class GroupRendezvous:
         with open(tmp, "w") as f:
             json.dump(payload, f, default=str)
         os.replace(tmp, path)
+
+    def mark_gone(self, key: str, member: str) -> None:
+        """This branch will never bring its inputs (it failed or was cancelled): let the
+        siblings stop waiting for it."""
+        d = os.path.join(self.root, key)
+        os.makedirs(d, exist_ok=True)
+        self._write(os.path.join(d, f"gone_{member}.json"), {"member": member, "at": time.time()})
 
     def _sweep(self) -> None:
         cutoff = time.time() - 7200
@@ -574,8 +584,14 @@ class GroupRendezvous:
                 if res.get("failed") or member not in res.get("verdicts", {}):
                     return None, timing
                 return res["verdicts"][member], timing
-            members = sorted(f[2:-5] for f in os.listdir(d) if f.startswith("m_") and f.endswith(".json"))
-            if len(members) >= self.size:
+            names = os.listdir(d)
+            members = sorted(f[2:-5] for f in names if f.startswith("m_") and f.endswith(".json"))
+            gone = sum(1 for f in names if f.startswith("gone_") and f.endswith(".json"))
+            if len(members) + gone >= self.size:
+                if len(members) < 2:  # alone: nothing to compare against, judge alone without a call
+                    self._write(result, {"members": members, "call_s": 0.0, "failed": True, "error": "siblings gone",
+                                         "cost": None, "verdicts": {}})
+                    continue
                 try:
                     fd = os.open(os.path.join(d, "leader"), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                     os.close(fd)
