@@ -45,7 +45,7 @@ group_size = 4  # the branches of one node
 [orchestrator.train.algo]
 type = "grpo"
 advantage_mode = "per_term"  # each reward term standardized within the sibling group, then weighted
-term_std_floor = { progress = 0.5 }  # achievement points; the 0-1 judge terms use the default
+term_std_floor = { progress = 0.5, state = 0.5 }  # achievement points (progress, the held tools' state); the 0-1 judge terms use the default
 default_term_std_floor = 0.1
 
 [orchestrator.concurrency]

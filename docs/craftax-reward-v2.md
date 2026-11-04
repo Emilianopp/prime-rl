@@ -1,0 +1,152 @@
+# Craftax segment reward v2: code state value, rank judge, code adherence
+
+2026-11-04 · Sujin Yun · branch `craftax-code-map` (worktree `wt-codemap`), on top of a63920c8b
+
+Why the 2026-11-03 reward (`craftax-reward-code-facts.md`) was replaced, what the new one computes,
+and how to turn each part on. The old parts stay selectable (`notes_judge = "verdict"`,
+`adherence_mode = "judge"`, `beam_cumulative = false`, `state_weight = 0`).
+
+## What the judged beam showed (w16-96k, job 11525073, 2 worlds, depth 22-24)
+
+| | progress only | progress + judge |
+| --- | --- | --- |
+| best achievements, seed 42 / 43 | 20 / 14 | 13 / 11 |
+| depth-2+ segments with progress 0 | most | 622 of 674 |
+| levels where the keep-4 cut fell inside a progress tie | most | 41 of 44 |
+| deaths per segment, kept vs dropped, at full-tie levels | 0.17 vs 1.13 | 0.75 vs 0.87 |
+| pickaxe held at the cut, kept vs dropped | 0.12 vs 0.04 | 0.04 vs 0.04 |
+
+- Progress is sparse, so the judge terms decided almost every level, and they do not predict the
+  children's progress (pairwise agreement within a level: notes 0.55, adherence 0.43, on_path 0.28,
+  deviation 0.33; findings 0.67, waste 0.65, feasible 0.63 are the only parts above chance).
+- The continuous judge terms made the "fewer deaths" tie-break never fire, and deaths / held tools
+  are what predicts the children (parent's pickaxe tier -> children's progress 0.79).
+- Group-mode scores are relative inside one parent's siblings but the cut compares across parents:
+  a weak parent's best child (0.96) beat a strong parent's best (0.6). The beam dropped every
+  most-advanced lineage at 3 levels (seed 42's kept set fell from 13 to 11 achievements).
+- `on_path` graded the treadmill: under the drop-everything respawn the critical path starts with
+  `place_table` / `make_wood_pickaxe` in 688 of 757 segments (539 of the 564 with 10+ achievements).
+  `deviation` was asked 112 times and answered 0 in 78. Adherence gave "attempted" (0.6) to 376 of
+  716 segments.
+
+Memory note: `judged-beam-w16-96k-diagnosis`.
+
+## The reward of a segment
+
+```
+reward     = progress + state_weight x state + notes_weight x notes + adherence_weight x adherence
+beam_score = reward + achievement score the lineage had before this segment     (beam_cumulative)
+```
+
+Defaults: `state_weight 1.0`, `notes_weight 0.5`, `adherence_weight 0` (0.25 to turn it on),
+`beam_cumulative true`. The in-env beam keeps the `keep` highest `beam_score` (ties: fewer deaths,
+then branch order; `crafter_env.taskset.select_children`). RL (`advantage_mode = "per_term"`)
+standardizes each term within the sibling group and routes it (below); `beam_score` is not used there
+(siblings share the lineage's past).
+
+### progress (code)
+
+Craftax's achievement reward (1 / 3 / 5 / 8 by tier) unlocked in this segment, as before.
+
+### state (code, `world.state_value`)
+
+The achievement points of what the player holds at the cut: pickaxe tier (wood 1, stone 2, iron 3,
+diamond 6, the cumulative reward of the crafts that give them), sword tier (same), a table (1) and a
+furnace (1) standing on a seen cell of the current floor. A lineage that kept its stone pickaxe
+outranks one that died and holds nothing; between siblings it is the end state that differs. Logged as
+`state_value` and `state_parts`. In RL give it a std floor like progress (`term_std_floor`, done in
+`configs/craftax/kve-summary.toml`).
+
+### notes (code + rank judge, `notes_judge = "rank"`)
+
+Code, at the cut (`plan_check.check_plan`):
+
+- `feasible`: as before (the fraction of achievement-naming subgoals whose tools and stations are
+  held at the end or made by an earlier subgoal; a craft already unlocked with its tool still held is
+  wasted). `None` when no subgoal names an achievement.
+- `on_track` (new): 1 when the plan chains to an achievement the lineage has NOT unlocked (the
+  `target`: the first such subgoal) and every subgoal before it serves it (a step of the target's
+  requirement chain, `world.requirements`; a run for a material that chain still lacks; a search for
+  the feature that gives one); 0.5 when a target exists but an earlier subgoal is a detour; 0 when the
+  plan only repeats unlocked achievements or names none. The restart plan "wood, table, wood pickaxe"
+  scores 0; "wood, table, wood pickaxe, stone pickaxe" scores 1 for a lineage without the stone pickaxe.
+- `on_path` is still computed and logged, not scored.
+- `plan = mean(feasible, on_track)` (`plan_track_score`; `on_track` alone when feasible is None).
+
+Judge (`judge.CF_RANK_PROMPT`, `CFRankVerdict`; Gemini 3.8 flash at T 0 in the runs so far): ONE
+comparative call per parent over its siblings' notes, in `judge_mode = "group"`. It sees the shared
+start record and, per branch, the end record, the events, the facts the game writes for the next
+segment (KNOWN PLACES, TURNS LOST, EVENT LOG) and the notes. No floor map, no plan check, no deviation
+question. It returns a `rank` per branch (1 = the notes that would help the next segment most, a
+permutation of 1..n, else the call is rejected) and, per finding, `truth` (true / false /
+unsupported).
+
+```
+rank_score = (n - rank) / (n - 1)                                    best 1, worst 0
+notes      = (1 - judge_weight) x plan + judge_weight x rank_score
+             - false_finding_penalty x (false findings / findings)    clipped to [0, 1]
+notes      = plan        with no siblings in one call (single mode, a group fallback, a failed call)
+notes      = 0           when the notes are empty after the retry (no call)
+```
+
+`judge_weight` 0.5, `false_finding_penalty` 0.3. The rank is only ever used inside the parent's group;
+across parents the beam is decided by `beam_score`'s progress and state. Judge line fields: `rank`,
+`rank_score`, `false_findings`, `plan`, `plan_feasible`, `plan_on_track`, `plan_on_path`, `claims`
+(`[{n, truth}]`), `mode` (`group`, or `code` when ranked alone).
+
+### adherence (code, `adherence_mode = "code"`, `judge.code_adherence_verdict`)
+
+How the child worked on the parent's PLAN, from the digest `adherence.AdherenceTracker` already
+builds: `done` when code saw the subgoal's achievement unlock, its item count or its ladder kills
+reached (1.0); `attempted` when not done but the segment came within 2 tiles of the subgoal's seen
+place (0.6); `unchecked` when code can check nothing about it (no achievement, item count, kills or
+seen place: not scored); else `ignored` (0). Subgoals already true at the start are not scored.
+Weights 0.5 / 0.3 / 0.2 (0.1 after), renormalized over the scored ones. No LLM call, no gate (the
+parent's plan is shared by the siblings, so a gate was a constant per-term normalization cancels).
+Still on the child's trace only.
+
+## Where each term trains (RL, `train_on_notes = true`)
+
+`crafter_env.taskset.request_term_routing` writes `trace.info["term_routing"] = {"notes": [node
+indexes of the notes turn]}`; `prime_rl.orchestrator.algo.grpo.GRPOAlgorithm.route_terms` then gives
+the standardized `notes` term to those tokens only and the other terms (progress, state, adherence)
+to the action turns. Without the request (or `train_on_notes = false`) the per-term sum goes to every
+trainable token, as before. Unit test: `tests/unit/orchestrator/test_advantage.py`
+(`test_per_term_routing_sends_each_term_to_its_nodes`).
+
+## Knobs
+
+Config (`CraftaxEnvConfig`): `notes_judge` (`rank` | `verdict`), `judge_weight`,
+`false_finding_penalty`, `adherence_mode` (`code` | `judge`), `adherence_weight`, `state_weight`,
+`beam_cumulative`; `judge` and `judge_mode` as before. `adherence_mode = "code"` needs no judge.
+
+Eval / beam, `scripts/craftax/eval.sbatch` (through `jobs/craftax_eval.sbatch CODE_REPO=$AGENT_RL/wt-codemap`
+until the main checkout has this code): `NOTES_JUDGE` (rank), `JUDGE_WEIGHT` (0.5), `FALSE_PENALTY`
+(0.3), `ADHERENCE_MODE` (code), `ADHERENCE_WEIGHT` (0), `STATE_WEIGHT` (1), `BEAM_CUMULATIVE` (1).
+Adherence, state and the beam rule are written whenever `TREE_DEPTH` is set; the judge lines when
+`JUDGE_BACKEND` is.
+
+```bash
+CODE_FACTS=1 ACTION_FROM_REASONING=1 TREE_DEPTH=32 BEAM_KEEP=4 ROOT_BRANCHES=16 SEGMENT_TOKENS=98304 \
+JUDGE_BACKEND=openai JUDGE_MODE=group ADHERENCE_WEIGHT=0.25 CODE_REPO=$AGENT_RL/wt-codemap \
+sbatch ... craftax_eval.sbatch
+```
+
+RL, `jobs/craftax.sbatch kve-summary`: `NOTES_JUDGE`, `JUDGE_WEIGHT`, `FALSE_PENALTY`,
+`ADHERENCE_MODE`, `STATE_WEIGHT`, each written into the config only when set (the main checkout may
+not have the fields yet).
+
+## Tests
+
+`environments/craftax_env/tests/test_reward_v2.py` (10): on_track targets, state value, the rank
+verdict's arithmetic, the rank judge in the beam (prompt contents, ranks, false findings), the code-only
+fallback, code adherence from a digest and in a beam without a judge, the cumulative beam score in
+`select_children` and `play_segment`, the routing request. The older suites still pass with the old
+modes pinned (`notes_judge="verdict"`, `adherence_mode="judge"`): craftax 77, crafter 58, orchestrator 17.
+
+## Not done
+
+- Offline check of `on_track` against the 2026-11-04 run (needs the kept nodes' saved games).
+- A smoke run of the rank judge against the real Gemini endpoint (schema accepted, ranks a permutation).
+- The main checkout `prime-rl` is still at a63920c8b-equivalent; the beam race keeps running from the
+  frozen `wt-beam`.

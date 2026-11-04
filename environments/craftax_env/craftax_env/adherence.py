@@ -429,6 +429,7 @@ class AdherenceTracker:
                           "place": list(s.place) if s.place else None, "place_seen": s.place_seen,
                           "ladder_floor": s.ladder_floor,
                           "code_done": self._done(s), "done_at": self.done_at.get(s.n),
+                          "closest": self.closest[s.n][0] if s.n in self.closest else None,
                           "done_at_start": s.n in self.done_at_start,
                           "done_late": s.n in self.done_at and s.n not in self.done_at_start
                                        and self.done_at[s.n] > self.last_turn - LATE_TURNS} for s in self.subgoals],

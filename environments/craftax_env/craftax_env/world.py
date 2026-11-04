@@ -404,18 +404,12 @@ def _cost(name: str) -> dict[str, int]:
     return PLACEMENTS.get(action, {}) if action else {}
 
 
-def critical_path(game: Any, explored: np.ndarray, steps: int = 1) -> tuple[list[str], set[str], set[str]]:
-    """The next `steps` unmet LADDER steps (a pickaxe lost at a death counts as unmet) with, recursively,
-    the providers of the capabilities they lack: (achievements, materials still missing, features to find)."""
-    caps, have = capabilities(game, explored), set(game.achievements)
+def requirements(game: Any, explored: np.ndarray, targets: list[str]) -> tuple[list[str], set[str], set[str]]:
+    """What reaching `targets` takes from here: the targets with, recursively, the providers of the
+    capabilities they lack (prerequisites first), the materials still missing for all of them
+    (costs summed: 2 wood for the table + 1 for the pickaxe = 3) and the features to find them."""
+    caps = capabilities(game, explored)
     items = game.snapshot()["items"]
-    heads = []
-    for name, _ in LADDER:
-        lost = name in PROVIDES and PROVIDES[name].startswith("pick") and PROVIDES[name] not in caps
-        if name not in have or lost:
-            heads.append(name)
-            if len(heads) == steps:
-                break
     achs: list[str] = []
 
     def add(name: str, depth: int = 0) -> None:
@@ -426,15 +420,52 @@ def critical_path(game: Any, explored: np.ndarray, steps: int = 1) -> tuple[list
                 add(_CAP_PROVIDER[cap], depth + 1)
         achs.append(name)  # prerequisites first
 
-    for h in heads:
-        add(h)
-    need: dict[str, int] = {}  # summed over the steps: 2 wood for the table + 1 for the pickaxe = 3
+    for t in targets:
+        add(t)
+    need: dict[str, int] = {}
     for a in achs:
         for k, n in _cost(a).items():
             need[k] = need.get(k, 0) + n
     mats = {k for k, n in need.items() if items.get(k, 0) < n}
     feats = {_MATERIAL_FEATURE[m] for m in mats if m in _MATERIAL_FEATURE} | {_COLLECT_FEATURE[a] for a in achs if a in _COLLECT_FEATURE}
     return achs, mats, feats
+
+
+def critical_path(game: Any, explored: np.ndarray, steps: int = 1) -> tuple[list[str], set[str], set[str]]:
+    """The next `steps` unmet LADDER steps (a pickaxe lost at a death counts as unmet) with, recursively,
+    the providers of the capabilities they lack: (achievements, materials still missing, features to find)."""
+    caps, have = capabilities(game, explored), set(game.achievements)
+    heads = []
+    for name, _ in LADDER:
+        lost = name in PROVIDES and PROVIDES[name].startswith("pick") and PROVIDES[name] not in caps
+        if name not in have or lost:
+            heads.append(name)
+            if len(heads) == steps:
+                break
+    return requirements(game, explored, heads)
+
+
+# The value of what the player holds, in Craftax achievement points (the reward the achievements that
+# gave them are worth, 1 each up to iron and 3 for diamond): the beam's `state` term. Progress alone
+# cannot tell a lineage that kept its stone pickaxe from one that died and holds nothing, and in the
+# judged beam of 2026-11-04 held tools predicted the children's progress (0.79 pairwise) where the
+# judge did not (0.55).
+_PICKAXE_POINTS = (0.0, 1.0, 2.0, 3.0, 6.0)  # none, wood, stone, iron, diamond: cumulative achievement reward
+_SWORD_POINTS = (0.0, 1.0, 2.0, 3.0, 6.0)
+_STATION_POINTS = {"table": 1.0, "furnace": 1.0}
+
+
+def state_value(game: Any, explored: np.ndarray) -> tuple[float, dict[str, float]]:
+    """(points, parts): the pickaxe and sword held, and a table / furnace standing on a seen cell of
+    this floor (`capabilities`)."""
+    items = game.snapshot()["items"]
+    caps = capabilities(game, explored)
+    parts = {
+        "pickaxe": _PICKAXE_POINTS[min(int(items.get("pickaxe", 0)), len(_PICKAXE_POINTS) - 1)],
+        "sword": _SWORD_POINTS[min(int(items.get("sword", 0)), len(_SWORD_POINTS) - 1)],
+        **{k: v for k, v in _STATION_POINTS.items() if k in caps},
+    }
+    return float(sum(parts.values())), parts
 
 
 _COMPASS = {(-1, 0): "north", (1, 0): "south", (0, 1): "east", (0, -1): "west",

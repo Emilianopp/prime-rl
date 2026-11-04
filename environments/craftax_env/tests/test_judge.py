@@ -160,7 +160,7 @@ def test_group_judge_under_code_facts(tmp_path, monkeypatch):
 
     monkeypatch.setattr(CraftaxGroupNotesJudge, "complete", complete)
     _stub_single(monkeypatch)
-    task, env = make(tmp_path, segment_turns=3, tree_depth=1, branches=3, keep=1, root_branches=3, code_facts=True,
+    task, env = make(tmp_path, segment_turns=3, tree_depth=1, branches=3, keep=1, root_branches=3, code_facts=True, notes_judge="verdict",
                      judge=CrafterJudgeConfig(model="stub"), judge_mode="group")
     asyncio.run(env.run(task, SimpleNamespace(player=SegmentPlayer(first_notes=PLAN_NOTES))))
     assert seen == [(CFGroupNotesVerdict, True, True)]
@@ -242,7 +242,7 @@ def test_code_facts_judge_reward(tmp_path, monkeypatch):
 
     unapplied = CFNotesVerdict(findings=[FindingVerdict(n=1, truth="true", lesson=True, applied=False)], deviation=0.0)
     calls = _stub_single(monkeypatch, cf=unapplied)
-    task, env = make(tmp_path, segment_turns=4, code_facts=True, judge=CrafterJudgeConfig(model="stub"), notes_weight=0.5)
+    task, env = make(tmp_path, segment_turns=4, code_facts=True, notes_judge="verdict", judge=CrafterJudgeConfig(model="stub"), notes_weight=0.5)
     out = asyncio.run(env.play_segment(task, SegmentPlayer(first_notes=PLAN_NOTES)))
     asyncio.run(env._judge_branch(out))
     info = out["trace"].info["craftax"]

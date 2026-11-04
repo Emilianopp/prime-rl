@@ -1233,6 +1233,37 @@ def _node_text(node: Any) -> str:
     return " ".join(x.get("text", "") or "" for x in (content or []) if isinstance(x, dict))
 
 
+def notes_node_indexes(trace: Any, summary_from: int) -> list[int]:
+    """The sampled nodes of the notes turn (from the `summary_from`-th sampled one on, and its retry)
+    and earlier sampled replies that hold <notes>: what `mask_notes_from_loss` drops, as indexes."""
+    out: list[int] = []
+    k = 0
+    for index, node in enumerate(getattr(trace, "nodes", None) or []):
+        if not getattr(node, "sampled", False):
+            continue
+        k += 1
+        if k > summary_from or "<notes>" in _node_text(node):
+            out.append(index)
+    return out
+
+
+def request_term_routing(trace: Any, routes: dict[str, list[int]]) -> None:
+    """Ask the orchestrator (`advantage_mode = "per_term"`) to give each named reward term's advantage
+    to these nodes only, and every unrouted term's advantage to the other sampled nodes:
+    `trace.info["term_routing"] = {"notes": [node index, ...]}`. The notes reward then trains the
+    notes turn and progress / state / adherence train the action turns. Rides along with the rewards
+    as `info` does (see `request_loss_drop`)."""
+    info = getattr(trace, "info", None)
+    if not isinstance(info, dict):
+        return
+    current = dict(info.get("term_routing") or {})
+    for name, idx in routes.items():
+        if idx:
+            current[name] = sorted(set(current.get(name) or []) | set(idx))
+    if current:
+        info["term_routing"] = current
+
+
 def mask_notes_from_loss(trace: Any, summary_from: int) -> dict[str, int]:
     """train_on_notes = False: set mask False on the sampled nodes from the `summary_from`-th
     sampled one on (the notes turn and its retry) and on earlier sampled replies that hold
@@ -1321,7 +1352,11 @@ def select_children(results: list[dict[str, Any]], keep: int, per_parent: int | 
     level, or a level where few branches continue) the rest of `keep` is filled from the
     best remaining branches, so the beam never shrinks because of the cap."""
     live = [r for r in results if r.get("continues")]
-    ranked = [r for _, r in sorted(enumerate(live), key=lambda ir: (-float(ir[1].get("reward", 0.0)), len(ir[1].get("deaths") or []), ir[0]))]
+
+    def score(r: dict[str, Any]) -> float:  # craftax sets beam_score (cumulative progress + the terms); else the reward
+        return float(r["beam_score"] if r.get("beam_score") is not None else r.get("reward", 0.0))
+
+    ranked = [r for _, r in sorted(enumerate(live), key=lambda ir: (-score(ir[1]), len(ir[1].get("deaths") or []), ir[0]))]
     if per_parent is None:
         return ranked[:keep]
     kept: list[dict[str, Any]] = []

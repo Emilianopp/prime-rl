@@ -72,6 +72,7 @@ from craftax_env.judge import (
     CraftaxNotesJudge,
     apply_adherence,
     apply_verdict,
+    code_adherence_verdict,
     group_adherence_verdicts,
     group_verdicts,
     judge_adherence,
@@ -85,7 +86,8 @@ from craftax_env.judge import (
 from crafter_env.capi import CrafterJudgeConfig
 from crafter_env.judge import GroupRendezvous, scale_cost, usage_cost
 from crafter_env.state_store import StateStore, open_store, retry_io
-from crafter_env.taskset import _read_beam, _turn_sampling, _write_beam, mask_notes_from_loss, select_children
+from crafter_env.taskset import (_read_beam, _turn_sampling, _write_beam, mask_notes_from_loss, notes_node_indexes,
+                                 request_term_routing, select_children)
 
 logger = logging.getLogger(__name__)
 
@@ -195,9 +197,30 @@ class CraftaxEnvConfig(vf.EnvConfig):
     and into the next segment's start, and the model writes only FINDINGS / PLAN / SURVIVAL
     (segments.PLAN_PROMPT); its MAP claims are no longer graded. False: the model writes all four sections."""
     findings_weight: float = Field(0.3, ge=0.0, le=1.0)
-    """code_facts: the notes reward is (1 - w) x plan + w x findings, where plan = the code check
-    (plan_check: feasible, first subgoal on the critical path) raised by the judge's verdict on a
+    """code_facts, notes_judge = "verdict": the notes reward is (1 - w) x plan + w x findings, where plan = the
+    code check (plan_check: feasible, first subgoal on the critical path) raised by the judge's verdict on a
     departure from that path, and findings = the judge's lesson score (dropped when the judge fails)."""
+    notes_judge: Literal["verdict", "rank"] = "rank"
+    """code_facts: how the LLM grades the notes. `rank` (2026-11-04): one comparative call per parent ranks
+    the siblings' notes (judge.CF_RANK_PROMPT) and marks false findings; notes = (1 - judge_weight) x
+    plan + judge_weight x rank score - false_finding_penalty x (false findings / findings), where plan =
+    mean(feasible, on_track) by code (plan_check). A branch with no siblings in one call gets the code
+    half alone. `verdict`: the 2026-11-03 per-finding verdict (truth / lesson / applied, waste, deviation)
+    with plan = mean(feasible, on_path raised by deviation); see docs/craftax-reward-code-facts.md."""
+    judge_weight: float = Field(0.5, ge=0.0, le=1.0)
+    """notes_judge = "rank": the rank score's weight in the notes reward."""
+    false_finding_penalty: float = Field(0.3, ge=0.0, le=1.0)
+    """notes_judge = "rank": taken off the notes reward per false finding (as a fraction of the findings)."""
+    state_weight: float = Field(1.0, ge=0.0)
+    """Segments: weight of the `state` reward, the achievement points of what the player holds at the cut
+    (world.state_value: pickaxe and sword tier, a table or furnace standing on a seen cell). Under the
+    drop-everything respawn it tells a lineage that kept its tools from one that died (progress alone
+    cannot, and in the 2026-11-04 judged beam held tools predicted the children's progress where the
+    judge did not). 0: off. In RL (`advantage_mode = "per_term"`) give it a std floor like progress."""
+    beam_cumulative: bool = True
+    """The in-env beam ranks branches by the lineage's total achievement score (progress so far) plus the
+    segment's other terms, so a lineage ahead on achievements is never dropped for a lower notes or
+    adherence score. False: by the segment's reward alone (the 2026-11-03 runs)."""
     summary_retry: bool = True
     """Ask once more (segments.SUMMARY_RETRY) when the notes reply holds no <notes> of 80+ characters."""
     train_on_notes: bool = False
@@ -243,8 +266,12 @@ class CraftaxEnvConfig(vf.EnvConfig):
     # a segment worked on the PLAN its parent wrote. Reward `adherence` = the parent's plan
     # score (the gate) x the adherence score, on the child's trace only.
     adherence_weight: float = Field(0.0, ge=0.0)
-    """Weight of the `adherence` reward (0: off, no judge call; arm C: 0.25). Needs `judge`;
-    `judge_mode` applies as for the notes. The digest is logged whenever a segment has a parent PLAN."""
+    """Weight of the `adherence` reward (0: off; arm C: 0.25). `judge_mode` applies as for the notes when
+    `adherence_mode` is "judge". The digest is logged whenever a segment has a parent PLAN."""
+    adherence_mode: Literal["judge", "code"] = "code"
+    """`code` (2026-11-04): the statuses come from the digest alone (judge.code_adherence_verdict: done by
+    code, attempted = came within 2 tiles of the subgoal's place, else ignored; subgoals code cannot check
+    are not scored), no LLM call and no gate. `judge`: the LLM status list gated by the parent's plan score."""
 
     @field_validator("judge", mode="before")
     @classmethod
@@ -257,8 +284,8 @@ class CraftaxEnvConfig(vf.EnvConfig):
     def _check_segments(self):
         if self.tree_depth > 0 and self.segment_turns is None and self.segment_tokens is None:
             raise ValueError("tree_depth needs segments: set segment_turns and/or segment_tokens")
-        if self.adherence_weight > 0 and self.judge is None:
-            raise ValueError("adherence_weight > 0 needs a judge")
+        if self.adherence_weight > 0 and self.adherence_mode == "judge" and self.judge is None:
+            raise ValueError("adherence_weight > 0 with adherence_mode = 'judge' needs a judge")
         return self
 
 
@@ -333,7 +360,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         return rv
 
     def adhering(self) -> bool:
-        return self.config.judge is not None and self.config.adherence_weight > 0
+        cfg = self.config
+        return cfg.adherence_weight > 0 and (cfg.adherence_mode == "code" or cfg.judge is not None)
 
     def _adherence_rendezvous(self) -> GroupRendezvous:
         rv = self.__dict__.get("_adherence_rendezvous_obj")
@@ -406,6 +434,9 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             return
         if not digest.get("subgoals"):
             skip_adherence(trace, weight=cfg.adherence_weight, reason="no parent plan", episode_log=cfg.episode_log)
+        elif cfg.adherence_mode == "code":
+            apply_adherence(trace, code_adherence_verdict(info), weight=cfg.adherence_weight, timing={"call_s": 0.0},
+                            episode_log=cfg.episode_log, mode="code", gated=False)
         elif rendezvous and cfg.judge_mode == "group" and info.get("parent"):
             await judge_adherence_group(self._adherence_rendezvous(), CraftaxAdherenceJudge(cfg.judge),
                                         CraftaxGroupAdherenceJudge(cfg.judge), trace, weight=cfg.adherence_weight,
@@ -417,20 +448,27 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
     def _judged(self, result: dict[str, Any]) -> None:
         trace = result["trace"]
         result["reward"], result["plan_score"] = float(trace.reward), self._plan_score(trace)
+        result["beam_score"] = self._beam_score(result)
+
+    def _beam_score(self, result: dict[str, Any]) -> float:
+        """What the in-env beam ranks by: the segment's reward (every term) plus, with
+        `beam_cumulative`, the achievement score the lineage had before this segment."""
+        before = float(result.get("achievement_score_before") or 0.0) if self.config.beam_cumulative else 0.0
+        return float(result["trace"].reward) + before
 
     async def finalize(self, task, episode) -> None:
         """The RL pipeline's judges: grade each segment the run left ungraded (notes, and
         adherence when on) and leave its plan score for its children. The in-env beam grades
         its branches as they close, so this is a no-op there."""
         cfg = self.config
-        if cfg.judge is None:
+        if cfg.judge is None and not self.adhering():
             return
         for trace in episode.traces:
             info = trace.info.get("craftax") or {}
             if not info or not getattr(trace, "ok", True) or "node_id" not in info:
                 continue
             jobs = [self._grade_adherence(trace, rendezvous=True)]
-            if "judge" not in info:
+            if cfg.judge is not None and "judge" not in info:
                 jobs.append(self._grade_notes(trace, rendezvous=True))
             await asyncio.gather(*jobs)
             self._save_plan_score(trace)
@@ -438,16 +476,19 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
     async def _judge_branch(self, result: dict[str, Any]) -> None:
         """The beam's single mode: grade one finished branch (notes, and adherence when on)
         and refresh its reward and plan score."""
-        if self.config.judge is None or result.get("trace") is None:
+        if (self.config.judge is None and not self.adhering()) or result.get("trace") is None:
             return
         trace = result["trace"]
-        await asyncio.gather(self._grade_notes(trace, rendezvous=False), self._grade_adherence(trace, rendezvous=False))
+        jobs = [self._grade_adherence(trace, rendezvous=False)]
+        if self.config.judge is not None:
+            jobs.append(self._grade_notes(trace, rendezvous=False))
+        await asyncio.gather(*jobs)
         self._judged(result)
 
     async def _judge_group(self, results: list[dict[str, Any]]) -> None:
         """The beam's group mode: the branches of one node in one comparative call per
         judge; a branch a call does not cover is graded alone."""
-        if self.config.judge is None:
+        if self.config.judge is None and not self.adhering():
             return
         done = [r for r in results if r.get("trace") is not None]
         await asyncio.gather(self._notes_group(done), self._adherence_group(done))
@@ -456,6 +497,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
 
     async def _notes_group(self, done: list[dict[str, Any]]) -> None:
         cfg = self.config
+        if cfg.judge is None:
+            return
         with_notes = [r for r in done if (r["trace"].info.get("craftax") or {}).get("notes")]
         for r in done:
             if r not in with_notes:
@@ -484,7 +527,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             return
         graded = [r for r in done if (r["trace"].info.get("craftax") or {}).get("adherence_digest") is not None]
         with_plan = [r for r in graded if r["trace"].info["craftax"]["adherence_digest"].get("subgoals")]
-        if len(with_plan) <= 1 or len(with_plan) < len(graded):  # siblings share the plan: all or none have one
+        if cfg.adherence_mode == "code" or len(with_plan) <= 1 or len(with_plan) < len(graded):  # siblings share the plan
             for r in graded:
                 await self._grade_adherence(r["trace"], rendezvous=False)
             return
@@ -587,6 +630,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     if r.get("state_path"):
                         store.delete(r["state_path"])
                 break
+            for r in results:
+                r.setdefault("beam_score", self._beam_score(r))
             kept = select_children(results, cfg.keep, cfg.keep_per_parent)
             kept_paths = {r.get("state_path") for r in kept}
             for r in results:
@@ -595,8 +640,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             beam = [{"id": r["node_id"], "parent": r["parent"], "depth": depth, "state_path": r["state_path"],
                      "state_sha256": r.get("state_sha256"), "summary": r.get("summary"), "plan_score": r.get("plan_score")}
                     for r in kept]
-            logger.info("seed %d depth %d: %d branches, kept %d (best reward %.3f, achievements %s), %.1f min",
-                        seed, depth, len(results), len(kept), max((float(r.get("reward", 0.0)) for r in kept), default=float("nan")),
+            logger.info("seed %d depth %d: %d branches, kept %d (best beam score %.3f, achievements %s), %.1f min",
+                        seed, depth, len(results), len(kept), max((float(r.get("beam_score", 0.0)) for r in kept), default=float("nan")),
                         max((len(r.get("achievements") or []) for r in kept), default=0), (time.time() - level_started) / 60)
             _write_beam(beam_file, {"seed": seed, "depth": depth, "beam": beam, "done": None, "at": time.time()})
             last_level_s = time.time() - level_started
@@ -879,6 +924,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         notes_masked = {"turn": 0, "mid": 0, "tokens": 0}
         if segmented and not cfg.train_on_notes:
             notes_masked = mask_notes_from_loss(trace, sampled_before_notes if sampled_before_notes is not None else 10**9)
+        elif segmented:  # per-term routing: the notes term trains the notes turn, the others the action turns
+            request_term_routing(trace, {"notes": notes_node_indexes(trace, sampled_before_notes if sampled_before_notes is not None else 10**9)})
         trace_id = getattr(trace, "id", None) or uuid.uuid4().hex
         depth = int(node.get("depth", 0)) + 1 if segmented else 0
         record = summary = state_path = state_sha = None
@@ -909,16 +956,22 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             if cfg.code_facts:
                 check = check_plan(game, explored, sections["PLAN"], view=view)
                 judge_inputs.update({"plan_feasible": check.feasible, "plan_on_path": check.on_path,
+                                     "plan_on_track": check.on_track, "plan_target": check.target,
                                      "critical_path": check.critical, "plan_check": check.text(),
+                                     "notes_judge": cfg.notes_judge, "judge_weight": cfg.judge_weight,
+                                     "false_finding_penalty": cfg.false_finding_penalty,
                                      "findings_weight": cfg.findings_weight, "findings_count": count_findings(sections["FINDINGS"]),
                                      "turns_lost": wasted.as_dict() if wasted is not None else {},
                                      "turns_lost_total": wasted.total if wasted is not None else 0})
         achievements = sorted(game.achievements)
         delta = game.achievement_score - score_before  # Craftax's 1/3/5/8 reward of this segment's unlocks
         score = total if cfg.reward == "return" else game.achievement_score
+        state_points, state_parts = (world.state_value(game, explored) if segmented else (0.0, {}))
         if segmented:
             reward = delta
             trace.record_reward("progress", reward, 1.0)
+            if cfg.state_weight > 0:
+                trace.record_reward("state", state_points, cfg.state_weight)
         else:
             reward = score / glyph.MAX_RETURN - cfg.death_penalty * len(deaths)
             trace.record_reward(f"craftax_{cfg.reward}", reward, 1.0)
@@ -940,6 +993,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     "depth": float(depth),
                     "continues": float(continues),
                     "achievement_reward_delta": float(delta),
+                    "state_value": float(state_points),
                     "segment_achievements": float(len(set(achievements) - set(achievements_before))),
                     "notes_chars": float(len(notes or "")),
                     "notes_masked_replies": float(notes_masked["turn"] + notes_masked["mid"]),
@@ -978,7 +1032,9 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "code_facts": cfg.code_facts, "facts": facts,
                 # what the judges compare against (docs/craftax-segments-judge.md)
                 "first_turn": first_turn, "achievements_before": achievements_before,
-                "achievement_reward_delta": delta, "events": events[:80], "stations": stations,
+                "achievement_reward_delta": delta, "achievement_score_before": float(score_before),
+                "state_value": float(state_points), "state_parts": state_parts,
+                "events": events[:80], "stations": stations,
                 "floor": game.floor, "position": list(game.position), "actions_hist": dict(actions),
                 "forfeit_kinds": dict(tracker.kinds), "ended_at": time.time(), **judge_inputs,
                 "adherence_digest": adherence.digest() if adherence is not None else None,
@@ -1016,12 +1072,16 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     "achievements_before", "achievement_reward_delta", "events", "stations", "floor", "position",
                     "notes", "record", "notes_retry_reason", "record_before", "map_ascii", "nearest", "next_step",
                     "map_claims", "map_check", "map_claim_counts", "actions_hist", "forfeit_kinds", "adherence_digest",
-                    "parent_plan_score", "code_facts", "facts", "plan_feasible", "plan_on_path", "critical_path",
-                    "plan_check", "findings_count", "turns_lost", "turns_lost_total") if k in info}
+                    "parent_plan_score", "code_facts", "facts", "plan_feasible", "plan_on_path", "plan_on_track",
+                    "plan_target", "critical_path", "plan_check", "findings_count", "turns_lost", "turns_lost_total",
+                    "achievement_score_before", "state_value", "state_parts") if k in info}
                     | {"state_bytes": state_bytes, "explored_cells": int(explored.sum())})
             with open(cfg.episode_log, "a") as f:
                 f.write(json.dumps(line) + "\n")
-        return {**info, "trace": trace, "reward": float(getattr(trace, "reward", reward))}
+        out = {**info, "trace": trace, "reward": float(getattr(trace, "reward", reward))}
+        if segmented:
+            out["beam_score"] = self._beam_score(out)
+        return out
 
 
 class CraftaxTaskset(vf.Taskset[CraftaxTask, CraftaxConfig]):

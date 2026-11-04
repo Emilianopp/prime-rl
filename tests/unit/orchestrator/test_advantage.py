@@ -348,3 +348,30 @@ def test_per_term_missing_term_gets_zero_and_stats_use_present_only():
 def test_per_term_rejects_length_penalty():
     with pytest.raises(ValueError):
         GRPOAlgoConfig(advantage_mode="per_term", length_weighted_baseline=True)
+
+
+def test_per_term_routing_sends_each_term_to_its_nodes():
+    """``trace.info["term_routing"] = {"notes": [node index]}``: the notes term's advantage lands on
+    the notes turn's tokens only, the other terms' on the other sampled tokens (crafter_env's
+    request_term_routing)."""
+    group = _termed_group([{"progress": (0.0, 1.0), "notes": (0.6, 0.5)}, {"progress": (2.0, 1.0), "notes": (0.4, 0.5)}])
+    for episode in group:  # a second sampled turn (the notes turn) after an observation
+        trace = episode.traces[0]
+        last = trace.nodes[-1]
+        obs_ids = [900]
+        trace.nodes.append(vf.MessageNode(message=vf.UserMessage(content="END OF SEGMENT"), token_ids=obs_ids,
+                                          mask=[False], logprobs=[0.0], sampled=False, parent=len(trace.nodes) - 1))
+        notes_ids = [901, 902, 903]
+        trace.nodes.append(vf.MessageNode(message=vf.AssistantMessage(content="<notes>x</notes>"), token_ids=notes_ids,
+                                          mask=[True] * 3, logprobs=[0.0] * 3, sampled=True, parent=len(trace.nodes) - 1))
+        trace.info = {"term_routing": {"notes": [len(trace.nodes) - 1]}}
+        assert last is not trace.nodes[-1]
+    algo = GRPOAlgorithm(GRPOAlgoConfig(advantage_mode="per_term", term_std_floor={"progress": 0.5}, default_term_std_floor=0.05), clients=None)
+    asyncio.run(algo.score_group(group))
+    first = [node for node in group[0].traces[0].nodes if any(node.mask)]
+    assert first[0].advantages == pytest.approx([-1.0, -1.0])  # the action turn: progress only
+    assert first[-1].advantages == pytest.approx([0.5, 0.5, 0.5])  # the notes turn: notes only
+    second = [node for node in group[1].traces[0].nodes if any(node.mask)]
+    assert second[0].advantages == pytest.approx([1.0, 1.0]) and second[-1].advantages == pytest.approx([-0.5] * 3)
+    plain = _termed_group([{"progress": (0.0, 1.0), "notes": (0.6, 0.5)}, {"progress": (2.0, 1.0), "notes": (0.4, 0.5)}])
+    assert _per_term(plain, term_std_floor={"progress": 0.5}, default_term_std_floor=0.05) == pytest.approx([-0.5, 0.5])  # unrouted: the sum

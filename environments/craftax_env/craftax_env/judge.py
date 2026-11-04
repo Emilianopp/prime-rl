@@ -257,6 +257,56 @@ actions played: {actions}; forfeited turns: {forfeits}
 {plan_check}"""
 
 
+# --- the rank judge (`notes_judge = "rank"`, 2026-11-04): one comparative call per parent -----------
+# The judged beam of 2026-11-04 (w16-96k-cf) showed the verdict judge's absolute scores do not predict the
+# children's progress (0.55 pairwise) and are not comparable across parents (group-relative). The rank
+# judge answers one question, inside one parent's sibling group only: which notes add the most for the
+# next segment beyond what the game already writes. Code grades feasibility and on_track; the judge
+# also flags findings the events contradict (a false finding is advice the next segment acts on).
+
+CF_RANK_PROMPT = """\
+You are comparing the notes a language-model agent wrote at the end of a segment of a Craftax game, \
+for the next segment. The branches below all started from the same saved world and the same notes, \
+then each played its own segment and wrote its own notes. The game itself writes the places the agent \
+has seen (KNOWN PLACES), the turns that changed nothing (TURNS LOST) and the segment's events (EVENT \
+LOG) into the next segment, so the notes are worth only what they add beyond those: a plan whose \
+subgoals are in the right order for the next achievement this lineage lacks, with real places and the \
+materials and stations each step needs; findings whose cause the events support and whose fix the plan \
+or a survival rule carries out; survival rules that address what actually hurt or killed the agent. \
+Rank the branches' notes by how much they would help the next segment make progress, best first. A \
+polished restart of steps already done ranks below a rougher plan that reaches something new. Also mark \
+every finding whose cause the rules, the events or the record contradict: the next segment reads it as \
+advice from its past self.
+
+{guide}
+
+== Where every branch started ==
+{record_before}
+
+{branches}
+
+Give your verdict:
+- rationale: two or three lines, written first: what separates the best notes from the worst.
+- verdicts: one per branch, with the branch number as given:
+  - rank: 1 for the best notes, 2 for the next, ... every branch a different rank.
+  - findings: one entry per numbered FINDING, in order (an empty list when the FINDINGS say "none"): \
+n and truth ("true" when the rules, the events and the record support its cause; "false" when they \
+contradict it: a rule that does not exist, a cause the events rule out, an event or place that did not \
+happen; "unsupported" when you cannot tell)."""
+
+CF_RANK_BRANCH_BLOCK = """\
+== Branch {branch} ==
+-- the game record at the end --
+{record_after}
+-- what happened ({steps} turns) --
+{events}
+actions played: {actions}; forfeited turns: {forfeits}
+-- what the game wrote for the next segment --
+{facts}
+-- its notes --
+{notes}"""
+
+
 class NotesVerdict(BaseModel):
     findings: float = Field(ge=0.0, le=1.0)
     plan: float = Field(ge=0.0, le=1.0)
@@ -296,6 +346,23 @@ class CFGroupNotesVerdict(BaseModel):
     comparison: str = ""
 
 
+class RankFinding(BaseModel):
+    n: int
+    truth: Literal["true", "false", "unsupported"]
+
+
+class RankBranchVerdict(BaseModel):
+    branch: int
+    rank: int = Field(ge=1)
+    findings: list[RankFinding] = Field(default_factory=list)
+
+
+class CFRankVerdict(BaseModel):
+    """`notes_judge = "rank"`: the siblings' notes ranked, each finding's truth."""
+    rationale: str = ""
+    verdicts: list[RankBranchVerdict]
+
+
 class CraftaxNotesJudge(_CrafterJudge[NotesVerdict]):
     prompt = NOTES_JUDGE_PROMPT
     schema = NotesVerdict
@@ -314,16 +381,22 @@ class CraftaxGroupNotesJudge(_CrafterJudge[GroupNotesVerdict]):
     def build_messages(self, *, infos: list[dict[str, Any]], **_: Any) -> str:
         blocks = []
         code_facts = bool(infos and infos[0].get("code_facts"))
+        rank = code_facts and infos[0].get("notes_judge") == "rank"
         for i, info in enumerate(infos):
             f = judge_fields(info)
-            if code_facts:
+            if rank:
+                blocks.append(CF_RANK_BRANCH_BLOCK.format(branch=i, **{k: f[k] for k in (
+                    "record_after", "steps", "events", "actions", "forfeits", "facts", "notes")}))
+            elif code_facts:
                 blocks.append(CF_BRANCH_BLOCK.format(branch=i, **{k: f[k] for k in (
                     "record_after", "steps", "events", "actions", "forfeits", "facts", "notes", "plan_check")}))
             else:
                 blocks.append(BRANCH_BLOCK.format(branch=i, **{k: f[k] for k in (
                     "record_after", "steps", "events", "actions", "forfeits", "map_ascii", "nearest",
                     "next_step", "notes", "notes_view", "map_claims")}))
-        if code_facts:
+        if rank:
+            self.prompt, self.schema = CF_RANK_PROMPT, CFRankVerdict
+        elif code_facts:
             self.prompt, self.schema = CF_GROUP_PROMPT, CFGroupNotesVerdict
         shared = judge_fields(infos[0])
         return vf.Judge.build_messages(self, guide=CF_GUIDE if code_facts else CRAFTAX_GUIDE, n=len(infos),
@@ -355,6 +428,7 @@ def judge_fields(info: dict[str, Any]) -> dict[str, Any]:
         "facts": info.get("facts") or "(none)",
         "plan_check": info.get("plan_check") or "(no plan check)",
         "code_facts": bool(info.get("code_facts")),
+        "notes_judge": info.get("notes_judge") or "verdict",
     }
 
 
@@ -435,6 +509,48 @@ def cf_verdict(info: dict[str, Any], parsed: CFNotesVerdict, **extra: Any) -> di
                               claims=claims, **extra)
 
 
+JUDGE_WEIGHT = 0.5
+"""notes_judge = "rank": notes = (1 - w) x plan (code: feasible, on_track) + w x rank score."""
+FALSE_FINDING_PENALTY = 0.3
+"""notes_judge = "rank": taken off the notes score per false finding, as a fraction of the findings."""
+
+
+def _track_plan(info: dict[str, Any]) -> float:
+    from craftax_env.plan_check import plan_track_score
+
+    return plan_track_score(info.get("plan_feasible"), float(info.get("plan_on_track") or 0.0))
+
+
+def rank_verdict(info: dict[str, Any], parsed: RankBranchVerdict, n: int, rationale: str = "", **extra: Any) -> dict[str, Any]:
+    """`notes_judge = "rank"`: notes = (1 - w) x plan + w x rank_score - penalty x (false findings /
+    findings), clipped to [0, 1]; rank_score = (n - rank) / (n - 1) (best 1, worst 0)."""
+    plan = _track_plan(info)
+    w = float(info.get("judge_weight", JUDGE_WEIGHT))
+    penalty = float(info.get("false_finding_penalty", FALSE_FINDING_PENALTY))
+    rank_score = (n - parsed.rank) / (n - 1) if n > 1 else 1.0
+    count = max(int(info.get("findings_count") or 0), len(parsed.findings))
+    false = sum(1 for c in parsed.findings if c.truth == "false")
+    false_frac = false / count if count else 0.0
+    score = (1.0 - w) * plan + w * rank_score - penalty * false_frac
+    return {"score": float(min(1.0, max(0.0, score))), "grounding": 1.0 - false_frac, "map_check": 0.0,
+            "findings": 1.0 - false_frac, "plan": plan, "path": float(info.get("plan_on_track") or 0.0),
+            "plan_on_path": float(info.get("plan_on_path") or 0.0), "plan_on_track": float(info.get("plan_on_track") or 0.0),
+            "rank": float(parsed.rank), "rank_score": float(rank_score), "false_findings": float(false),
+            "claims": [{"n": c.n, "truth": c.truth} for c in parsed.findings],
+            "rationale": rationale, "failed": False,
+            **({"plan_feasible": float(info["plan_feasible"])} if info.get("plan_feasible") is not None else {}), **extra}
+
+
+def code_only_verdict(info: dict[str, Any], reason: str, failed: bool = False) -> dict[str, Any]:
+    """`notes_judge = "rank"` with no siblings to rank against, or a failed call: the code half alone
+    (feasible, on_track), no neutral 0.5."""
+    plan = _track_plan(info)
+    return {"score": plan, "grounding": 0.0, "map_check": 0.0, "findings": 0.0, "plan": plan,
+            "path": float(info.get("plan_on_track") or 0.0), "plan_on_path": float(info.get("plan_on_path") or 0.0),
+            "plan_on_track": float(info.get("plan_on_track") or 0.0), "rationale": reason, "failed": failed,
+            **({"plan_feasible": float(info["plan_feasible"])} if info.get("plan_feasible") is not None else {})}
+
+
 def _verdict(info: dict[str, Any], findings: float, plan: float, rationale: str, failed: bool, **extra: Any) -> dict[str, Any]:
     if info.get("code_facts"):
         return code_facts_verdict(info, findings, plan, rationale, failed, **extra)
@@ -446,6 +562,8 @@ def _verdict(info: dict[str, Any], findings: float, plan: float, rationale: str,
 
 def fallback_verdict(info: dict[str, Any], error: str) -> dict[str, Any]:
     """The judge failed: the code part stays; the LLM parts are neutral (0.5), or dropped under `code_facts`."""
+    if info.get("code_facts") and info.get("notes_judge") == "rank":
+        return code_only_verdict(info, f"judge failed: {error}", True)
     if info.get("code_facts"):
         return code_facts_verdict(info, None, None, f"judge failed: {error}", True)
     return _verdict(info, 0.5, 0.5, f"judge failed: {error}", True)
@@ -462,6 +580,10 @@ async def judge_notes(
 ) -> float:
     """Grade one segment's notes alone and record the ``notes`` reward on its trace."""
     info = trace.info.get("craftax") or {}
+    if info.get("code_facts") and info.get("notes_judge") == "rank":  # nothing to rank against: code only
+        verdict = code_only_verdict(info, "not ranked: no siblings in one call")
+        return apply_verdict(trace, verdict, weight=weight, timing={"call_s": 0.0, "wait_s": 0.0},
+                             episode_log=episode_log, mode="code", cost=usage_cost(None, judge.config.model))
     queued = t0 = time.time()
     cost = usage_cost(None, judge.config.model)
     try:
@@ -507,6 +629,11 @@ async def group_verdicts(
         by_branch = {v.branch: v for v in (parsed.verdicts if parsed else [])}
         if sorted(by_branch) != list(range(len(infos))):
             raise RuntimeError(f"group verdict covers branches {sorted(by_branch)}, expected 0..{len(infos) - 1}")
+        if isinstance(parsed, CFRankVerdict):
+            if sorted(v.rank for v in parsed.verdicts) != list(range(1, len(infos) + 1)):
+                raise RuntimeError(f"rank verdict ranks {[v.rank for v in parsed.verdicts]} are not 1..{len(infos)}")
+            out = [rank_verdict(infos[i], by_branch[i], len(infos), rationale=parsed.rationale) for i in range(len(infos))]
+            return out, time.time() - t0, None
         out = [cf_verdict(infos[i], by_branch[i], comparison=parsed.comparison) if infos[i].get("code_facts") else
                _verdict(infos[i], by_branch[i].findings, by_branch[i].plan, by_branch[i].rationale, False,
                         comparison=parsed.comparison) for i in range(len(infos))]
@@ -544,7 +671,8 @@ async def judge_notes_group(
         single = trace.info["craftax"]["judge"]
         cost = {k: cost[k] + float(single.get(k, 0.0)) for k in cost}
         verdict = {k: single[k] for k in ("score", "grounding", "map_check", "findings", "plan", "path", "plan_on_path",
-                                          "plan_feasible", "deviation", "waste", "claims", "rationale", "failed")
+                                          "plan_on_track", "plan_feasible", "deviation", "waste", "rank", "rank_score",
+                                          "false_findings", "claims", "rationale", "failed")
                    if k in single}
         timing = {**timing, "call_s": timing.get("call_s", 0.0) + single.get("call_s", 0.0), "group_fallback": 1.0}
     else:
@@ -568,7 +696,8 @@ def apply_verdict(
     info = trace.info.get("craftax") or {}
     score = float(verdict["score"])
     trace.record_reward("notes", score, weight)
-    parts = ("grounding", "map_check", "findings", "plan", "path", "plan_on_path", "plan_feasible", "deviation", "waste")
+    parts = ("grounding", "map_check", "findings", "plan", "path", "plan_on_path", "plan_on_track", "plan_feasible",
+             "deviation", "waste", "rank", "rank_score", "false_findings")
     trace.record_metrics({
         "notes_score": score, "judge_failed": float(verdict["failed"]),
         **{f"notes_{k}": float(verdict[k]) for k in parts if k in verdict},
@@ -711,7 +840,7 @@ actions: {actions}; forfeited turns: {forfeits}
 -- its reasoning at decision points --
 {decision_excerpts}"""
 
-STATUSES = ("done", "attempted", "deviated_justified", "ignored", "not_reached", "already_done")
+STATUSES = ("done", "attempted", "deviated_justified", "ignored", "not_reached", "already_done", "unchecked")
 STATUS_SCORE = {"done": 1.0, "attempted": 0.6, "deviated_justified": 1.0, "ignored": 0.0}
 SUBGOAL_WEIGHTS = (0.5, 0.3, 0.2)  # later subgoals 0.1 each
 
@@ -783,12 +912,15 @@ def adherence_score(statuses: dict[int, str], n_subgoals: int, already: set[int]
             out[n] = "already_done"
             continue
         s = statuses.get(n, "ignored")
+        if s == "unchecked":  # code mode: nothing code can check (no achievement, item count, kills or seen place)
+            out[n] = s
+            continue
         if s == "not_reached" and blocked:
             s = "ignored"
         out[n] = s
         blocked = s == "ignored" or (s == "done" and n not in late)
     weights = {n: SUBGOAL_WEIGHTS[n - 1] if n <= len(SUBGOAL_WEIGHTS) else 0.1 for n in out}
-    counted = {n: s for n, s in out.items() if s not in ("not_reached", "already_done")}
+    counted = {n: s for n, s in out.items() if s not in ("not_reached", "already_done", "unchecked")}
     total = sum(weights[n] for n in counted)
     score = sum(weights[n] * STATUS_SCORE[s] for n, s in counted.items()) / total if total else 0.0
     return {"score": float(score), "statuses": out}
@@ -803,6 +935,39 @@ def _adherence_verdict(info: dict[str, Any], parsed: AdherenceVerdict | None, fa
     late = {int(g["n"]) for g in subgoals if g.get("done_late")}
     s = adherence_score({v.n: v.status for v in parsed.subgoals}, len(subgoals), already, late)
     return {**s, "rationale": parsed.rationale, "failed": failed, **extra}
+
+
+CODE_ATTEMPT_TILES = 2
+"""adherence_mode = "code": a subgoal not done whose place the segment came within this many tiles of
+counts as attempted (0.6)."""
+
+
+def code_adherence_verdict(info: dict[str, Any], attempt_tiles: int = CODE_ATTEMPT_TILES) -> dict[str, Any]:
+    """`adherence_mode = "code"` (2026-11-04): the statuses from the digest alone. done: code saw the
+    subgoal's achievement, item count or kills reached; attempted: not done but its (seen) place was
+    reached within `attempt_tiles`; unchecked: code can check nothing about it (not scored); else
+    ignored. The LLM status list of the judge mode gave 0.6 ("attempted") to 376 of 716 segments and
+    predicted the children's progress at 0.43; the digest's code facts are what it was reading."""
+    digest = info.get("adherence_digest") or {}
+    subgoals = digest.get("subgoals") or []
+    statuses: dict[int, str] = {}
+    for g in subgoals:
+        n = int(g["n"])
+        if g.get("done_at_start"):
+            continue  # `already` below
+        done, placed = g.get("code_done"), bool(g.get("place")) and g.get("place_seen", True)
+        if done:
+            statuses[n] = "done"
+        elif placed and g.get("closest") is not None and int(g["closest"]) <= attempt_tiles:
+            statuses[n] = "attempted"
+        elif done is None and not placed:
+            statuses[n] = "unchecked"
+        else:
+            statuses[n] = "ignored"
+    already = {int(g["n"]) for g in subgoals if g.get("done_at_start")}
+    late = {int(g["n"]) for g in subgoals if g.get("done_late")}
+    s = adherence_score(statuses, len(subgoals), already, late)
+    return {**s, "rationale": "code: " + ", ".join(f"{n} {v}" for n, v in sorted(s["statuses"].items())), "failed": False}
 
 
 async def judge_adherence(
@@ -905,11 +1070,13 @@ def apply_adherence(
     episode_log: str | None = None,
     mode: str = "single",
     cost: dict[str, float] | None = None,
+    gated: bool = True,
 ) -> float:
-    """Record a verdict as the ``adherence`` reward (gate x score), its parts as metrics,
-    and a ``craftax-adherence`` line in the episode log."""
+    """Record a verdict as the ``adherence`` reward (gate x score; `gated` False: the score alone, the
+    code mode), its parts as metrics, and a ``craftax-adherence`` line in the episode log."""
     info = trace.info.get("craftax") or {}
-    gate_value = float(info.get("parent_plan_score") if info.get("parent_plan_score") is not None else 0.5)
+    gate_value = (1.0 if not gated else
+                  float(info.get("parent_plan_score") if info.get("parent_plan_score") is not None else 0.5))
     score = float(verdict["score"])
     trace.record_reward("adherence", gate_value * score, weight)
     statuses = verdict.get("statuses") or {}

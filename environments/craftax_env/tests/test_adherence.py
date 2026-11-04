@@ -120,7 +120,7 @@ def _lines(tmp_path, task):
 def test_beam_single_adherence(tmp_path, monkeypatch):
     calls = _stubs(monkeypatch, plan=0.6, statuses=("attempted",))
     task, env = make(tmp_path, segment_turns=3, tree_depth=2, branches=1, keep=1, root_branches=1,
-                     judge=CrafterJudgeConfig(model="stub"), adherence_weight=0.25)
+                     judge=CrafterJudgeConfig(model="stub"), adherence_weight=0.25, adherence_mode="judge")
     asyncio.run(env.run(task, SimpleNamespace(player=SegmentPlayer())))
     assert len(calls["notes"]) == 2 and len(calls["adherence"]) == 1  # depth 1 has no parent plan
     prompt = calls["adherence"][0]
@@ -136,7 +136,7 @@ def test_beam_single_adherence(tmp_path, monkeypatch):
 def test_beam_group_adherence(tmp_path, monkeypatch):
     calls = _stubs(monkeypatch)
     task, env = make(tmp_path, segment_turns=3, tree_depth=2, branches=3, keep=1, root_branches=1,
-                     judge=CrafterJudgeConfig(model="stub"), judge_mode="group", adherence_weight=0.25)
+                     judge=CrafterJudgeConfig(model="stub"), judge_mode="group", adherence_weight=0.25, adherence_mode="judge")
 
     async def notes_group(self, messages, **_):
         raise RuntimeError("notes group down")  # the notes fall back to single; adherence stays grouped
@@ -151,7 +151,7 @@ def test_beam_group_adherence(tmp_path, monkeypatch):
 
 def test_rl_finalize_and_plan_score_file(tmp_path, monkeypatch):
     _stubs(monkeypatch, plan=0.8, statuses=("done",))
-    task, env = make(tmp_path, segment_turns=3, judge=CrafterJudgeConfig(model="stub"), adherence_weight=0.25)
+    task, env = make(tmp_path, segment_turns=3, judge=CrafterJudgeConfig(model="stub"), adherence_weight=0.25, adherence_mode="judge")
     parent = asyncio.run(env.play_segment(task, SegmentPlayer()))
     asyncio.run(env.finalize(task, SimpleNamespace(traces=[parent["trace"]])))
     assert "adherence" not in parent["trace"].rewards
@@ -168,7 +168,7 @@ def test_rl_finalize_and_plan_score_file(tmp_path, monkeypatch):
 
 def test_no_parent_plan_is_skipped(tmp_path, monkeypatch):
     calls = _stubs(monkeypatch)
-    task, env = make(tmp_path, segment_turns=3, judge=CrafterJudgeConfig(model="stub"), adherence_weight=0.25)
+    task, env = make(tmp_path, segment_turns=3, judge=CrafterJudgeConfig(model="stub"), adherence_weight=0.25, adherence_mode="judge")
     parent = asyncio.run(env.play_segment(task, SegmentPlayer(first_notes="<notes>MAP:\ntree F0 (24,20)\n"
                                                                           "FINDINGS:\n- nothing notable happened in this segment, no crafts, no deaths, nothing to report\n</notes>")))
     node = {"id": parent["node_id"], "depth": 1, "state_path": parent["state_path"], "summary": parent["summary"]}
@@ -181,7 +181,7 @@ def test_no_parent_plan_is_skipped(tmp_path, monkeypatch):
 def test_adherence_failure_is_neutral(tmp_path, monkeypatch):
     _stubs(monkeypatch, plan=1.0, fail=True)
     task, env = make(tmp_path, segment_turns=3, tree_depth=2, branches=1, keep=1, root_branches=1,
-                     judge=CrafterJudgeConfig(model="stub"), adherence_weight=0.25)
+                     judge=CrafterJudgeConfig(model="stub"), adherence_weight=0.25, adherence_mode="judge")
     asyncio.run(env.run(task, SimpleNamespace(player=SegmentPlayer())))
     (line,) = _lines(tmp_path, "craftax-adherence")
     assert line["judge_failed"] and line["adherence_score"] == 0.5

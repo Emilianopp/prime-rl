@@ -12,6 +12,14 @@ precision and finding-event matching anti-predicted (0.41 / 0.40), so they are n
 - on_path (P3): 1 if the first subgoal is on the critical path (world.critical_path: the next
   ladder step and the providers of the capabilities it lacks; the materials still missing for the
   next two steps, summed, and the features to find them), 0.5 if only the second one is, else 0.
+  Logged only since 2026-11-04: under the drop-everything respawn the critical path says "rebuild the
+  wood pickaxe" in 9 of 10 segments, so on_path graded the restart, not progress (judged beam
+  w16-96k-cf: 0.28 pairwise agreement with the children's progress).
+- on_track: 1 if the plan chains to an achievement this lineage has NOT unlocked (the `target`: the
+  first such subgoal) and every subgoal before it serves that target (a provider of a capability it
+  lacks, or a material or feature run of its requirement chain, world.requirements); 0.5 if a target
+  exists but a subgoal before it is a detour; 0 if the plan only repeats unlocked achievements or
+  names none. The notes reward's code half is mean(feasible, on_track) (`plan_track_score`).
 """
 from __future__ import annotations
 
@@ -30,11 +38,17 @@ class PlanCheck:
     on_path: float
     critical: list[str] = field(default_factory=list)
     lines: list[str] = field(default_factory=list)
+    on_track: float = 0.0
+    target: str | None = None  # the first subgoal's achievement not yet unlocked (what the plan is for)
+    target_n: int | None = None
 
     def text(self) -> str:
         head = (f"critical path (next tech step and what it lacks, prerequisites first): {', '.join(self.critical) or 'none'}; "
                 f"first subgoal on it: {'yes' if self.on_path == 1 else 'only the second subgoal' if self.on_path == 0.5 else 'no'}; "
-                f"feasible subgoals: {'n/a' if self.feasible is None else f'{self.feasible:.2f}'}")
+                f"feasible subgoals: {'n/a' if self.feasible is None else f'{self.feasible:.2f}'}; "
+                + (f"new achievement the plan reaches: {self.target} (subgoal {self.target_n}), "
+                   f"{'every' if self.on_track == 1 else 'not every'} subgoal before it serves it"
+                   if self.target else "the plan reaches no achievement this lineage lacks"))
         return "\n".join([head, *self.lines])
 
 
@@ -80,7 +94,31 @@ def check_plan(game: Any, explored: np.ndarray, plan_lines: list[str], view: tup
             0.5 if len(subgoals) > 1 and _on_path(subgoals[1], achs, mats, feats) else 0.0)
     else:
         on_path = 0.0
-    return PlanCheck(feasible=ok / named if named else None, on_path=on_path, critical=achs, lines=lines)
+    on_track, target, target_n = _on_track(game, explored, subgoals, have)
+    return PlanCheck(feasible=ok / named if named else None, on_path=on_path, critical=achs, lines=lines,
+                     on_track=on_track, target=target, target_n=target_n)
+
+
+def _serves(s: Subgoal, chain: list[str], mats: set[str], feats: set[str]) -> bool:
+    """A subgoal before the target serves it when it is a step of the target's requirement chain, a
+    run for a material the chain still lacks, or a search for the feature that gives one."""
+    if s.achievement and s.achievement in chain:
+        return True
+    if s.achievement in world._COLLECT_FEATURE and world._COLLECT_FEATURE[s.achievement] in feats:
+        return True
+    if any(item in mats for item, _, _ in s.items):
+        return True
+    return bool(s.thing and s.thing in feats)
+
+
+def _on_track(game: Any, explored: np.ndarray, subgoals: list[Subgoal], have: set[str]) -> tuple[float, str | None, int | None]:
+    """(on_track, target, target subgoal number): see the module docstring."""
+    for i, s in enumerate(subgoals):
+        if s.achievement and s.achievement not in have:
+            chain, mats, feats = world.requirements(game, explored, [s.achievement])
+            before = subgoals[:i]
+            return (1.0 if all(_serves(b, chain, mats, feats) for b in before) else 0.5), s.achievement, s.n
+    return 0.0, None, None
 
 
 def plan_code_score(feasible: float | None, on_path: float, deviation: float | None) -> tuple[float, float]:
@@ -90,3 +128,9 @@ def plan_code_score(feasible: float | None, on_path: float, deviation: float | N
     path = on_path if on_path >= 1.0 or deviation is None else max(on_path, float(deviation))
     plan = path if feasible is None else 0.5 * (path + feasible)
     return plan, path
+
+
+def plan_track_score(feasible: float | None, on_track: float) -> float:
+    """The code half of the notes reward since 2026-11-04: mean(feasible, on_track), on_track alone
+    when no subgoal names an achievement (feasible None)."""
+    return float(on_track) if feasible is None else 0.5 * (float(feasible) + float(on_track))

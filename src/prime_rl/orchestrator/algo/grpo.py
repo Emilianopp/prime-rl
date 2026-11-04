@@ -26,9 +26,9 @@ class GRPOAlgorithm(Algorithm):
         self.term_std_floor = dict(config.term_std_floor)
         self.default_term_std_floor = config.default_term_std_floor
 
-    def per_term_advantages(self, traces: list[vf.Trace]) -> list[float]:
-        """``advantage_mode = "per_term"``: sum over reward terms of w_t (r_t - mean) / max(std, floor_t)."""
-        advantages = [0.0] * len(traces)
+    def per_term_contributions(self, traces: list[vf.Trace]) -> list[dict[str, float]]:
+        """``advantage_mode = "per_term"``: per trace, each reward term's w_t (r_t - mean) / max(std, floor_t)."""
+        contributions: list[dict[str, float]] = [{} for _ in traces]
         names = sorted({name for trace in traces for name, r in trace.rewards.items() if r is not None})
         for name in names:
             present = [(i, trace.rewards[name]) for i, trace in enumerate(traces) if trace.rewards.get(name) is not None]
@@ -39,16 +39,42 @@ class GRPOAlgorithm(Algorithm):
             std = (sum((s - mean) ** 2 for s in scores) / len(scores)) ** 0.5
             denom = max(std, self.term_std_floor.get(name, self.default_term_std_floor))
             for (i, r), s in zip(present, scores):
-                advantages[i] += float(r.weight) * (s - mean) / denom
-        return advantages
+                contributions[i][name] = float(r.weight) * (s - mean) / denom
+        return contributions
+
+    def per_term_advantages(self, traces: list[vf.Trace]) -> list[float]:
+        """The per-term advantages summed per trace (the scalar form, no routing)."""
+        return [sum(c.values()) for c in self.per_term_contributions(traces)]
+
+    @staticmethod
+    def route_terms(trace: vf.Trace, contribution: dict[str, float]) -> float | list[float]:
+        """An env's ``trace.info["term_routing"] = {term: [node index, ...]}`` sends that term's
+        advantage to those sampled nodes only and every unrouted term's to the other sampled nodes
+        (crafter_env.taskset.request_term_routing: the notes reward trains the notes turn, progress
+        trains the action turns). Returns one value per sampled token in trainable-node order, or the
+        plain sum when the trace routes nothing that applies."""
+        routes = (trace.info or {}).get("term_routing") if isinstance(trace.info, dict) else None
+        total = sum(contribution.values())
+        if not isinstance(routes, dict) or not any(name in contribution for name in routes):
+            return total
+        node_index = {id(node): i for i, node in enumerate(trace.nodes)}
+        routed = {name: set(idx) for name, idx in routes.items() if name in contribution}
+        unrouted = sum(v for name, v in contribution.items() if name not in routed)
+        values: list[float] = []
+        for node in trainable_nodes(trace):
+            i = node_index[id(node)]
+            here = [contribution[name] for name, idx in routed.items() if i in idx]
+            advantage = sum(here) if here else unrouted
+            values.extend([advantage] * sum(node.mask))
+        return values
 
     async def score_group(self, episodes: list[vf.Episode]) -> None:
         import torch  # only the trainer-side extras ship torch; an eval process never scores a group
 
         traces = [trace for _, trace in iter_trainable_traces(episodes)]
         if self.advantage_mode == "per_term":
-            for trace, advantage in zip(traces, self.per_term_advantages(traces), strict=True):
-                assign_advantages(trace, advantage)
+            for trace, contribution in zip(traces, self.per_term_contributions(traces), strict=True):
+                assign_advantages(trace, self.route_terms(trace, contribution))
             self._apply_loss_aggregation(traces)
             return
         rewards = torch.tensor([trace.reward for trace in traces], dtype=torch.float32)
