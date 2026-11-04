@@ -33,11 +33,16 @@ echo "[rl2node $CONFIG steps=${STEPS:-config} train=${NODES[0]} infer=$INFER] $(
 
 # Node-local copies on both nodes (see rl.sbatch); SLURM_TMPDIR is the same path on each.
 export REPO VENV SGLANG_VENV
+# Two nodes reading the same trees at once on $SCRATCH: rsync can report files as vanished
+# (exit 24) and leave holes (11517784 lost numpy's openblas lib this way), so each copy is
+# repeated until a pass finishes clean.
 srun --overlap -N2 -n2 --ntasks-per-node=1 bash -c '
-  rsync -a --exclude .git --exclude .venv --exclude outputs "$REPO/" "$SLURM_TMPDIR/repo/"
-  rsync -a "$VENV/" "$SLURM_TMPDIR/prl-venv/"
-  find "$SLURM_TMPDIR/prl-venv/bin" -maxdepth 1 -type f -exec sed -i "1s|^#!$VENV/|#!$SLURM_TMPDIR/prl-venv/|" {} +
-  rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"'
+  copy() { for i in 1 2 3 4 5; do rsync -a "$@" && return 0; echo "$(hostname) rsync pass $i incomplete: $*"; sleep 5; done; return 1; }
+  copy --exclude .git --exclude .venv --exclude outputs "$REPO/" "$SLURM_TMPDIR/repo/" &&
+  copy "$VENV/" "$SLURM_TMPDIR/prl-venv/" &&
+  copy "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/" || exit 1
+  find "$SLURM_TMPDIR/prl-venv/bin" -maxdepth 1 -type f -exec sed -i "1s|^#!$VENV/|#!$SLURM_TMPDIR/prl-venv/|" {} +' \
+  2> >(grep -v "file has vanished" >&2) || { echo "node-local copy failed"; exit 1; }
 REPO=$SLURM_TMPDIR/repo VENV=$SLURM_TMPDIR/prl-venv SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
 
 [[ " $ENVS " == *" craftax_env "* ]] && PYTHONPATH=${PYTHONPATH:+$PYTHONPATH:}${CRAFTAX_PY:-$SCRATCH/kv-race/pydeps/craftax-py}
@@ -67,7 +72,7 @@ for k, v in {**roles['common'], **roles[sys.argv[1]]}.items():
     print(f'export {k}={shlex.quote(v)}')" "$1"; }
 mkdir -p "$LOGS/trainer/torchrun"
 
-srun --overlap -N1 -n1 -w "$INFER" --gres=gpu:l40s:4 bash -c "$(role_env inference); exec uv run inference @ $CFG/inference.json" \
+srun --overlap -N1 -n1 -w "$INFER" --gres=gpu:l40s:4 bash -c "cd $REPO; $(role_env inference); exec uv run inference @ $CFG/inference.json" \
   > "$LOGS/inference.log" 2>&1 &
 INF=$!
 for f in "$CFG"/envs/*/*.json; do
@@ -78,7 +83,7 @@ done
   > "$LOGS/orchestrator.log" 2>&1 &
 ORCH=$!
 ( eval "$(role_env trainer)"; export WANDB_SHARED_LABEL=trainer
-  exec uv run torchrun --role=trainer --rdzv-endpoint=localhost:$((20000 + RANDOM % 20000))--rdzv-id="$PRL_RUN_ID" \
+  exec uv run torchrun --role=trainer --rdzv-endpoint=localhost:$((20000 + RANDOM % 20000)) --rdzv-id="$PRL_RUN_ID" \
     --log-dir="$LOGS/trainer/torchrun" --local-ranks-filter=0 --redirect=3 --tee=3 --nproc-per-node=4 \
     -m prime_rl.trainer.rl.train @ "$CFG/trainer.json" ) > "$LOGS/trainer.log" 2>&1 &
 TRAIN=$!
