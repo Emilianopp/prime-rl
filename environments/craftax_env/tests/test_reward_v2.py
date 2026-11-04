@@ -174,6 +174,14 @@ def test_beam_score_in_play_segment(tmp_path):
     assert env._beam_score(out) == pytest.approx(out["reward"])
 
 
+def test_notes_only_beam_score(tmp_path):
+    """progress_weight 0, state_weight 0, beam_cumulative false: the beam score is the notes term alone."""
+    task, env = make(tmp_path, segment_turns=4, code_facts=True, progress_weight=0.0, state_weight=0.0, beam_cumulative=False)
+    out = asyncio.run(env.play_segment(task, SegmentPlayer(first_notes=PLAN_NOTES)))
+    assert out["trace"].rewards["progress"] is not None and out["trace"].weights["progress"] == 0.0
+    assert "state" not in out["trace"].rewards and out["beam_score"] == pytest.approx(0.0)
+
+
 def test_term_routing_request(tmp_path, monkeypatch):
     import craftax_env.taskset as ts
 

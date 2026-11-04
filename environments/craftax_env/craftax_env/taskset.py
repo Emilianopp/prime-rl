@@ -216,6 +216,9 @@ class CraftaxEnvConfig(vf.EnvConfig):
     false_finding_penalty: float = Field(0.2, ge=0.0, le=1.0)
     """notes_judge = "rank": taken off the notes reward per false finding (as a fraction of the findings;
     "unsupported" costs nothing). The notes request asks for at most 2 findings and allows "none"."""
+    progress_weight: float = Field(1.0, ge=0.0)
+    """Segments: weight of the `progress` reward (the segment's Craftax achievement reward). 0 with
+    state_weight 0 and beam_cumulative false: the beam ranks by the notes (and adherence) alone."""
     state_weight: float = Field(1.0, ge=0.0)
     """Segments: weight of the `state` reward, the achievement points of what the player holds at the cut
     (world.state_value: pickaxe and sword tier, a table or furnace standing on a seen cell). Under the
@@ -1003,7 +1006,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         state_points, state_parts = (world.state_value(game, explored) if segmented else (0.0, {}))
         if segmented:
             reward = delta
-            trace.record_reward("progress", reward, 1.0)
+            trace.record_reward("progress", reward, cfg.progress_weight)
             if cfg.state_weight > 0:
                 trace.record_reward("state", state_points, cfg.state_weight)
         else:
