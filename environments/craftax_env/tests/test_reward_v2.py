@@ -194,6 +194,27 @@ def test_notes_only_beam_score(tmp_path):
     assert "state" not in out["trace"].rewards and out["beam_score"] == pytest.approx(0.0)
 
 
+def test_rebase_allocation():
+    from crafter_env.taskset import rebase_allocation
+
+    assert rebase_allocation([15.0, 14.0, 13.0, 0.0], 16, 1.0) == [11, 4, 1, 0]  # 1 and 2 points behind keep children; 15 behind gets none
+    assert sum(rebase_allocation([3.0, 2.5, 2.0, 2.0, 1.0], 16, 0.5)) == 16
+    assert rebase_allocation([5.0, 4.0, 3.0], 16, 0.01) == [16, 0, 0]  # T -> 0: top-1
+    assert rebase_allocation([5.0, 4.0, 3.0, 2.0], 16, 1e6) == [4, 4, 4, 4]  # T -> inf: even
+    assert rebase_allocation([], 16, 1.0) == [] and rebase_allocation([1.0, 1.0], 0, 1.0) == [0, 0]
+    assert rebase_allocation([1.0, 1.0, 1.0], 4, 1.0) == [2, 1, 1]  # ties: the remainder goes in order
+
+
+def test_rebase_beam_shares_the_width(tmp_path):
+    task, env = make(tmp_path, segment_turns=3, tree_depth=2, branches=2, keep=2, root_branches=4, code_facts=True,
+                     beam_select="rebase", rebase_temperature=1.0)
+    asyncio.run(env.run(task, SimpleNamespace(player=SegmentPlayer(first_notes=PLAN_NOTES))))
+    segs = [json.loads(l) for l in open(tmp_path / "episodes.jsonl") if '"task": "craftax"' in l]
+    assert sum(1 for s in segs if s["depth"] == 1) == 4 and sum(1 for s in segs if s["depth"] == 2) == 4  # width 4 at every level
+    beam = json.load(open(tmp_path / "state" / "beam" / f"{task.data.info['seed']}.json"))
+    assert sum(n["fanout"] for n in beam["beam"]) == 4 and all(n["fanout"] >= 1 for n in beam["beam"])
+
+
 def test_term_routing_request(tmp_path, monkeypatch):
     import craftax_env.taskset as ts
 

@@ -18,6 +18,7 @@ import bisect
 import dataclasses
 import gc
 import json
+import math
 import logging
 import os
 import re
@@ -1342,6 +1343,26 @@ def _append_line(path: str, line: dict[str, Any]) -> None:
             f.write(json.dumps(line) + "\n")
 
     retry_io(write, what=f"appending to {path}")
+
+
+def rebase_allocation(scores: list[float], budget: int, temperature: float) -> list[int]:
+    """REward BAlanced SEarch (Wu et al. 2024, "Inference scaling laws", eq. in sec. 3.1.2): the
+    children of the next level are shared among the live nodes in proportion to
+    softmax(score / temperature), W_j = Round(budget x exp(s_j/T) / sum_k exp(s_k/T)), with the
+    rounding done by largest remainder so the widths sum to `budget` exactly. A node with W_j = 0
+    is dropped. T -> 0 is a hard top-1, T -> inf spreads the budget evenly: unlike top-k, a lineage
+    a few points behind keeps a few children instead of none, which is how a beam that only sees
+    what it has already found gets to explore."""
+    if not scores or budget <= 0:
+        return [0] * len(scores)
+    top = max(scores)
+    weights = [math.exp((s - top) / temperature) for s in scores]
+    total = sum(weights)
+    raw = [budget * w / total for w in weights]
+    widths = [int(math.floor(x)) for x in raw]
+    for i in sorted(range(len(raw)), key=lambda i: (raw[i] - widths[i], scores[i]), reverse=True)[: budget - sum(widths)]:
+        widths[i] += 1
+    return widths
 
 
 def select_children(results: list[dict[str, Any]], keep: int, per_parent: int | None = None) -> list[dict[str, Any]]:

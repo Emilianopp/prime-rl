@@ -87,7 +87,7 @@ from crafter_env.capi import CrafterJudgeConfig
 from crafter_env.judge import GroupRendezvous, scale_cost, usage_cost
 from crafter_env.state_store import StateStore, open_store, retry_io
 from crafter_env.taskset import (_read_beam, _turn_sampling, _write_beam, mask_notes_from_loss, notes_node_indexes,
-                                 request_term_routing, select_children)
+                                 rebase_allocation, request_term_routing, select_children)
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +249,16 @@ class CraftaxEnvConfig(vf.EnvConfig):
     """Cap on the kept children of one parent (see crafter_env.taskset.select_children)."""
     root_branches: int | None = Field(None, ge=1)
     """Branches of the root (default branches x keep)."""
+    beam_select: Literal["topk", "rebase"] = "topk"
+    """How the in-env beam picks the next level. `topk`: the `keep` best branches, `branches` children
+    each. `rebase` (REward BAlanced SEarch, Wu et al. 2024): every continuing branch gets
+    Round(width x softmax(beam_score / rebase_temperature)) children, width = root_branches (or
+    branches x keep); branches rounded to 0 are dropped. Softer than top-k: a lineage a few points
+    behind keeps a child or two, which lets the beam explore (the 2026-11-05 w16 progress+notes beam
+    never found the dungeon ladder because its top-4 kept converging on the same safe lineages)."""
+    rebase_temperature: float = Field(1.0, gt=0)
+    """beam_select = "rebase": the softmax temperature, in beam-score units (achievement points under
+    beam_cumulative; a lineage 1 point behind gets exp(-1/T) of the leader's share)."""
     # The notes judge (Milestone 2): an LLM grades the notes' findings and plan, code checks
     # their MAP lines; the `notes` reward is 0.5 x (0.6 map_check + 0.4 findings) + 0.5 x plan.
     judge: CrafterJudgeConfig | None = None
@@ -621,11 +631,15 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                             "the beam stays at depth %d for a resume", seed, depth, last_level_s / 60, depth - 1)
                 return
             fanout = root_fanout if depth == 1 else cfg.branches
-            jobs = [(node, b) for node in beam for b in range(fanout)]
+
+            def width_of(node: dict[str, Any]) -> int:  # rebase: the node's own allocation
+                return int(node.get("fanout") or fanout)
+
+            jobs = [(node, b) for node in beam for b in range(width_of(node))]
 
             async def node_branches(node: dict[str, Any]) -> list[Any]:
                 outs = await asyncio.gather(*(self.play_segment(child_task(task, {**node, "branch": b}), agents.player)
-                                              for b in range(fanout)), return_exceptions=True)
+                                              for b in range(width_of(node))), return_exceptions=True)
                 await self._judge_group([o for o in outs if not isinstance(o, BaseException)])
                 return list(outs)
 
@@ -666,17 +680,28 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 break
             for r in results:
                 r.setdefault("beam_score", self._beam_score(r))
-            kept = select_children(results, cfg.keep, cfg.keep_per_parent)
+            if cfg.beam_select == "rebase":
+                live = [r for r in results if r.get("continues")]
+                widths = rebase_allocation([float(r["beam_score"]) for r in live], root_fanout, cfg.rebase_temperature)
+                kept = [r for r, w in zip(live, widths) if w > 0]
+                for r, w in zip(live, widths):
+                    r["fanout"] = w
+            else:
+                kept = select_children(results, cfg.keep, cfg.keep_per_parent)
+                for r in kept:
+                    r["fanout"] = cfg.branches
             kept_paths = {r.get("state_path") for r in kept}
             for r in results:
                 if r.get("state_path") and r["state_path"] not in kept_paths:
                     store.delete(r["state_path"])
             beam = [{"id": r["node_id"], "parent": r["parent"], "depth": depth, "state_path": r["state_path"],
-                     "state_sha256": r.get("state_sha256"), "summary": r.get("summary"), "plan_score": r.get("plan_score")}
+                     "state_sha256": r.get("state_sha256"), "summary": r.get("summary"), "plan_score": r.get("plan_score"),
+                     "fanout": r["fanout"]}
                     for r in kept]
-            logger.info("seed %d depth %d: %d branches, kept %d (best beam score %.3f, achievements %s), %.1f min",
+            logger.info("seed %d depth %d: %d branches, kept %d (best beam score %.3f, achievements %s, children %s), %.1f min",
                         seed, depth, len(results), len(kept), max((float(r.get("beam_score", 0.0)) for r in kept), default=float("nan")),
-                        max((len(r.get("achievements") or []) for r in kept), default=0), (time.time() - level_started) / 60)
+                        max((len(r.get("achievements") or []) for r in kept), default=0),
+                        sorted((r["fanout"] for r in kept), reverse=True), (time.time() - level_started) / 60)
             _write_beam(beam_file, {"seed": seed, "depth": depth, "beam": beam, "done": None, "at": time.time()})
             last_level_s = time.time() - level_started
             gc.collect()

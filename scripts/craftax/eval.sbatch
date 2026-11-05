@@ -57,7 +57,8 @@
 # no gate; judge), STATE_WEIGHT (1: the held tools' achievement points as the `state` term; 0: off),
 # BEAM_CUMULATIVE (1: the beam ranks by the lineage's total achievement score + the segment's terms;
 # 0: the segment's reward alone, as before), PROGRESS_WEIGHT (1; 0 with STATE_WEIGHT=0 BEAM_CUMULATIVE=0:
-# the beam ranks by the notes reward alone).
+# the beam ranks by the notes reward alone), BEAM_SELECT (topk; rebase: children shared by
+# softmax(beam_score / REBASE_T), REBASE_T in achievement points, default 1).
 set -u
 # One data-parallel engine per GPU of the allocation (the config says 4; main gives 2, unkillable 1).
 GPUS=${GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}; [ "$GPUS" -ge 1 ] || GPUS=1
@@ -77,6 +78,7 @@ if [ -n "$TREE_DEPTH" ]; then ROOTS=${ROOTS:-2}; N=$ROOTS; CONC=$ROOTS; fi
 JUDGE_BACKEND=${JUDGE_BACKEND:-} JUDGE_MODE=${JUDGE_MODE:-single} NOTES_WEIGHT=${NOTES_WEIGHT:-0.5} ADHERENCE_WEIGHT=${ADHERENCE_WEIGHT:-0}
 NOTES_JUDGE=${NOTES_JUDGE:-rank} JUDGE_WEIGHT=${JUDGE_WEIGHT:-0.5} FALSE_PENALTY=${FALSE_PENALTY:-0.2} ADHERENCE_MODE=${ADHERENCE_MODE:-code}
 STATE_WEIGHT=${STATE_WEIGHT:-1} BEAM_CUMULATIVE=${BEAM_CUMULATIVE:-1} PROGRESS_WEIGHT=${PROGRESS_WEIGHT:-1}
+BEAM_SELECT=${BEAM_SELECT:-topk} REBASE_T=${REBASE_T:-1}
 JUDGE_MODEL=${JUDGE_MODEL:-$([ "$JUDGE_BACKEND" = openai ] && echo gemini-3.8-flash || echo gpt-4.1)}
 [ "$JUDGE_BACKEND" = openai ] && [ -z "${GEMINI_API_KEY:-}" ] && [ -r "$HOME/.gemini_key" ] && export GEMINI_API_KEY=$(cat "$HOME/.gemini_key")
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
@@ -91,7 +93,7 @@ export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_thread
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/craftax_env:$REPO/environments/crafter_env:$REPO/deps/verifiers:$REPO/deps/renderers${CRAFTAX_PY:+:$CRAFTAX_PY}${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off} code_facts=${CODE_FACTS:-off} exploration_aid=${EXPLORATION_AID:-off} action_from_reasoning=${ACTION_FROM_REASONING:-off} tree=$([ -n "$TREE_DEPTH" ] && echo "depth$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-r$ROOT_BRANCHES-s$SEGMENT_TURNS-t$SEGMENT_TOKENS-m$MAX_TOKENS" || echo off) judge=$([ -n "$JUDGE_BACKEND" ] && echo "$JUDGE_BACKEND:$JUDGE_MODEL/$JUDGE_MODE/$NOTES_JUDGE/w$NOTES_WEIGHT" || echo off) adherence=$([ "$ADHERENCE_WEIGHT" != 0 ] && echo "$ADHERENCE_MODE/w$ADHERENCE_WEIGHT" || echo off) progress_weight=$PROGRESS_WEIGHT state_weight=$STATE_WEIGHT beam_cumulative=$BEAM_CUMULATIVE] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off} code_facts=${CODE_FACTS:-off} exploration_aid=${EXPLORATION_AID:-off} action_from_reasoning=${ACTION_FROM_REASONING:-off} tree=$([ -n "$TREE_DEPTH" ] && echo "depth$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-r$ROOT_BRANCHES-s$SEGMENT_TURNS-t$SEGMENT_TOKENS-m$MAX_TOKENS" || echo off) judge=$([ -n "$JUDGE_BACKEND" ] && echo "$JUDGE_BACKEND:$JUDGE_MODEL/$JUDGE_MODE/$NOTES_JUDGE/w$NOTES_WEIGHT" || echo off) adherence=$([ "$ADHERENCE_WEIGHT" != 0 ] && echo "$ADHERENCE_MODE/w$ADHERENCE_WEIGHT" || echo off) progress_weight=$PROGRESS_WEIGHT state_weight=$STATE_WEIGHT beam_cumulative=$BEAM_CUMULATIVE select=$BEAM_SELECT$([ "$BEAM_SELECT" = rebase ] && echo "/T$REBASE_T")] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 # jobs/craftax_eval.sbatch unpacks the venv tarball here first: re-walking ~200k files on scratch costs minutes.
 [ -x "$SLURM_TMPDIR/sgl-venv/bin/python" ] || rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
@@ -154,7 +156,7 @@ if [ -n "$TREE_DEPTH" ]; then
           s/^env.segment_turns = .*/env.segment_turns = $SEGMENT_TURNS/; s/^env.segment_tokens = .*/env.segment_tokens = $SEGMENT_TOKENS/;
           s/^env.max_concurrent_agents = .*/env.max_concurrent_agents = $MAXC/; s/^env.player.max_total_tokens = .*/env.player.max_total_tokens = $MAX_TOKENS/" "$OUT/eval.toml"
   sed -i "s|^env.max_episode_steps = .*|&\nenv.root_branches = $ROOT_BRANCHES\nenv.state_dir = \"${STATE_DIR:-$OUT/state}\"|" "$OUT/eval.toml"
-  sed -i "s|^env.max_episode_steps = .*|&\nenv.adherence_weight = $ADHERENCE_WEIGHT\nenv.adherence_mode = \"$ADHERENCE_MODE\"\nenv.state_weight = $STATE_WEIGHT\nenv.progress_weight = $PROGRESS_WEIGHT\nenv.beam_cumulative = $([ "$BEAM_CUMULATIVE" = 0 ] && echo false || echo true)|" "$OUT/eval.toml"
+  sed -i "s|^env.max_episode_steps = .*|&\nenv.adherence_weight = $ADHERENCE_WEIGHT\nenv.adherence_mode = \"$ADHERENCE_MODE\"\nenv.state_weight = $STATE_WEIGHT\nenv.progress_weight = $PROGRESS_WEIGHT\nenv.beam_select = \"$BEAM_SELECT\"\nenv.rebase_temperature = $REBASE_T\nenv.beam_cumulative = $([ "$BEAM_CUMULATIVE" = 0 ] && echo false || echo true)|" "$OUT/eval.toml"
   if [ -n "$JUDGE_BACKEND" ]; then
     JUDGE_LINES="env.judge.backend = \"$JUDGE_BACKEND\"\nenv.judge.model = \"$JUDGE_MODEL\"\nenv.judge.sampling.temperature = 0.0\nenv.judge_mode = \"$JUDGE_MODE\"\nenv.notes_weight = $NOTES_WEIGHT\nenv.notes_judge = \"$NOTES_JUDGE\"\nenv.judge_weight = $JUDGE_WEIGHT\nenv.false_finding_penalty = $FALSE_PENALTY"
     [ "$JUDGE_BACKEND" = openai ] && JUDGE_LINES="$JUDGE_LINES\nenv.judge.base_url = \"https://generativelanguage.googleapis.com/v1beta/openai/\"\nenv.judge.api_key_var = \"GEMINI_API_KEY\""

@@ -265,6 +265,20 @@ Mila 11535178, fir 2486117. Earlier Mila attempts died on a cluster-wide Slurm t
 fixed in jobs/craftax.sbatch and jobs/alliance/craftax.alliance.sbatch). Results go under
 `$SCRATCH/factory/runs/craftax-eval/<job>` and `.../craftax-kve-summary/<job>`.
 
+## Beam selection: top-k or REBASE (`env.beam_select`, 2026-11-05)
+
+The w16 progress+notes beam plateaued at 15 achievements on both worlds from depth 14: it never saw
+the dungeon ladder (KNOWN PLACES mention it in 2 of 640 segments vs 322 of 1024 in the progress-only
+run), because the state and plan terms keep the top-4 on the same cautious lineages and a plan can
+only target a place the game has listed. `beam_select = "rebase"` (REward BAlanced SEarch, Wu et al.
+2024, `crafter_env.taskset.rebase_allocation`) replaces the hard top-k: every continuing branch gets
+`Round(width x softmax(beam_score / rebase_temperature))` children (width = root_branches), rounded by
+largest remainder so the widths sum to the width; branches rounded to 0 are dropped. With T = 1
+achievement point, a branch 1 point behind the leader keeps ~37% of its share, 2 points behind ~14%,
+so side lineages survive a few levels and can find what the leader has not. Knobs:
+`BEAM_SELECT=rebase REBASE_T=1` (eval.sbatch); the beam checkpoint stores each node's `fanout`. Sibling
+judge groups then vary in size (1..width); a lone branch gets the code half of the notes reward.
+
 ## Width 8 and the group-judge deadlock (fixed 2026-11-04)
 
 In the 2026-11-02 fir sweep, width 8 with a group judge deadlocked (1943388: 128 in flight, every
