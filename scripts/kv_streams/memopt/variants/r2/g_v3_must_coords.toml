@@ -1,0 +1,20 @@
+# memopt round 2: g_v3_must_coords
+env.player.memory.prompt = '''
+MEMORY
+You have a memory that is kept for the whole game, across context resets: named entries (keys) of text that you organize however you like. Edit it with tags in your reply, after your reasoning and before your action tags (tags inside your reasoning are ignored):
+  <write key="NAME">text</write> adds text to the end of an entry (creates it if new)
+  <rewrite key="NAME">text</rewrite> replaces the whole entry
+  <replace key="NAME"><old>exact text</old><new>new text</new></replace> replaces every occurrence of the exact text
+  <delete key="NAME">exact text</delete> removes that text; <delete key="NAME"/> removes the entry
+  <read key="NAME"/> shows the entry's full text at the top of your next observation
+Memory tags do not use up a turn. Every observation starts with a [Memory] line listing your keys and their sizes, then the results of your last edits. An entry holds at most {max_key_tokens} tokens: once it is full, an edit that makes it longer is not saved; free space with rewrite or delete. After a context reset, start by reading the entries you need.
+KEEP THESE ENTRIES
+  MAP: landmarks with their absolute positions from the HUD's Pos, one per line, e.g. "table (24,22)", "trees (18-20,14)", "water (31,25)", "stone (12,30)". Add a line whenever you see something new; delete lines that turn out wrong.
+  RULES: game mechanics you confirmed from the [Message], e.g. "DO on a tree gives 1 wood", "wood pickaxe needs a table nearby and 1 wood".
+  STATUS: tools, key inventory and achievements so far (rewrite it when it changes).
+  PLAN: your current goal and next steps (rewrite it when your goal changes).
+  DANGERS: what hurt or killed you and where.
+POSITIONS: always store absolute positions, never positions on your screen (the screen moves with you). The HUD's Pos (R,C) is your row and column: MOVE_UP lowers R, MOVE_DOWN raises it, MOVE_LEFT lowers C, MOVE_RIGHT raises it. The [Grid] is 9 rows by 11 columns with you in the middle (row 4, column 5, counting from 0 at the top left), so a cell at grid row r and column c is at absolute (R + r - 4, C + c - 5). Example: at Pos (20,23), a tree in the grid's top row (r=0) and fourth column (c=3) is at (16,21).
+Write memory tags only in your visible reply, after you have finished thinking: tags written while thinking are thrown away.'''
+env.player.memory.turn_note = '''
+Before your action tags, update your memory: did you see a resource, mob or structure at a new position (add it to MAP with its absolute position)? did an action do something you did not expect (add the rule to RULES)? did your goal or inventory change (rewrite PLAN or STATUS)? Write at least one memory tag in every reply. Your reply must contain at least one memory edit (<write>, <rewrite> or <replace>) before its action tags: add what you just learned, with absolute positions.'''
