@@ -1,0 +1,21 @@
+# memopt quality round 3: g3_whyreset
+env.player.memory.prompt = '''
+MEMORY
+You have a memory that is kept for the whole game, across context resets: named entries (keys) of text that you organize however you like. Edit it with tags in your reply, after your reasoning and before your action tags (tags inside your reasoning are ignored):
+  <write key="NAME">text</write> adds text to the end of an entry (creates it if new)
+  <rewrite key="NAME">text</rewrite> replaces the whole entry
+  <replace key="NAME"><old>exact text</old><new>new text</new></replace> replaces every occurrence of the exact text
+  <delete key="NAME">exact text</delete> removes that text; <delete key="NAME"/> removes the entry
+  <read key="NAME"/> shows the entry's full text at the top of your next observation
+Memory tags do not use up a turn. Every observation starts with a [Memory] line listing your keys and their sizes, then the results of your last edits. An entry holds at most {max_key_tokens} tokens: once it is full, an edit that makes it longer is not saved; free space with rewrite or delete. After a context reset, start by reading the entries you need.
+Memory is optional: most turns need no edit. Write only when you learn something you will still need after your context is reset.
+WHY YOUR MEMORY MATTERS
+You see only your last 50 replies, and every ~25 replies your whole context is reset: after a reset you keep only your handoff summary and your memory. Every fact you did not save is gone: where the trees, water, stone, your table and furnace are, which actions worked, what hurt you.
+WHAT IS WORTH REMEMBERING: things you cannot see again from your screen and will need later - where resources, water, your table and furnace and ladders are (absolute positions), rules and recipes you confirmed, what failed and why, what hurt you and where, your plan. NOT worth remembering: what is on your screen now, your vitals or inventory (the HUD shows them), step-by-step logs of your moves.
+POSITIONS: always store absolute positions, never positions on your screen (the screen moves with you). The HUD's Pos (R,C) is your row and column: MOVE_UP lowers R, MOVE_DOWN raises it, MOVE_LEFT lowers C, MOVE_RIGHT raises it. The [Grid] is 9 rows by 11 columns with you in the middle (row 4, column 5, counting from 0 at the top left), so a cell at grid row r and column c is at absolute (R + r - 4, C + c - 5). Example: at Pos (20,23), a tree in the grid's top row (r=0) and fourth column (c=3) is at (16,21).
+A good layout: MAP (one line per place, absolute positions), RULES (confirmed mechanics and recipes), LESSONS (what failed and why, dangers), PLAN (goal and next steps). Fix wrong or outdated lines with <replace> or <rewrite> instead of adding new ones.
+After a context reset, read the entries you need (MAP and PLAN first) before acting.'''
+env.player.memory.turn_note = '''
+You may also edit your memory in this reply if you learned something worth keeping.'''
+env.player.memory.summary_note = '''
+Everything you learned in this context that is not in your memory is about to be lost. This reply is your moment to save what matters, and it costs no turn: before the summary, update your memory with what you learned in this context - add new places to MAP (absolute positions), confirmed rules to RULES, failures and dangers to LESSONS, and rewrite PLAN. Fix or delete lines that turned out wrong. The summary reaches only your next context; your memory lasts the whole game. In the summary, say which entries to read first.'''
