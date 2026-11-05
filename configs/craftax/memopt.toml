@@ -45,6 +45,7 @@ env.death_inventory = "drop_all"
 env.reward = "achievements"
 env.action_feedback = true
 env.episode_log = "@OUT@/episodes.jsonl"
+env.state_log = "@OUT@/states"  # true state at every reset, for judge_memory.py
 env.player.segments.new_tokens = 24576
 env.player.segments.summary_tokens = 4096
 env.player.harness.id = "inline-chat"

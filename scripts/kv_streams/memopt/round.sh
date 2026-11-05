@@ -9,7 +9,8 @@
 #
 # Env: N (worlds per variant, default 16), SKIP (first task, default the config's 1000),
 # SECONDS_PER_EPISODE (default the config's 1800), REPO (the base config and score.py are
-# read from it, so edits apply without a restart). Needs serve.sh's node-local copies.
+# read from it, so edits apply without a restart), JUDGE_CAP (dollars of Gemini memory grading
+# per round, default 3). Needs serve.sh's node-local copies.
 set -u
 VDIR=$(readlink -f "${1:?variants dir}") OUT=$(readlink -f "${2:?out dir}")
 N=${N:-16} L=$SLURM_TMPDIR R=${REPO:-$SCRATCH/kv-race/prl-memopt-wt}
@@ -36,3 +37,7 @@ done
 for p in "${pids[@]}"; do wait $p; done
 echo "round done $(date +%T)" | tee -a "$OUT/round.txt"
 "$L/prl-venv/bin/python" "$R/scripts/kv_streams/memopt/score.py" "$OUT" | tee "$OUT/score.txt"
+# Gemini grades the memories (GEMINI_API_KEY from $R/.env, gitignored); JUDGE_CAP dollars per round.
+[ -f "$R/.env" ] && { set -a; . "$R/.env"; set +a; }
+[ -n "${GEMINI_API_KEY:-}" ] && "$L/prl-venv/bin/python" "$R/scripts/kv_streams/memopt/judge_memory.py" "$OUT" \
+  --cap "${JUDGE_CAP:-3}" | tee "$OUT/judge.txt"
