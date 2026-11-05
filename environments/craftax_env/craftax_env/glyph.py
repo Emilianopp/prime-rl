@@ -423,6 +423,7 @@ class CraftaxGame:
         self.message = ""
         self.achievements = self._achievement_names()
         self.spawn = self.position
+        self.show_ahead = False  # the HUD names the faced cell and its absolute position (env.ahead_in_hud)
 
     def dump(self) -> dict[str, Any]:
         """Everything ``restore`` needs to continue this game in another process: the
@@ -649,6 +650,18 @@ class CraftaxGame:
         rendered = api.render_craftax_unicode_grid_local(self.state)
         return rendered.legend, rendered.grid, self._hud(np.asarray(rendered.status_data)), self.message
 
+    def ahead(self) -> str:
+        """The faced cell, "(row,col) what": a creature, a block or the map edge."""
+        st, rt = self.state, self._rt
+        r, c = self.position
+        dr, dc = rt["directions"][int(np.asarray(st.player_direction))]
+        tr, tc = r + int(dr), c + int(dc)
+        game_map = np.asarray(st.map[self.floor])
+        if not (0 <= tr < game_map.shape[0] and 0 <= tc < game_map.shape[1]):
+            return "the map edge"
+        what = "a creature" if bool(np.asarray(st.mob_map[self.floor, tr, tc])) else rt["block_names"].get(int(game_map[tr, tc]), "?")
+        return f"({tr},{tc}) {what}"
+
     def _hud(self, sd: np.ndarray) -> str:
         R = self._rt["renderer"]
         floor = int(sd[R.S_FLOOR])
@@ -712,7 +725,7 @@ class CraftaxGame:
                 f"Mana: {int(sd[R.S_MANA])}/{int(sd[R.S_MAX_MANA])}",
                 f"XP: {int(sd[R.S_XP])}    Str: {int(sd[R.S_STR])}    Dex: {int(sd[R.S_DEX])}    Int: {int(sd[R.S_INT])}",
                 f"Floor: {floor} ({floor_name})    Pos: ({int(sd[R.S_POS_ROW])},{int(sd[R.S_POS_COL])})    "
-                f"Facing: {facing}    Light: {light_name}",
+                f"Facing: {facing}    " + (f"Ahead: {self.ahead()}    " if self.show_ahead else "") + f"Light: {light_name}",
                 "[Inventory] " + inventory,
                 "[Equipment] " + equipment,
                 "[Armor] " + (" | ".join(armor_parts) if armor_parts else "None"),

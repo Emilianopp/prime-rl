@@ -108,6 +108,9 @@ class CraftaxEnvConfig(vf.EnvConfig):
     """Say in the [Message] block what each action did (moved or blocked by what, what DO
     collected or what tool the block needs, what a craft or placement changed, vitals that
     moved) and when a reply was forfeited. Off: GlyphBench's message (reward only)."""
+    ahead_in_hud: bool = False
+    """Name the faced cell and its absolute position in the HUD ("Ahead: (24,17) tree"), so
+    the player can note where things are without working positions out from the grid."""
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, return, achievements) to this file."""
     state_dir: str | None = None
@@ -168,6 +171,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         started = time.time()
         deadline = started + self.config.max_episode_seconds if self.config.max_episode_seconds else None
         game = await asyncio.to_thread(_new_game, seed, self.config.max_episode_steps or None)
+        game.show_ahead = self.config.ahead_in_hud
         total, done, end = 0.0, False, "terminated"  # terminated: the run stopped answering
         forfeits: Counter[str] = Counter()
         actions: Counter[str] = Counter()
