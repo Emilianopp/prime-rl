@@ -21,6 +21,9 @@ from verifiers.v1.memory import Memory
 OP = re.compile(r"<(write|rewrite|replace|delete|read)\b")
 ACT = re.compile(r"<action>\s*([A-Z_]+)\s*</action>")
 SUMMARY = re.compile(r"<summary>", re.I)
+POS = re.compile(r"Pos: \((\d+),\s*(\d+)\)")
+WRITE_BODY = re.compile(r"<(?:write|rewrite|new)\b[^>]*>(.*?)</(?:write|rewrite|new)>", re.S)
+PAIR = re.compile(r"\((\d+)\s*,\s*(\d+)\)")
 
 
 def episodes(vdir):
@@ -76,8 +79,22 @@ def score_variant(vdir):
         mem = Memory(max_key_tokens=4096)
         for k, (idx, msgs) in enumerate(segs):
             replies = [m for m in msgs if m["role"] == "assistant"]
+            pos_at = {}
+            last_pos = None
+            for m in msgs:
+                if m["role"] == "user":
+                    p = POS.search(m.get("content") or "")
+                    last_pos = (int(p.group(1)), int(p.group(2))) if p else last_pos
+                elif m["role"] == "assistant":
+                    pos_at[id(m)] = last_pos
             for j, m in enumerate(replies):
                 c = text(m)
+                here = pos_at.get(id(m))
+                if here:
+                    for body in WRITE_BODY.findall(c):
+                        for a, b in PAIR.findall(body):
+                            s["coords"] += 1
+                            s["coords_near"] += abs(int(a) - here[0]) <= 6 and abs(int(b) - here[1]) <= 6
                 s["replies"] += 1
                 ops = OP.findall(c)
                 s["ops"] += len(ops)
@@ -119,6 +136,7 @@ def score_variant(vdir):
         "%reset_read": 100 * post_reset_read / max(1, resets), "resets/game": resets / max(1, len(eps)),
         "keys_end": st.mean(final_keys) if final_keys else 0, "tok_end": st.mean(final_tok) if final_tok else 0,
         "%forfeit": 100 * s["forfeits"] / r,
+        "coords/reply": s["coords"] / r, "%coords_near": 100 * s["coords_near"] / max(1, s["coords"]),
         "ach": st.mean(g[0] for g in games) if games else float("nan"),
         "deaths": st.mean(g[1] for g in games) if games else float("nan"),
         "turns": st.mean(g[2] or 0 for g in games) if games else float("nan"),
@@ -135,7 +153,7 @@ def main():
         except Exception as e:
             print(f"{name}: {e!r}", file=sys.stderr)
     cols = ["games", "replies/game", "ops/reply", "%replies_op", "writes/reply", "reads/reply", "ign_reason/reply", "%ops_ok",
-            "%reset_read", "resets/game", "keys_end", "tok_end", "%forfeit", "ach", "deaths", "turns"]
+            "%reset_read", "resets/game", "keys_end", "tok_end", "coords/reply", "%coords_near", "%forfeit", "ach", "deaths", "turns"]
     print("variant".ljust(14) + "".join(c.rjust(11) for c in cols))
     for name, r in sorted(rows.items(), key=lambda kv: -kv[1]["ops/reply"]):
         print(name.ljust(14) + "".join(f"{r[c]:11.2f}" for c in cols))
