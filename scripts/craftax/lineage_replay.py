@@ -4,7 +4,7 @@ replayed frame by frame in a browser viewer.
     python scripts/craftax/lineage_replay.py <run dir> [<run dir> ...] [--name NAME] [--out DIR]
 
 Run dirs of one chain (a job and the jobs that resumed it) are merged: episodes.jsonl from
-each, turns/<node_id>.json.gz (env.turn_log, on by default since 2026-11-04) and
+each, turns/<node_id>.json.gz or turns.tar (env.turn_log, on by default since 2026-11-04) and
 state/beam/*.json. Writes <out>/data/<name>/<seed>.json per world, the per-segment turn files
 and frame sheets under <out>/data/<name>/<seed>/, <out>/data/runs.json, and the viewer as
 <out>/index.html (scripts/craftax/lineage_replay.html). Serve <out> (python -m http.server)
@@ -91,6 +91,23 @@ def write_sheets(frames: list[np.ndarray], stem: str) -> dict:
     return {"sheets": names, "n": len(frames), "cols": SHEET_COLS, "per_sheet": SHEET_FRAMES, "w": w, "h": h}
 
 
+_tars: dict[str, Any] = {}
+
+
+def read_log(where: str | tuple[str, str]) -> dict:
+    """A turn log: a turns/<node>.json.gz path, or (turns.tar, member)."""
+    import gzip
+    import tarfile
+
+    if isinstance(where, str):
+        with gzip.open(where, "rt") as f:
+            return json.load(f)
+    tar, member = where
+    if tar not in _tars:
+        _tars[tar] = tarfile.open(tar)
+    return json.loads(gzip.decompress(_tars[tar].extractfile(member).read()))
+
+
 def turn_row(row: dict, names: list[str]) -> dict:
     out = {k: row.get(k) for k in ("i", "turn", "obs", "reasoning", "content", "forfeit", "pos", "health", "message",
                                    "new", "death", "finish") if row.get(k) is not None}
@@ -119,6 +136,14 @@ def build(dirs: list[str], name: str, out: str, px: int, all_leaves: bool, seeds
                 segments[node_id] = line  # the last record of a node wins (a resumed level)
         for path in glob.glob(os.path.join(d, "turns", "*.json.gz")):
             logs[os.path.basename(path)[:-len(".json.gz")]] = path
+        if os.path.exists(os.path.join(d, "turns.tar")):  # the RL job's copy-back: one archive (file quota)
+            import tarfile
+
+            tar = os.path.join(d, "turns.tar")
+            with tarfile.open(tar) as t:
+                for member in t.getnames():
+                    if member.endswith(".json.gz"):
+                        logs.setdefault(os.path.basename(member)[:-len(".json.gz")], (tar, member))
         for path in glob.glob(os.path.join(d, "state", "beam", "*.json")):
             try:
                 beam = json.load(open(path))
@@ -185,7 +210,7 @@ def build(dirs: list[str], name: str, out: str, px: int, all_leaves: bool, seeds
                     stack.append((r, None, None))
             while stack:
                 node_id, saved, explored = stack.pop()
-                seg = turn_log.read(logs[node_id])
+                seg = read_log(logs[node_id])
                 game = turn_log.new_game(seg) if saved is None else glyph.CraftaxGame.restore(saved, seg.get("max_turns"))
                 if explored is None:
                     explored = np.zeros(np.asarray(game.state.map).shape, dtype=bool)
