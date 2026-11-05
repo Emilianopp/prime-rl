@@ -97,13 +97,25 @@ across parents the beam is decided by `beam_score`'s progress and state. Judge l
 ### adherence (code, `adherence_mode = "code"`, `judge.code_adherence_verdict`)
 
 How the child worked on the parent's PLAN, from the digest `adherence.AdherenceTracker` already
-builds: `done` when code saw the subgoal's achievement unlock, its item count or its ladder kills
-reached (1.0); `attempted` when not done but the segment came within 2 tiles of the subgoal's seen
-place (0.6); `unchecked` when code can check nothing about it (no achievement, item count, kills or
-seen place: not scored); else `ignored` (0). Subgoals already true at the start are not scored.
-Weights 0.5 / 0.3 / 0.2 (0.1 after), renormalized over the scored ones. No LLM call, no gate (the
+builds, per subgoal in order, skipping the ones already true at the segment's start:
+
+- `done` 1.0: code saw the subgoal's achievement unlock, its item counts or its ladder kills reached;
+- `partial`: the fraction of its item targets reached (max inventory over the segment; "2 wood" with
+  1 collected = 0.5);
+- `near` 0.3: a subgoal with no item target whose place the segment reached within 1 tile;
+- `unchecked`: nothing code can check (no achievement, item count, kills or seen place): not scored;
+- `ignored` 0 otherwise;
+- `not_reached`: the subgoals after the last one the segment worked on, when that one was finished in
+  the last 5 turns or is still in progress: not scored (a long plan does not cost a busy child).
+
+Weights 0.5 / 0.3 / 0.2 (0.1 after), renormalized over the scored subgoals. No LLM call, no gate (the
 parent's plan is shared by the siblings, so a gate was a constant per-term normalization cancels).
-Still on the child's trace only.
+Still on the child's trace only; it trains the action tokens (routing below).
+
+Tightened 2026-11-05 after Mila 11537603 (638 segments): the first version gave 0.6 for coming within
+2 tiles of the place, which 58% of planned places get in a segment (684 "attempted" vs 159 done), and
+had no not-reached, so a child busy with subgoal 1 was charged for 2 and 3. Within a sibling group the
+first version agreed with the child's own progress at 0.73, the best within-group signal of any term.
 
 ## Where each term trains (RL, `train_on_notes = true`)
 

@@ -844,7 +844,7 @@ actions: {actions}; forfeited turns: {forfeits}
 -- its reasoning at decision points --
 {decision_excerpts}"""
 
-STATUSES = ("done", "attempted", "deviated_justified", "ignored", "not_reached", "already_done", "unchecked")
+STATUSES = ("done", "attempted", "deviated_justified", "ignored", "not_reached", "already_done", "unchecked", "partial", "near")
 STATUS_SCORE = {"done": 1.0, "attempted": 0.6, "deviated_justified": 1.0, "ignored": 0.0}
 SUBGOAL_WEIGHTS = (0.5, 0.3, 0.2)  # later subgoals 0.1 each
 
@@ -941,37 +941,60 @@ def _adherence_verdict(info: dict[str, Any], parsed: AdherenceVerdict | None, fa
     return {**s, "rationale": parsed.rationale, "failed": failed, **extra}
 
 
-CODE_ATTEMPT_TILES = 2
-"""adherence_mode = "code": a subgoal not done whose place the segment came within this many tiles of
-counts as attempted (0.6)."""
+CODE_NEAR_TILES = 1
+"""adherence_mode = "code": a subgoal with no item target that was not done, whose place the segment
+came within this many tiles of (adjacent), earns CODE_NEAR_SCORE."""
+CODE_NEAR_SCORE = 0.3
 
 
-def code_adherence_verdict(info: dict[str, Any], attempt_tiles: int = CODE_ATTEMPT_TILES) -> dict[str, Any]:
-    """`adherence_mode = "code"` (2026-11-04): the statuses from the digest alone. done: code saw the
-    subgoal's achievement, item count or kills reached; attempted: not done but its (seen) place was
-    reached within `attempt_tiles`; unchecked: code can check nothing about it (not scored); else
-    ignored. The LLM status list of the judge mode gave 0.6 ("attempted") to 376 of 716 segments and
-    predicted the children's progress at 0.43; the digest's code facts are what it was reading."""
+def code_adherence_verdict(info: dict[str, Any], near_tiles: int = CODE_NEAR_TILES) -> dict[str, Any]:
+    """`adherence_mode = "code"` (2026-11-04, tightened 2026-11-05): the score from the digest alone.
+
+    Per subgoal of the parent's PLAN, in order, skipping the ones already true at the segment's start:
+    `done` 1.0 (code saw its achievement unlock, its item counts or its kills reached); `partial` =
+    the fraction of its item targets reached (collected 1 of the 2 wood asked: 0.5); `near` 0.3 for a
+    subgoal with no item target whose place the segment reached within `near_tiles`; `unchecked`
+    (nothing code can check) left out; else `ignored` 0. Subgoals after the last one the segment
+    worked on are `not_reached` (left out) when that one was finished late or is still in progress:
+    a long plan does not cost a child that was busy with it. Weights 0.5 / 0.3 / 0.2 (0.1 after),
+    renormalized over the scored subgoals. No gate, no LLM call.
+
+    The 2026-11-04 version gave 0.6 for coming within 2 tiles of the place, the commonest credited
+    status (684 of 1970 subgoals in Mila 11537603: 58% of places get that close in a segment)."""
     digest = info.get("adherence_digest") or {}
-    subgoals = digest.get("subgoals") or []
+    subgoals = sorted((digest.get("subgoals") or []), key=lambda g: int(g["n"]))
     statuses: dict[int, str] = {}
+    values: dict[int, float] = {}
+    last_worked, last_worked_open = None, False  # the last subgoal with any progress; open = not done or done late
     for g in subgoals:
         n = int(g["n"])
         if g.get("done_at_start"):
-            continue  # `already` below
+            statuses[n] = "already_done"
+            continue
         done, placed = g.get("code_done"), bool(g.get("place")) and g.get("place_seen", True)
+        progress = g.get("item_progress")
         if done:
-            statuses[n] = "done"
-        elif placed and g.get("closest") is not None and int(g["closest"]) <= attempt_tiles:
-            statuses[n] = "attempted"
-        elif done is None and not placed:
+            statuses[n], values[n] = "done", 1.0
+            last_worked, last_worked_open = n, bool(g.get("done_late"))
+        elif progress is not None and progress > 0:
+            statuses[n], values[n] = "partial", float(progress)
+            last_worked, last_worked_open = n, True
+        elif progress is None and placed and g.get("closest") is not None and int(g["closest"]) <= near_tiles:
+            statuses[n], values[n] = "near", CODE_NEAR_SCORE  # adjacency is not work in progress: no not-reached cut
+        elif done is None and progress is None and not placed:
             statuses[n] = "unchecked"
         else:
-            statuses[n] = "ignored"
-    already = {int(g["n"]) for g in subgoals if g.get("done_at_start")}
-    late = {int(g["n"]) for g in subgoals if g.get("done_late")}
-    s = adherence_score(statuses, len(subgoals), already, late)
-    return {**s, "rationale": "code: " + ", ".join(f"{n} {v}" for n, v in sorted(s["statuses"].items())), "failed": False}
+            statuses[n], values[n] = "ignored", 0.0
+    if last_worked is not None and last_worked_open:
+        for n in list(values):
+            if n > last_worked and statuses[n] in ("ignored", "near"):
+                statuses[n] = "not_reached"
+                del values[n]
+    weights = {n: SUBGOAL_WEIGHTS[n - 1] if n <= len(SUBGOAL_WEIGHTS) else 0.1 for n in values}
+    total = sum(weights.values())
+    score = sum(weights[n] * values[n] for n in values) / total if total else 0.0
+    rationale = "code: " + ", ".join(f"{n} {v}" + (f" {values[n]:.2f}" if v == "partial" else "") for n, v in sorted(statuses.items()))
+    return {"score": float(score), "statuses": statuses, "rationale": rationale, "failed": False}
 
 
 async def judge_adherence(

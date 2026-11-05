@@ -136,13 +136,25 @@ def test_rank_judge_failure_is_code_only(tmp_path, monkeypatch):
 def test_code_adherence_from_the_digest():
     def g(n, **kw):
         return {"n": n, "place": [0, 1, 1], "place_seen": True, "code_done": False, "closest": None,
-                "done_at_start": False, "done_late": False, **kw}
+                "item_progress": None, "done_at_start": False, "done_late": False, **kw}
 
-    info = {"adherence_digest": {"subgoals": [g(1, code_done=True), g(2, closest=1), g(3, closest=9),
+    # done, then an item subgoal half collected (still in progress): the rest is not reached
+    info = {"adherence_digest": {"subgoals": [g(1, code_done=True), g(2, item_progress=0.5), g(3, closest=1),
                                               g(4, code_done=None, place=None), g(5, done_at_start=True, code_done=True)]}}
     v = code_adherence_verdict(info)
-    assert v["statuses"] == {1: "done", 2: "attempted", 3: "ignored", 4: "unchecked", 5: "already_done"}
-    assert v["score"] == pytest.approx((0.5 * 1.0 + 0.3 * 0.6 + 0.2 * 0.0) / 1.0) and not v["failed"]
+    assert v["statuses"] == {1: "done", 2: "partial", 3: "not_reached", 4: "unchecked", 5: "already_done"}
+    assert v["score"] == pytest.approx((0.5 * 1.0 + 0.3 * 0.5) / 0.8) and not v["failed"] and "2 partial 0.50" in v["rationale"]
+    # done early, then nothing: the later subgoals are ignored and count
+    v = code_adherence_verdict({"adherence_digest": {"subgoals": [g(1, code_done=True), g(2, closest=9), g(3, closest=9)]}})
+    assert v["statuses"] == {1: "done", 2: "ignored", 3: "ignored"} and v["score"] == pytest.approx(0.5)
+    # done late: the later subgoals are not reached, the score is the done one alone
+    v = code_adherence_verdict({"adherence_digest": {"subgoals": [g(1, code_done=True, done_late=True), g(2, closest=9), g(3, closest=9)]}})
+    assert v["statuses"] == {1: "done", 2: "not_reached", 3: "not_reached"} and v["score"] == pytest.approx(1.0)
+    # adjacency alone: 0.3 for an achievement-only subgoal, nothing for one with an item target (its fraction counts)
+    v = code_adherence_verdict({"adherence_digest": {"subgoals": [g(1, closest=1), g(2, closest=1, item_progress=0.0)]}})
+    assert v["statuses"] == {1: "near", 2: "ignored"} and v["score"] == pytest.approx(0.5 * 0.3 / 0.8)  # adjacency is not work in progress
+    v = code_adherence_verdict({"adherence_digest": {"subgoals": [g(1, closest=2)]}})  # 2 tiles is not adjacent
+    assert v["statuses"] == {1: "ignored"} and v["score"] == 0.0
     assert code_adherence_verdict({"adherence_digest": {"subgoals": [g(1, code_done=None, place=None)]}})["score"] == 0.0
 
 

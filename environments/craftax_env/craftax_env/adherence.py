@@ -417,6 +417,21 @@ class AdherenceTracker:
             out.append(f"{s.n}. {s.goal[:160]}\n   code: {'; '.join(ev) or '-'} -> {verdict}")
         return out
 
+    def item_progress(self, s: Subgoal) -> float | None:
+        """Fraction of the subgoal's item targets reached (max inventory over the segment, each item
+        clipped to [0, 1], averaged); None when the subgoal names no item count."""
+        if not s.items:
+            return None
+        fracs = []
+        for item, count, rel in s.items:
+            target, start = self._target(item, count, rel), self.start_inv.get(item, 0)
+            need = target - start
+            if need <= 0:
+                fracs.append(1.0)
+                continue
+            fracs.append(max(0.0, min(1.0, (self.max_inv.get(item, 0) - start) / need)))
+        return float(sum(fracs) / len(fracs))
+
     def digest(self) -> dict[str, Any]:
         return {
             "parent_plan": plan_text(self.subgoals),
@@ -430,6 +445,7 @@ class AdherenceTracker:
                           "ladder_floor": s.ladder_floor,
                           "code_done": self._done(s), "done_at": self.done_at.get(s.n),
                           "closest": self.closest[s.n][0] if s.n in self.closest else None,
+                          "item_progress": self.item_progress(s),
                           "done_at_start": s.n in self.done_at_start,
                           "done_late": s.n in self.done_at and s.n not in self.done_at_start
                                        and self.done_at[s.n] > self.last_turn - LATE_TURNS} for s in self.subgoals],
