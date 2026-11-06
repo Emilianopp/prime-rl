@@ -205,6 +205,11 @@ class TreeSamplerConfig(BaseConfig):
     max_depth: int = Field(10, ge=1)
     """Segments per lineage; a branch at this depth is a leaf."""
 
+    max_roots: int | None = Field(None, ge=1)
+    """Worlds played at once. With this many roots open (a depth in flight or a node ready), a free
+    slot waits for one of them instead of starting a new world, so the same worlds go deeper.
+    None: start a new root whenever no node is ready."""
+
     info_key: str = "crafter"
     """The `trace.info` entry the env fills with `continues`, `state_path`, `summary`, ...
     A root task's `info["segments"]["info_key"]` (craftax-env sets it) takes precedence."""

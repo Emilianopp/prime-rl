@@ -123,3 +123,18 @@ def test_checkpoint_resume_continues_the_frontier(tmp_path):
     child = next(resumed.sampler)
     assert child.data.info["node"]["depth"] == 1 and child.data.info["node"]["score"] == 0.6
     assert child.data.info["seed"] == 42 and next(resumed.sampler).data.info["seed"] == 43
+
+
+def test_max_roots_waits_for_an_open_world_instead_of_starting_one(tmp_path):
+    sampler = TreeSampler(TreeSamplerConfig(keep=1, max_depth=100, max_roots=2), [make_root(i) for i in range(4)])
+    a, b = next(sampler), next(sampler)
+    assert sampler.roots_started == 2 and sampler.metrics()["open_roots"] == 2
+    assert next(sampler) is None  # both worlds in flight, the cap is reached
+    sampler.observe([branch(a, tmp_path, score=s) for s in (0.2, 0.6)])
+    child = next(sampler)  # the open world goes deeper; no third root
+    assert child.data.info["node"]["depth"] == 1 and child.data.info["node"]["root"] == a.data.info["node"]["root"]
+    assert next(sampler) is None and sampler.roots_started == 2
+    # A world that ends (no branch continues) frees its slot for a new root.
+    sampler.observe([branch(b, tmp_path, score=0.1, continues=False)])
+    fresh = next(sampler)
+    assert fresh.data.info["node"]["depth"] == 0 and sampler.roots_started == 3

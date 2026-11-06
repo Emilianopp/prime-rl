@@ -92,12 +92,20 @@ class TreeSampler(TaskSampler):
         self._last_sweep = time.time()
 
     # --- tasks out ---------------------------------------------------------------
-    def __next__(self) -> vf.Task:
-        node = self._pop_ready() or self._release_greedy() or self._new_root()
+    def __next__(self) -> vf.Task | None:
+        node = self._pop_ready() or self._release_greedy()
+        if node is None:
+            if self.config.max_roots is not None and len(self._open_roots()) >= self.config.max_roots:
+                return None  # every open world is in flight: wait for one (the dispatcher polls again)
+            node = self._new_root()
         level = self.levels.setdefault((node["root"], node["depth"] + 1), self._new_level())
         level["expected"] += 1
         self.expansions += 1
         return self._task_for(node)
+
+    def _open_roots(self) -> set[str]:
+        """Worlds still being played: a depth in flight or a node waiting in the frontier."""
+        return {root for root, _ in self.levels} | {node["root"] for node in self.frontier}
 
     def _new_level(self) -> dict[str, Any]:
         return {"expected": 0, "observed": 0, "released": 0, "candidates": []}
@@ -305,6 +313,7 @@ class TreeSampler(TaskSampler):
             "frontier": float(len(self.frontier)),
             "open_depths": float(len(self.levels)),
             "roots_started": float(self.roots_started),
+            "open_roots": float(len(self._open_roots())),
             "expansions": float(self.expansions),
             "segments": float(self.segments),
             "deepest_depth": float(self.deepest),
