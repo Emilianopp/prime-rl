@@ -1,0 +1,55 @@
+# Memory-prompt search (scripts/kv_streams/memopt): inference-only continuous Craftax
+# under KV-Streams r50-1 with the player's memory, the RL setting (configs/craftax/rl-qv.toml:
+# thinking, up to 4 actions per reply, action feedback, respawn) with short segments, so a
+# 30-minute episode crosses ~4 context resets and the memory has to carry the game across
+# them. One prompt variant per eval process, all on the same worlds (train split from
+# task 1000: worlds no RL run has played), all sharing one SGLang server. round.sh fills
+# in @OUT@ and appends the variant's prompt overrides at the end (inside [[source]]).
+
+model = "Qwen/Qwen3.5-4B"
+group_size = 1
+
+[client]
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"
+admin_base_url = ["http://localhost:8000/v1"]
+
+[renderer]
+name = "qwen3.5"
+enable_thinking = true
+thinking_retention = "all"
+
+[concurrency]
+min_inflight = 16
+max_inflight = 16
+
+[select]
+skip = 1000
+limit = 16
+
+[sampling]
+max_completion_tokens = 2048
+temperature = 1.0
+
+[[source]]
+name = "craftax"
+env.taskset.id = "craftax-env"
+env.taskset.split = "train"
+env.taskset.max_output_tokens = 2048
+env.taskset.max_actions_per_turn = 4
+env.taskset.respawn = true
+env.max_episode_steps = 0
+env.max_episode_seconds = 1800
+env.on_death = "respawn"
+env.death_inventory = "drop_all"
+env.reward = "achievements"
+env.action_feedback = true
+env.episode_log = "@OUT@/episodes.jsonl"
+env.state_log = "@OUT@/states"  # true state at every reset, for judge_memory.py
+env.player.segments.new_tokens = 24576
+env.player.segments.summary_tokens = 4096
+env.player.harness.id = "inline-chat"
+env.player.memory.max_key_tokens = 4096
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16

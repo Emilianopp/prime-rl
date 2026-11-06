@@ -1,0 +1,130 @@
+# configs/craftax/rl-qv.toml with the memory prompt from the memory-prompt search
+# (scripts/kv_streams/memopt, variants/a3/g7_vis: optional memory, why it matters, what is
+# worth remembering, the free memory update at each reset; reset interval stated for these
+# segments, ~100+ replies) and env.visible_list (a [Visible] line with absolute positions,
+# which made remembered positions 57% exact vs 7%). Same reward, model and budget as rl-qv.
+# On-policy RL on continuous Craftax under KV-Streams with the Q/V judge as the only
+# reward (craftax_env.qv): Qwen3.5-4B in thinking mode, the eval setting of
+# configs/craftax/eval-continuous.toml (r50-1 turn window, up to 4 actions per reply,
+# action feedback, the player's memory). Games run on the clock, not to a step limit,
+# and each segment ships to training when the next one opens (stream_segments). At every
+# segment boundary the env writes the true state (env.state_log); the trace_credit
+# algorithm has Gemini grade it: Q = V + G*(1 - D) from the state (V), the gain a good
+# agent could make by the next reset (G*) and the flaws of the handoff summary written
+# there (D). A segment's reward is clip((Q_end - Q_start) / max(G*_start, 1), -1, 1),
+# its advantage that minus a running baseline. No game reward, no format terms. Judge
+# calls stop at a dollar cap, which writes $OUT/STOP and ends the run.
+# 2 trainer + 2 inference GPUs (A100-80GB), one node; GEMINI_API_KEY from the repo's .env.
+#
+#   CONFIG=configs/craftax/rl-qv.toml ENVS=craftax_env \
+#     ARGS='--orchestrator.train.algo.log-path $OUT/qv.jsonl' sbatch -p long scripts/kv_streams/rl.sbatch
+
+max_steps = 100  # the job's wall clock or the judge's cost cap ends it first
+seq_len = 114688  # fits a segment (new_tokens + summary_tokens below)
+
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 2
+
+[weight_broadcast]
+type = "filesystem"  # the SGLang backend supports filesystem weight updates only
+
+[model]
+name = "Qwen/Qwen3.5-4B"
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.0
+max_norm = 1.0
+
+[orchestrator]
+batch_size = 64  # segments per step
+
+[orchestrator.train]
+group_size = 1  # a streamed segment is its own group: the baseline is a running one
+
+[orchestrator.train.algo]
+type = "trace_credit"
+scorer = "craftax_env.qv:score_segment"
+scorer_args = { state_dir = "$OUT/qv_states", model = "gemini-3.1-flash-lite", cost_cap = 10.0, price_in = 0.25, price_out = 1.5, stop_path = "$OUT/STOP" }
+
+[orchestrator.concurrency]
+# 64 games, each always playing: 32 per inference engine.
+initial_inflight = 64
+max_inflight = 64
+min_inflight = 4
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = true
+# Bridge each turn on the sampled tokens: a re-rendered history breaks a
+# session's continuity (and a KV-Streams trace's single stream).
+thinking_retention = "all"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 2048
+temperature = 1.0
+
+[[orchestrator.train.source]]
+name = "craftax"
+stream_segments = true
+env.taskset.id = "craftax-env"
+env.taskset.split = "train"
+env.taskset.max_output_tokens = 2048  # the budget the system prompt states: keep = max_completion_tokens
+env.taskset.max_actions_per_turn = 4
+env.taskset.respawn = true
+env.max_episode_steps = 0  # no step limit: games run on the clock
+env.max_episode_seconds = 10800
+env.on_death = "respawn"
+env.death_inventory = "drop_all"
+env.reward = "achievements"  # recorded on a game's last segment only; trace_credit ignores it
+env.action_feedback = true
+env.state_log = "$OUT/qv_states"
+# The summary turn starts at new_tokens - summary_tokens = 98304 new tokens, as in the eval
+# (131072 - 32768); 8192 tokens hold the summary reply (max_completion_tokens 2048).
+env.player.segments.new_tokens = 106496
+env.player.segments.summary_tokens = 8192
+env.player.harness.id = "inline-chat"
+env.player.memory.max_key_tokens = 4096
+env.visible_list = true
+env.player.memory.prompt = '''
+MEMORY
+You have a memory that is kept for the whole game, across context resets: named entries (keys) of text that you organize however you like. Edit it with tags in your reply, after your reasoning and before your action tags (tags inside your reasoning are ignored):
+  <write key="NAME">text</write> adds text to the end of an entry (creates it if new)
+  <rewrite key="NAME">text</rewrite> replaces the whole entry
+  <replace key="NAME"><old>exact text</old><new>new text</new></replace> replaces every occurrence of the exact text
+  <delete key="NAME">exact text</delete> removes that text; <delete key="NAME"/> removes the entry
+  <read key="NAME"/> shows the entry's full text at the top of your next observation
+Memory tags do not use up a turn. Every observation starts with a [Memory] line listing your keys and their sizes, then the results of your last edits. An entry holds at most {max_key_tokens} tokens: once it is full, an edit that makes it longer is not saved; free space with rewrite or delete. After a context reset, start by reading the entries you need.
+Memory is optional: most turns need no edit. Write only when you learn something you will still need after your context is reset.
+WHY YOUR MEMORY MATTERS
+You see only your last 50 replies, and every ~100 replies your whole context is reset: after a reset you keep only your handoff summary and your memory. Every fact you did not save is gone: where the trees, water, stone, your table and furnace are, which actions worked, what hurt you.
+WHAT IS WORTH REMEMBERING: things you cannot see again from your screen and will need later - where resources, water, your table and furnace and ladders are (absolute positions), rules and recipes you confirmed, what failed and why, what hurt you and where, your plan. NOT worth remembering: what is on your screen now, your vitals or inventory (the HUD shows them), step-by-step logs of your moves.
+POSITIONS: always store absolute positions, and copy them from the [Visible] line, which lists what is on your screen with its absolute (row,col) position, nearest first. Do not work positions out from the grid yourself.
+A good layout: MAP (one line per place, absolute positions), RULES (confirmed mechanics and recipes), LESSONS (what failed and why, dangers), PLAN (goal and next steps). Fix wrong or outdated lines with <replace> or <rewrite> instead of adding new ones.
+After a context reset, read the entries you need (MAP and PLAN first) before acting.
+Prefer what your screen cannot show you after the reset: places that will be off-screen, rules you had to discover, mistakes you should not repeat.'''
+env.player.memory.turn_note = '''
+You may also edit your memory in this reply if you learned something worth keeping.'''
+env.player.memory.summary_note = '''
+Everything you learned in this context that is not in your memory is about to be lost. This reply is your moment to save what matters, and it costs no turn: before the summary, update your memory with what you learned in this context - add new places to MAP (absolute positions), confirmed rules to RULES, failures and dangers to LESSONS, and rewrite PLAN. Fix or delete lines that turned out wrong. The summary reaches only your next context; your memory lasts the whole game. In the summary, say which entries to read first.'''
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16
+
+[inference]
+backend = "sglang"
+
+[inference.vllm]  # engine-agnostic fields, translated for SGLang
+# KV-Streams survivors keep their positions, so a trace's positions grow with every
+# token it ever wrote: this bounds the whole episode, not the live context.
+max_model_len = 262144
+gpu_memory_utilization = 0.9
+
+[inference.sglang]
+max_mamba_cache_size = 400
+mamba_ssm_dtype = "bfloat16"
+
+[compaction]  # KV-Streams turn window r50-1, as in the eval
+max_turns = 50
+stride = 1

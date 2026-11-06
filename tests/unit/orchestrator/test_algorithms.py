@@ -529,3 +529,37 @@ def test_turn_credit_puts_each_reply_score_on_its_tokens(tmp_path):
     assert (record["replies"], record["scored"], record["tokens"], record["credit"]) == (1, 1, 2, -1.0)
     assert record["reasons"] == {"no_action_tag": 1}
     assert record["turns"] == [["no_action_tag"]]
+
+
+def test_trace_credit_puts_the_trace_reward_minus_a_running_baseline_on_every_reply(tmp_path):
+    from prime_rl.orchestrator.algo import TraceCreditAlgorithm
+
+    log = tmp_path / "credit.jsonl"
+    algo = TraceCreditAlgorithm(
+        _build(type="trace_credit", scorer="json:dumps", scorer_args={"k": 1}, baseline_decay=0.5, log_path=str(log)),
+        MagicMock(),
+    )
+    rewards = iter([1.0, 0.0, None])
+    seen = []
+
+    async def scorer(t, **kwargs):
+        seen.append(kwargs)
+        return next(rewards), {"note": "x"}
+
+    algo.scorer = scorer
+    advantages = []
+    for _ in range(3):
+        episode = _two_turn_episode(observation_role="user")
+        episode.ok = True
+        asyncio.run(algo.score_episode(episode))
+        trace = episode.traces[0]
+        assert trace.nodes[1].advantages == trace.nodes[3].advantages  # one value for the whole trace
+        advantages.append(trace.nodes[1].advantages[0])
+    assert seen == [{"k": 1}] * 3
+    # The first trace sets the baseline (advantage 0), the second is scored against it,
+    # an unscored one carries 0 and leaves the baseline alone.
+    assert advantages == [0.0, -1.0, 0.0]
+    assert algo.baseline == 0.5
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [r["reward"] for r in records] == [1.0, 0.0, None]
+    assert records[1]["baseline"] == 1.0 and records[1]["info"] == {"note": "x"}
