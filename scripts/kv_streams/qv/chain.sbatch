@@ -6,7 +6,7 @@
 #SBATCH --mem=512G
 #SBATCH --time=2:59:00
 #SBATCH --output=%x-%j.out
-# Chained judge-RL blocks (rl.sbatch with configs/craftax/rl-qv.toml) until a dollar budget
+# Chained judge-RL blocks (rl.sbatch with $CONFIG, default configs/craftax/rl-qv.toml) until a dollar budget
 # of judge calls is spent. Each block starts from the chain's latest weights, queues its
 # successor first (afterany), caps its own judge spend at what is left of the budget, and
 # runs save_weights.sh beside the run: every finished weight broadcast becomes the chain's
@@ -25,7 +25,9 @@
 set -u
 C=${CHAIN:?set CHAIN} REPO=${REPO:?set REPO}
 HERE=$REPO/scripts/kv_streams PY=${VENV:?set VENV}/bin/python
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/rl}/rl-qv/$SLURM_JOB_ID
+CONFIG=${CONFIG:-configs/craftax/rl-qv.toml} NAME=$(basename "${CONFIG:-rl-qv.toml}" .toml)
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/rl}/$NAME/$SLURM_JOB_ID
+export CONFIG
 export CHAIN REPO
 
 latest=$(readlink -f "$C/latest"); step=$(cat "$latest/.global_step")
@@ -60,11 +62,11 @@ sbatch --dependency=afterany:$SLURM_JOB_ID --export=ALL --chdir="$(dirname "$OUT
 echo "$OUT/qv.jsonl" >> "$C/ledgers"
 
 mkdir -p "$C/cfg"
-sed -E "s/cost_cap = [0-9.]+/cost_cap = $left/" "$REPO/configs/craftax/rl-qv.toml" > "$C/cfg/rl-qv.toml"
-grep -q "cost_cap = $left" "$C/cfg/rl-qv.toml" || { echo "could not set cost_cap"; exit 1; }
+sed -E "s/cost_cap = [0-9.]+/cost_cap = $left/" "$REPO/$CONFIG" > "$C/cfg/$NAME.toml"
+grep -q "cost_cap = $left" "$C/cfg/$NAME.toml" || { echo "could not set cost_cap"; exit 1; }
 
 export STEP0=$step
-CONFIG=$C/cfg/rl-qv.toml ENVS=craftax_env \
+CONFIG=$C/cfg/$NAME.toml ENVS=craftax_env \
   ARGS="--model.name $latest --orchestrator.train.algo.log-path \$OUT/qv.jsonl" \
   WATCH="bash $HERE/qv/save_weights.sh" \
   bash "$HERE/rl.sbatch"

@@ -111,6 +111,12 @@ class CraftaxEnvConfig(vf.EnvConfig):
     ahead_in_hud: bool = False
     """Name the faced cell and its absolute position in the HUD ("Ahead: (24,17) tree"), so
     the player can note where things are without working positions out from the grid."""
+    grid_coords: bool = False
+    """Label the grid's rows and columns with absolute positions, so the player can read the
+    position of anything on its screen instead of working it out from its own Pos."""
+    visible_list: bool = False
+    """Add a [Visible] line listing what is on screen by kind with absolute positions,
+    nearest first ("tree (27,14) (25,13); stone (26,12)"), so remembering a place is a copy."""
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, return, achievements) to this file."""
     state_dir: str | None = None
@@ -172,6 +178,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         deadline = started + self.config.max_episode_seconds if self.config.max_episode_seconds else None
         game = await asyncio.to_thread(_new_game, seed, self.config.max_episode_steps or None)
         game.show_ahead = self.config.ahead_in_hud
+        game.grid_coords = self.config.grid_coords
+        game.visible_list = self.config.visible_list
         total, done, end = 0.0, False, "terminated"  # terminated: the run stopped answering
         forfeits: Counter[str] = Counter()
         actions: Counter[str] = Counter()

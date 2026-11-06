@@ -1,0 +1,2 @@
+# visible check: default prompts + [Visible]
+env.visible_list = true
