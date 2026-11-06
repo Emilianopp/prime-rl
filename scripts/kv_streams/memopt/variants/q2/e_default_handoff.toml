@@ -1,3 +1,0 @@
-# memopt quality round 2: e_default_handoff
-env.player.memory.summary_note = '''
-This reply is your moment to save what matters, and it costs no turn: before the summary, update your memory with what you learned in this context: where things are, rules you confirmed, what failed, your plan. Fix or delete lines that turned out wrong. The summary reaches only your next context; your memory lasts the whole game. In the summary, say which entries to read first.'''

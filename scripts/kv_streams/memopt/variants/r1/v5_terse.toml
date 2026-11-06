@@ -1,9 +1,0 @@
-# memopt round 1: v5_terse
-env.player.memory.prompt = '''
-MEMORY
-Your context is reset often; your memory is not. Save facts in your reply, after your reasoning and before your actions:
-  <write key="MAP">table (24,22); trees (18,14)</write>   adds to an entry
-  <rewrite key="PLAN">get stone: go to (12,30) with the wood pickaxe</rewrite>   replaces it
-  <read key="MAP"/>   shows it next turn
-  <delete key="MAP"/>   removes it
-Write something to memory in every reply. After a reset, read your entries first. Entries hold up to {max_key_tokens} tokens.'''
