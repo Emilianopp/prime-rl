@@ -66,7 +66,7 @@ KEEP=${KEEP:-50}
 PER_GPU=${PER_GPU:-$([ "$KEEP" = full ] && echo 6 || echo 32)}
 CONC=${CONC:-$((GPUS * PER_GPU))}
 STEPS=${STEPS:-}
-N=${N:-$([ -n "$STEPS" ] && echo $((3 * CONC)) || echo "$CONC")} SKIP=${SKIP:-0} TURN_TOKENS=${TURN_TOKENS:-2048} NO_THINKING=${NO_THINKING:-}
+N=${N:-$([ -n "$STEPS" ] && echo $((3 * CONC)) || echo "$CONC")} SKIP=${SKIP:-0} TURN_TOKENS=${TURN_TOKENS:-2048} TEMPERATURE=${TEMPERATURE:-} NO_THINKING=${NO_THINKING:-}
 DEADLINE_MARGIN=${DEADLINE_MARGIN:-600} MULTIPLEX=${MULTIPLEX:-}
 TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} SAFE_RADIUS=${SAFE_RADIUS:-} CODE_FACTS=${CODE_FACTS:-} EXPLORATION_AID=${EXPLORATION_AID:-} ACTION_FROM_REASONING=${ACTION_FROM_REASONING:-}
 [ -n "$SEGMENTS" ] && [ "$SEGMENTS" != off ] && { echo "SEGMENTS=$SEGMENTS: this branch's verifiers has no segments (use TREE_DEPTH)"; exit 2; }
@@ -93,7 +93,7 @@ export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_thread
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/craftax_env:$REPO/environments/crafter_env:$REPO/deps/verifiers:$REPO/deps/renderers${CRAFTAX_PY:+:$CRAFTAX_PY}${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off} code_facts=${CODE_FACTS:-off} exploration_aid=${EXPLORATION_AID:-off} action_from_reasoning=${ACTION_FROM_REASONING:-off} tree=$([ -n "$TREE_DEPTH" ] && echo "depth$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-r$ROOT_BRANCHES-s$SEGMENT_TURNS-t$SEGMENT_TOKENS-m$MAX_TOKENS" || echo off) judge=$([ -n "$JUDGE_BACKEND" ] && echo "$JUDGE_BACKEND:$JUDGE_MODEL/$JUDGE_MODE/$NOTES_JUDGE/w$NOTES_WEIGHT" || echo off) adherence=$([ "$ADHERENCE_WEIGHT" != 0 ] && echo "$ADHERENCE_MODE/w$ADHERENCE_WEIGHT" || echo off) progress_weight=$PROGRESS_WEIGHT state_weight=$STATE_WEIGHT beam_cumulative=$BEAM_CUMULATIVE select=$BEAM_SELECT$([ "$BEAM_SELECT" = rebase ] && echo "/T$REBASE_T")] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS temp=${TEMPERATURE:-config} thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off} code_facts=${CODE_FACTS:-off} exploration_aid=${EXPLORATION_AID:-off} action_from_reasoning=${ACTION_FROM_REASONING:-off} tree=$([ -n "$TREE_DEPTH" ] && echo "depth$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-r$ROOT_BRANCHES-s$SEGMENT_TURNS-t$SEGMENT_TOKENS-m$MAX_TOKENS" || echo off) judge=$([ -n "$JUDGE_BACKEND" ] && echo "$JUDGE_BACKEND:$JUDGE_MODEL/$JUDGE_MODE/$NOTES_JUDGE/w$NOTES_WEIGHT" || echo off) adherence=$([ "$ADHERENCE_WEIGHT" != 0 ] && echo "$ADHERENCE_MODE/w$ADHERENCE_WEIGHT" || echo off) progress_weight=$PROGRESS_WEIGHT state_weight=$STATE_WEIGHT beam_cumulative=$BEAM_CUMULATIVE select=$BEAM_SELECT$([ "$BEAM_SELECT" = rebase ] && echo "/T$REBASE_T")] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 # jobs/craftax_eval.sbatch unpacks the venv tarball here first: re-walking ~200k files on scratch costs minutes.
 [ -x "$SLURM_TMPDIR/sgl-venv/bin/python" ] || rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
@@ -138,6 +138,7 @@ EVAL_TOML=configs/craftax/eval.toml
 [ -n "$TREE_DEPTH" ] && EVAL_TOML=configs/craftax/eval-tree.toml
 sed "s|^env.max_episode_steps = .*|&\nenv.episode_log = \"$OUT/episodes.jsonl\"|; s|localhost:8000|localhost:$PORT|g" "$EVAL_TOML" > "$OUT/eval.toml"
 sed -i "s/^max_completion_tokens = .*/max_completion_tokens = $TURN_TOKENS/; s/^env.taskset.max_output_tokens = [0-9]*/env.taskset.max_output_tokens = $TURN_TOKENS/" "$OUT/eval.toml"
+[ -n "$TEMPERATURE" ] && sed -i "s/^temperature = .*/temperature = $TEMPERATURE  # TEMPERATURE knob/" "$OUT/eval.toml"  # the config's value otherwise (eval-tree: 0.7)
 [ -n "$FEEDBACK" ] && sed -i "s|^env.max_episode_steps = .*|&\nenv.action_feedback = true|" "$OUT/eval.toml"
 [ -n "$MAX_ACTIONS" ] && sed -i "s|^env.taskset.split = .*|&\nenv.taskset.max_actions_per_turn = $MAX_ACTIONS|" "$OUT/eval.toml"
 # NO_THINKING=text: the renderer's non-thinking mode but GlyphBench's reasoning format (reason in plain
