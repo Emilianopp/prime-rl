@@ -38,6 +38,9 @@ git -C "$SGLANG_DIR" fetch -q origin
 git -C "$SGLANG_DIR" checkout -q "$SGLANG_REF"
 # --no-config: never pick up prime-rl's [tool.uv] overrides (they pin a different cutlass-dsl, etc.).
 [ -x "$SGLANG_VENV/bin/python" ] || uv venv --no-config -q -p 3.12 "$SGLANG_VENV"
+# cuda-tile on PyPI is a stub that fetches the wheel at build time and fails on DRAC: take it from NVIDIA.
+uv pip install --no-config --python "$SGLANG_VENV/bin/python" --no-deps --extra-index-url https://pypi.nvidia.com \
+  --index-strategy unsafe-best-match "$(grep '^cuda-tile==' "$HERE/sglang-requirements.txt")"
 uv pip install --no-config --python "$SGLANG_VENV/bin/python" -r "$HERE/sglang-requirements.txt"
 SGLANG_BUILD_RUST_EXTS=none uv pip install --no-config --python "$SGLANG_VENV/bin/python" --no-deps -e "$SGLANG_DIR/python"
 # flashinfer JIT compiles against the pip CUDA 13.0 toolchain: CUDA_HOME is this dir (rl.sbatch sets it).
