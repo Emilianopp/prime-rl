@@ -36,9 +36,10 @@ log "sglang fork @ ${SGLANG_REF:0:10}"
 [ -d "$SGLANG_DIR/.git" ] || git clone --filter=blob:none https://github.com/Emilianopp/sglang.git "$SGLANG_DIR"
 git -C "$SGLANG_DIR" fetch -q origin
 git -C "$SGLANG_DIR" checkout -q "$SGLANG_REF"
-[ -x "$SGLANG_VENV/bin/python" ] || uv venv -q -p 3.12 "$SGLANG_VENV"
-uv pip install --python "$SGLANG_VENV/bin/python" -r "$HERE/sglang-requirements.txt"
-SGLANG_BUILD_RUST_EXTS=none uv pip install --python "$SGLANG_VENV/bin/python" --no-deps -e "$SGLANG_DIR/python"
+# --no-config: never pick up prime-rl's [tool.uv] overrides (they pin a different cutlass-dsl, etc.).
+[ -x "$SGLANG_VENV/bin/python" ] || uv venv --no-config -q -p 3.12 "$SGLANG_VENV"
+uv pip install --no-config --python "$SGLANG_VENV/bin/python" -r "$HERE/sglang-requirements.txt"
+SGLANG_BUILD_RUST_EXTS=none uv pip install --no-config --python "$SGLANG_VENV/bin/python" --no-deps -e "$SGLANG_DIR/python"
 # flashinfer JIT compiles against the pip CUDA 13.0 toolchain: CUDA_HOME is this dir (rl.sbatch sets it).
 CU=$("$SGLANG_VENV/bin/python" -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13
 ln -sfn lib "$CU/lib64"
