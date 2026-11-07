@@ -138,3 +138,44 @@ def test_max_roots_waits_for_an_open_world_instead_of_starting_one(tmp_path):
     sampler.observe([branch(b, tmp_path, score=0.1, continues=False)])
     fresh = next(sampler)
     assert fresh.data.info["node"]["depth"] == 0 and sampler.roots_started == 3
+
+
+def test_checkpoint_while_a_node_is_in_flight_replays_it_on_resume(tmp_path):
+    # With max_roots and keep=1 every open world is usually in flight when a checkpoint is taken: the
+    # frontier is empty and the next depth has no candidates yet. A resume must play those nodes again.
+    config = CurriculumConfig(sampler=TreeSamplerConfig(keep=1, max_depth=100, max_roots=2, state_dir=str(tmp_path)))
+    roots = [make_root(i) for i in range(4)]
+    curriculum = Curriculum(config, roots)
+    a, b = next(curriculum.sampler), next(curriculum.sampler)
+    curriculum.on_result([branch(a, tmp_path, score=s) for s in (0.3, 0.8)])
+    child = next(curriculum.sampler)  # world a at depth 1, in flight
+    sent = child.data.info["node"]
+    assert curriculum.sampler.frontier == [] and os.path.exists(sent["state_path"])
+    curriculum.sampler._sweep()  # an in-flight node's saved game is referenced: the sweep keeps it
+    assert os.path.exists(sent["state_path"])
+    state = curriculum.state_dict()
+    resumed = Curriculum(config, roots)
+    resumed.load_state_dict(state)
+    assert resumed.sampler.metrics()["replayed_on_resume"] == 2 and resumed.sampler.metrics()["open_roots"] == 2
+    again = [next(resumed.sampler), next(resumed.sampler)]
+    nodes = sorted((t.data.info["node"] for t in again), key=lambda n: n["depth"])
+    # world b's root and world a's depth-1 node are played again; no new world starts
+    assert [n["depth"] for n in nodes] == [0, 1] and nodes[1]["state_path"] == sent["state_path"] and nodes[1]["score"] == 0.8
+    assert next(resumed.sampler) is None and resumed.sampler.roots_started == 2
+    # the replayed node reports and its world goes deeper as before
+    replay = next(t for t in again if t.data.info["node"]["depth"] == 1)
+    resumed.on_result([branch(replay, tmp_path, score=0.5)])
+    assert next(resumed.sampler).data.info["node"]["depth"] == 2
+
+
+def test_checkpoint_without_inflight_field_still_loads(tmp_path):
+    config = CurriculumConfig(sampler=TreeSamplerConfig(keep=1, max_depth=10))
+    roots = [make_root(i) for i in range(2)]
+    curriculum = Curriculum(config, roots)
+    next(curriculum.sampler)
+    state = curriculum.state_dict()
+    for level in state["sampler"]["levels"]:
+        level.pop("inflight", None)  # an older checkpoint
+    resumed = Curriculum(config, roots)
+    resumed.load_state_dict(state)
+    assert resumed.sampler.frontier == [] and next(resumed.sampler).data.info["seed"] == 43

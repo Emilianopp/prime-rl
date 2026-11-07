@@ -100,6 +100,9 @@ class TreeSampler(TaskSampler):
             node = self._new_root()
         level = self.levels.setdefault((node["root"], node["depth"] + 1), self._new_level())
         level["expected"] += 1
+        # Remember the node until its group reports: a checkpoint taken meanwhile must be able to play it
+        # again (its saved game stays on disk until then), or a resume would end the world.
+        level.setdefault("inflight", []).append(dict(node))
         self.expansions += 1
         return self._task_for(node)
 
@@ -108,7 +111,7 @@ class TreeSampler(TaskSampler):
         return {root for root, _ in self.levels} | {node["root"] for node in self.frontier}
 
     def _new_level(self) -> dict[str, Any]:
-        return {"expected": 0, "observed": 0, "released": 0, "candidates": []}
+        return {"expected": 0, "observed": 0, "released": 0, "candidates": [], "inflight": []}
 
     def _pop_ready(self) -> dict[str, Any] | None:
         if not self.frontier:
@@ -166,6 +169,11 @@ class TreeSampler(TaskSampler):
         root, depth = node["root"], int(node["depth"]) + 1
         level = self.levels.setdefault((root, depth), self._new_level())
         level["observed"] += 1
+        inflight = level.setdefault("inflight", [])
+        for i, sent in enumerate(inflight):
+            if sent.get("id") == node.get("id"):
+                inflight.pop(i)
+                break
         self._observes += 1
         key = _segments_info(_data_info(group[0].task.data)).get("info_key") or self.config.info_key
         if not any(isinstance(trace.info.get(key), dict) for episode in group for trace in episode.traces):
@@ -246,7 +254,7 @@ class TreeSampler(TaskSampler):
             get_logger().warning(f"TreeSampler: could not delete {path}: {exc}")
 
     def _referenced(self) -> set[str]:
-        nodes = list(self.frontier) + [n for level in self.levels.values() for n in level["candidates"]]
+        nodes = list(self.frontier) + [n for level in self.levels.values() for n in level["candidates"] + level.get("inflight", [])]
         return {n["state_path"] for n in nodes if n.get("state_path")}
 
     def _sweep(self) -> None:
@@ -302,15 +310,23 @@ class TreeSampler(TaskSampler):
         self.deepest, self.deepest_tier, self.states_deleted = counters["deepest"], counters["deepest_tier"], counters["states_deleted"]
         self.deepest_floor = int(counters.get("deepest_floor", 0))
         self.segments_per_depth = Counter({int(k): v for k, v in state_dict["segments_per_depth"].items()})
-        # In-flight groups of the checkpointed run never report: let their depths close on what arrived.
+        # In-flight groups of the checkpointed run never report: let their depths close on what arrived, and
+        # play the nodes they were expanding again (from the same saved game) so their worlds go on. Checkpoints
+        # written before the "inflight" field existed close those depths empty, which ends those worlds.
+        replay = []
         for level in self.levels.values():
+            replay.extend(level.get("inflight", []))
+            level["inflight"] = []
             level["expected"] = level["observed"]
         for key in list(self.levels):
             self._close_level(*key)
+        self.frontier.extend(replay)
+        self.replayed = len(replay)
 
     def metrics(self) -> dict[str, float]:
         return {
             "frontier": float(len(self.frontier)),
+            "replayed_on_resume": float(getattr(self, "replayed", 0)),
             "open_depths": float(len(self.levels)),
             "roots_started": float(self.roots_started),
             "open_roots": float(len(self._open_roots())),
