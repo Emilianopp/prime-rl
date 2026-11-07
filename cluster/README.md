@@ -11,7 +11,7 @@ Develop on Mila or locally, push the branch, then build and submit everywhere wi
 | nibi | 4 of 8x H100 80GB | yes | `$HOME` over quota: cluv cannot update uv there until it is cleaned |
 | mila | 4x A100L 80GB, short-unkillable | yes | 3 h cap, one such job per user |
 
-Accounts: `rrg-bengioy-ad` first, `def-bengioy` (`def-lcharlin` on narval) second. Each submission
+Accounts: `rrg-bengioy-ad` first, `def-bengioy` second (narval accepts only `def-bengioy`). Each submission
 goes to both, and the first to start wins.
 
 ## Once per cluster

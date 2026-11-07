@@ -43,11 +43,9 @@ sbatch_args = [
 ]
 
 [tool.cluv.clusters.narval]  # 4x A100 40GB, 48 CPUs, 510 GB; offline compute (httpproxy)
+# narval's submit filter accepts only def-bengioy (rrg-bengioy-ad / def-lcharlin are refused there).
 project_dir = "$SCRATCH/kv-race/cluv/prime-rl/cluster"
-sbatch_args = [
-  { account = "rrg-bengioy-ad", gpus-per-node = "a100:4", cpus-per-task = 48, mem = "0" },
-  { account = "def-lcharlin", gpus-per-node = "a100:4", cpus-per-task = 48, mem = "0" },
-]
+sbatch_args = { account = "def-bengioy", gpus-per-node = "a100:4", cpus-per-task = 48, mem = "0" }
 
 [tool.cluv.clusters.mila]  # 4x A100L 80GB on short-unkillable (3 h cap, one job per user)
 project_dir = "$SCRATCH/kv-race/cluv/prime-rl/cluster"
