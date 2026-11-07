@@ -1,15 +1,20 @@
 """Checkpoint manager for orchestrator progress and train-source state. Layout:
-``<output_dir>/checkpoints/step_N/orchestrator/progress.pt``."""
+``<output_dir>/checkpoints/step_N/orchestrator/progress.pt``, plus ``states/`` beside it: copies of the
+saved games (absolute ``state_path`` files, e.g. the tree sampler's) the snapshot points at. The sampler
+deletes a game once its group reports, which can be minutes after the checkpoint; the copies make
+``step_N/orchestrator`` self-contained for a resume on another node."""
 
 from __future__ import annotations
 
 import contextlib
 import copy
 import os
+import shutil
 import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -36,6 +41,7 @@ class CheckpointManager:
         ckpt_path = self.get_ckpt_path(step)
         ckpt_path.mkdir(parents=True, exist_ok=True)
         start = time.perf_counter()
+        bundle_saved_games(state, ckpt_path / "states")
         # Save to a temporary file and do an atomic rename, to avoid corrupting the last
         # file if the process gets killed while writing
         fd, tmp_name = tempfile.mkstemp(dir=ckpt_path, prefix="progress.pt.", suffix=".tmp")
@@ -71,6 +77,39 @@ class CheckpointManager:
             if name in train_source.curricula:
                 get_logger().info(f"Resumed curriculum state for env {name}")
         get_logger().debug(f"Orchestrator checkpoint loaded in {format_time(time.perf_counter() - start)}")
+
+
+def saved_game_paths(state: Any) -> set[str]:
+    """Every absolute ``state_path`` string in a snapshot (the saved games it points at)."""
+    paths: set[str] = set()
+    stack = [state]
+    while stack:
+        o = stack.pop()
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "state_path" and isinstance(v, str) and os.path.isabs(v):
+                    paths.add(v)
+                else:
+                    stack.append(v)
+        elif isinstance(o, (list, tuple)):
+            stack.extend(o)
+    return paths
+
+
+def bundle_saved_games(state: dict, dest: Path) -> None:
+    """Copy the saved games ``state`` points at into ``dest`` (same file names)."""
+    paths = saved_game_paths(state.get("train_source", {}))
+    if not paths:
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    missing = 0
+    for path in paths:
+        try:
+            shutil.copy2(path, dest / os.path.basename(path))
+        except FileNotFoundError:
+            missing += 1
+    if missing:
+        get_logger().warning(f"Orchestrator checkpoint: {missing} of {len(paths)} saved games were already gone")
 
 
 def build_state(progress: Progress, train_source: TrainSource) -> dict:
