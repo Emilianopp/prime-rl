@@ -13,16 +13,12 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/env.sh"
 SGLANG_REF=${SGLANG_REF:-60ccc167beeb44cd1367292cb3972d89e697864b}  # kv-eviction-dp
-UV_VERSION=0.11.32
 MODELS=${MODELS:-Qwen/Qwen3.5-4B}
 mkdir -p "$KVS_ROOT" "$XDG_CACHE_HOME" "$UV_CACHE_DIR" "$HF_HOME"
 log() { echo "[setup $KVS_CLUSTER $(date +%T)] $*"; }
-
-if ! command -v uv > /dev/null || [ "$(uv --version | cut -d' ' -f2)" != "$UV_VERSION" ]; then
-  log "uv $UV_VERSION"
-  if command -v uv > /dev/null; then uv self update "$UV_VERSION"; else
-    curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | env UV_NO_MODIFY_PATH=1 sh; fi
-fi
+# uv itself is cluv's: `cluv sync` installs or updates it to the local machine's version.
+command -v uv > /dev/null || { echo "no uv: run \`cluv sync\` first"; exit 1; }
+log "$(uv --version)"
 
 log "submodules"
 git -C "$REPO" submodule sync -q
