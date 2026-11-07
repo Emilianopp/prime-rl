@@ -27,7 +27,8 @@ git -C "$REPO" -c url."https://github.com/".insteadOf="git@github.com:" submodul
 
 log "prime-rl venv"
 cd "$REPO"
-uv sync --frozen --extra gpu --extra flash-attn --extra kernels
+# mooncake (multi-node KV transfer only) has no wheel for DRAC's glibc 2.34; single-node jobs never import it.
+uv sync --frozen --extra gpu --extra flash-attn --extra kernels --no-install-package mooncake-transfer-engine
 uv pip freeze --python "$VENV/bin/python" | grep -v '^-e' > "$KVS_ROOT/prl-constraints.txt"
 uv pip install --python "$VENV/bin/python" -c "$KVS_ROOT/prl-constraints.txt" -e environments/craftax_env
 
