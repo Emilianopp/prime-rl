@@ -7,16 +7,16 @@ Develop on Mila or locally, push the branch, then build and submit everywhere wi
 |---|---|---|---|
 | fir | 4x H100 80GB, 48 CPU, 1 TB | yes | |
 | rorqual | 4x H100 80GB, 64 CPU, 512 GB | no: `httpproxy` module (env.sh) | |
-| narval | 4x A100 **40GB**, 48 CPU, 510 GB | no: `httpproxy` module (env.sh) | half the GPU memory: shrink seq_len / KV |
 | nibi | 4 of 8x H100 80GB | yes | `$HOME` over quota: cluv cannot update uv there until it is cleaned |
 | mila | 4x A100L 80GB, short-unkillable | yes | 3 h cap, one such job per user |
 
-Accounts: `rrg-bengioy-ad` first, `def-bengioy` second (narval accepts only `def-bengioy`). Each submission
+Only 80 GB GPUs (H100, A100L), so narval (A100 40GB) is not configured. Accounts: `rrg-bengioy-ad`
+first, `def-bengioy` second. Each submission
 goes to both, and the first to start wins.
 
 ## Once per cluster
 
-1. Log in, so that SSH masters exist: `~/.claude/skills/cluster-auth/scripts/auth.sh fir rorqual narval mila`.
+1. Log in, so that SSH masters exist: `~/.claude/skills/cluster-auth/scripts/auth.sh fir nibi rorqual mila`.
 2. Run `cluv sync <cluster>`. This installs uv, clones this repo to `$SCRATCH/kv-race/cluv/prime-rl`, and checks out your branch.
 3. Copy the gitignored `.env` (`GEMINI_API_KEY`) to `$SCRATCH/kv-race/cluv/prime-rl/.env`.
 4. On the login node, run `bash cluster/setup.sh` from the clone. It takes about 20-40 min the first time.

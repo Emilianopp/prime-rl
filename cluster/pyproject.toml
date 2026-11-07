@@ -16,6 +16,7 @@ results_path = "$SCRATCH/kv-race/cluv/results"  # Slurm .out files only (run out
 job_script_path = "job.sh"
 
 # Defaults: one 4-GPU node (2 SGLang + 2 trainer GPUs). Each cluster below fills in its node shape.
+# 80 GB GPUs only (H100, A100L): narval (A100 40GB) is left out on purpose.
 [tool.cluv.sbatch_args]
 nodes = 1
 time = "3:00:00"
@@ -41,11 +42,6 @@ sbatch_args = [
   { account = "rrg-bengioy-ad", gpus-per-node = "h100:4", cpus-per-task = 64, mem = "0" },
   { account = "def-bengioy", gpus-per-node = "h100:4", cpus-per-task = 64, mem = "0" },
 ]
-
-[tool.cluv.clusters.narval]  # 4x A100 40GB, 48 CPUs, 510 GB; offline compute (httpproxy)
-# narval's submit filter accepts only def-bengioy (rrg-bengioy-ad / def-lcharlin are refused there).
-project_dir = "$SCRATCH/kv-race/cluv/prime-rl/cluster"
-sbatch_args = { account = "def-bengioy", gpus-per-node = "a100:4", cpus-per-task = 48, mem = "0" }
 
 [tool.cluv.clusters.mila]  # 4x A100L 80GB on short-unkillable (3 h cap, one job per user)
 project_dir = "$SCRATCH/kv-race/cluv/prime-rl/cluster"
