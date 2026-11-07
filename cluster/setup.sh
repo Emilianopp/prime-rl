@@ -26,7 +26,8 @@ fi
 
 log "submodules"
 git -C "$REPO" submodule sync -q
-git -C "$REPO" submodule update --init --recursive
+# All submodules are public: clone over https (not every cluster has a GitHub ssh key).
+git -C "$REPO" -c url."https://github.com/".insteadOf="git@github.com:" submodule update --init --recursive
 
 log "prime-rl venv"
 cd "$REPO"
