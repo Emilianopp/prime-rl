@@ -90,6 +90,7 @@ class TreeSampler(TaskSampler):
         self.swept = 0
         self._observes = 0
         self._last_sweep = time.time()
+        self.step = 0  # the orchestrator step (TrainSource.next_task sets it): picks a new world's cap
 
     # --- tasks out ---------------------------------------------------------------
     def __next__(self) -> vf.Task | None:
@@ -105,6 +106,21 @@ class TreeSampler(TaskSampler):
         level.setdefault("inflight", []).append(dict(node))
         self.expansions += 1
         return self._task_for(node)
+
+    def set_step(self, step: int) -> None:
+        self.step = int(step)
+
+    def _cap_now(self) -> int:
+        """The depth cap a world started now gets (max_depth_schedule, else max_depth)."""
+        cap = self.config.max_depth
+        for start, depth in self.config.max_depth_schedule or ():
+            if self.step >= start:
+                cap = depth
+        return cap
+
+    def _cap(self, node: dict[str, Any]) -> int:
+        """A node's world's cap, fixed when the world started (nodes from older checkpoints: max_depth)."""
+        return int(node.get("max_depth") or self.config.max_depth)
 
     def _open_roots(self) -> set[str]:
         """Worlds still being played: a depth in flight or a node waiting in the frontier."""
@@ -128,7 +144,7 @@ class TreeSampler(TaskSampler):
             level["candidates"].sort(key=lambda n: -float(n.get("score", 0.0)))
             node = level["candidates"].pop(0)
             level["released"] += 1
-            if node["depth"] >= self.config.max_depth:
+            if node["depth"] >= self._cap(node):
                 self._delete_state(node)
                 continue
             return node
@@ -143,7 +159,8 @@ class TreeSampler(TaskSampler):
         root_id = f"{info.get('seed', index)}-root{index}"
         self.root_tasks[root_id] = task
         return {"id": root_id, "parent": None, "root": root_id, "root_index": index, "depth": 0,
-                "state_path": None, "state_sha256": None, "summary": None, "score": 0.0, "lineage": [root_id]}
+                "state_path": None, "state_sha256": None, "summary": None, "score": 0.0, "lineage": [root_id],
+                "max_depth": self._cap_now()}
 
     def _task_for(self, node: dict[str, Any]) -> vf.Task:
         root = self.root_tasks[node["root"]]
@@ -200,6 +217,7 @@ class TreeSampler(TaskSampler):
                     "depth": depth, "state_path": info.get("state_path"), "state_sha256": info.get("state_sha256"),
                     "summary": info.get("summary"), "score": float(trace.reward), "achievements": sorted(achievements),
                     "lineage": [*node.get("lineage", [node["id"]]), info.get("node_id") or trace.id],
+                    "max_depth": node.get("max_depth"),
                 }
                 if info.get("final_goal_reached"):
                     self.found.append({"root": root, "depth": depth, "node": child["id"], "lineage": child["lineage"],
@@ -208,7 +226,7 @@ class TreeSampler(TaskSampler):
                     get_logger().info(f"TreeSampler: final goal reached at depth {depth} by node {child['id']} (root {root})")
                     self.finished_roots.add(root)
                     self._delete_state(child)
-                elif episode.ok and getattr(trace, "ok", True) and info.get("continues") and info.get("state_path") and depth < self.config.max_depth:
+                elif episode.ok and getattr(trace, "ok", True) and info.get("continues") and info.get("state_path") and depth < self._cap(node):
                     level["candidates"].append(child)
                 else:
                     self._delete_state(child)
@@ -333,6 +351,7 @@ class TreeSampler(TaskSampler):
             "expansions": float(self.expansions),
             "segments": float(self.segments),
             "deepest_depth": float(self.deepest),
+            "max_depth_now": float(self._cap_now()),
             "deepest_tier": float(self.deepest_tier),
             "deepest_floor": float(self.deepest_floor),
             "groups_without_info": float(self.groups_without_info),

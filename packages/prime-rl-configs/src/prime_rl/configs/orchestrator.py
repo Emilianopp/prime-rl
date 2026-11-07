@@ -205,6 +205,24 @@ class TreeSamplerConfig(BaseConfig):
     max_depth: int = Field(10, ge=1)
     """Segments per lineage; a branch at this depth is a leaf."""
 
+    max_depth_schedule: list[tuple[int, int]] | None = None
+    """A depth cap that grows with training: ``[[step, max_depth], ...]``, steps increasing. A world
+    started at orchestrator step >= ``step`` (the last entry reached) plays up to that ``max_depth``
+    and keeps that cap for its whole life: older worlds retire at the cap they started with and
+    their slots start new worlds on the new cap. (Raising one global cap would stop new worlds until
+    the oldest open world reached it.) Before the first entry: ``max_depth``. None: ``max_depth``
+    for every world."""
+
+    @model_validator(mode="after")
+    def validate_max_depth_schedule(self):
+        schedule = self.max_depth_schedule or []
+        steps = [step for step, _ in schedule]
+        if any(step < 0 for step in steps) or steps != sorted(set(steps)):
+            raise ValueError("max_depth_schedule steps must be >= 0 and strictly increasing")
+        if any(depth < 1 for _, depth in schedule):
+            raise ValueError("max_depth_schedule depths must be >= 1")
+        return self
+
     max_roots: int | None = Field(None, ge=1)
     """Worlds played at once. With this many roots open (a depth in flight or a node ready), a free
     slot waits for one of them instead of starting a new world, so the same worlds go deeper.

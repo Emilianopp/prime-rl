@@ -37,7 +37,11 @@ class TrainSource:
 
     def next_task(self, *, step: int) -> TaskRequest | None:
         env_name = self.rng.choices(self.env_names, weights=self.weights, k=1)[0]
-        task = next(self.curricula[env_name].sampler)
+        sampler = self.curricula[env_name].sampler
+        set_step = getattr(sampler, "set_step", None)
+        if set_step is not None:  # the tree sampler's depth-cap schedule is keyed on the step
+            set_step(step)
+        task = next(sampler)
         if task is None:  # the sampler has nothing ready yet (tree sampler at max_roots)
             return None
         return TaskRequest(env_name=env_name, task=task, step=step)

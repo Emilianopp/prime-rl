@@ -3,7 +3,9 @@
 import os
 import uuid
 
+import pytest
 import verifiers.v1 as vf
+from pydantic import ValidationError
 
 from prime_rl.configs.orchestrator import CurriculumConfig, TreeSamplerConfig
 from prime_rl.orchestrator.curriculum import Curriculum
@@ -179,3 +181,61 @@ def test_checkpoint_without_inflight_field_still_loads(tmp_path):
     resumed = Curriculum(config, roots)
     resumed.load_state_dict(state)
     assert resumed.sampler.frontier == [] and next(resumed.sampler).data.info["seed"] == 43
+
+
+def test_depth_schedule_gives_each_world_the_cap_of_the_step_it_started(tmp_path):
+    config = TreeSamplerConfig(keep=1, max_depth=1, max_depth_schedule=[(2, 3)], state_dir=str(tmp_path))
+    sampler = TreeSampler(config, [make_root(i) for i in range(3)])
+    old = next(sampler)  # step 0, before the first entry: max_depth
+    assert old.data.info["node"]["max_depth"] == 1 and sampler.metrics()["max_depth_now"] == 1
+    sampler.set_step(2)
+    assert sampler.metrics()["max_depth_now"] == 3
+    # The world started at step 0 keeps its cap of 1: its depth-1 branches are leaves.
+    sampler.observe([branch(old, tmp_path, score=s) for s in (0.2, 0.6)])
+    assert sampler.frontier == []
+    new = next(sampler)  # its slot starts a new world, on the new cap
+    assert new.data.info["node"]["depth"] == 0 and new.data.info["node"]["max_depth"] == 3
+    task = new
+    for depth in (1, 2):
+        sampler.observe([branch(task, tmp_path, score=0.5)])
+        task = next(sampler)
+        assert task.data.info["node"]["depth"] == depth and task.data.info["node"]["max_depth"] == 3
+    sampler.observe([branch(task, tmp_path, score=0.5)])  # depth 3, its cap: a leaf
+    assert sampler.frontier == [] and not list(tmp_path.glob("*.pkl"))
+    assert next(sampler).data.info["node"]["depth"] == 0 and sampler.roots_started == 3
+
+
+def test_depth_schedule_cap_survives_a_checkpoint(tmp_path):
+    config = CurriculumConfig(sampler=TreeSamplerConfig(keep=1, max_depth=1, max_depth_schedule=[(0, 3)]))
+    roots = [make_root(i) for i in range(2)]
+    curriculum = Curriculum(config, roots)
+    root = next(curriculum.sampler)
+    curriculum.on_result([branch(root, tmp_path, score=0.5)])
+    # Resumed without the schedule: the open world still plays to the cap it started with.
+    resumed = Curriculum(CurriculumConfig(sampler=TreeSamplerConfig(keep=1, max_depth=1)), roots)
+    resumed.load_state_dict(curriculum.state_dict())
+    child = next(resumed.sampler)
+    assert child.data.info["node"]["depth"] == 1 and child.data.info["node"]["max_depth"] == 3
+    resumed.on_result([branch(child, tmp_path, score=0.5)])
+    assert next(resumed.sampler).data.info["node"]["depth"] == 2
+
+
+def test_depth_schedule_must_increase():
+    with pytest.raises(ValidationError):
+        TreeSamplerConfig(max_depth_schedule=[(50, 25), (10, 50)])
+    with pytest.raises(ValidationError):
+        TreeSamplerConfig(max_depth_schedule=[(0, 0)])
+    assert TreeSamplerConfig(max_depth_schedule=[[0, 10], [50, 25]]).max_depth_schedule == [(0, 10), (50, 25)]
+
+
+def test_train_source_passes_the_step_to_the_depth_schedule():
+    from types import SimpleNamespace
+
+    from prime_rl.orchestrator.train_source import TrainSource
+
+    roots = [make_root(i) for i in range(3)]
+    sampler_config = TreeSamplerConfig(keep=1, max_depth=10, max_depth_schedule=[(0, 10), (50, 25), (100, 50)])
+    config = SimpleNamespace(ratio=1.0, curriculum=CurriculumConfig(sampler=sampler_config))
+    source = TrainSource([SimpleNamespace(name="craftax", tasks=roots, num_tasks=len(roots), config=config)])
+    caps = [source.next_task(step=step).task.data.info["node"]["max_depth"] for step in (3, 60, 120)]
+    assert caps == [10, 25, 50]
