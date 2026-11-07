@@ -1,0 +1,54 @@
+# cluv subproject: lets `cluv` (mila-iqia/cluv) deploy this repo to Mila and the DRAC clusters, sync
+# results and race jobs across them, without letting its plain `uv sync` touch the real venv (which
+# needs extras and submodules): cluv syncs only this empty project. The stack itself is built by
+# setup.sh on each login node. See README.md here.
+[project]
+name = "kvs-cluster"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.cluv]
+results_path = "$SCRATCH/kv-race/cluv/results"  # Slurm .out files only (run outputs go to $KVS_ROOT/rl)
+job_script_path = "job.sh"
+
+# Defaults: one 4-GPU node (2 SGLang + 2 trainer GPUs). Each cluster below fills in its node shape.
+[tool.cluv.sbatch_args]
+nodes = 1
+time = "3:00:00"
+job-name = "kvs"
+
+[tool.cluv.clusters.fir]  # 4x H100 80GB, 48 CPUs, 1.1 TB; internet on compute nodes
+project_dir = "$SCRATCH/kv-race/cluv/prime-rl/cluster"
+sbatch_args = [
+  { account = "rrg-bengioy-ad", gpus-per-node = "h100:4", cpus-per-task = 48, mem = "1000G" },
+  { account = "def-bengioy", gpus-per-node = "h100:4", cpus-per-task = 48, mem = "1000G" },
+]
+
+[tool.cluv.clusters.nibi]  # 8x H100 80GB, 112 CPUs, 2 TB (half a node); internet on compute nodes
+project_dir = "$SCRATCH/kv-race/cluv/prime-rl/cluster"
+sbatch_args = [
+  { account = "rrg-bengioy-ad", gpus-per-node = "h100:4", cpus-per-task = 56, mem = "1000G" },
+  { account = "def-bengioy", gpus-per-node = "h100:4", cpus-per-task = 56, mem = "1000G" },
+]
+
+[tool.cluv.clusters.rorqual]  # 4x H100 80GB, 64 CPUs, 512 GB; offline compute (httpproxy)
+project_dir = "$SCRATCH/kv-race/cluv/prime-rl/cluster"
+sbatch_args = [
+  { account = "rrg-bengioy-ad", gpus-per-node = "h100:4", cpus-per-task = 64, mem = "0" },
+  { account = "def-bengioy", gpus-per-node = "h100:4", cpus-per-task = 64, mem = "0" },
+]
+
+[tool.cluv.clusters.narval]  # 4x A100 40GB, 48 CPUs, 510 GB; offline compute (httpproxy)
+project_dir = "$SCRATCH/kv-race/cluv/prime-rl/cluster"
+sbatch_args = [
+  { account = "rrg-bengioy-ad", gpus-per-node = "a100:4", cpus-per-task = 48, mem = "0" },
+  { account = "def-lcharlin", gpus-per-node = "a100:4", cpus-per-task = 48, mem = "0" },
+]
+
+[tool.cluv.clusters.mila]  # 4x A100L 80GB on short-unkillable (3 h cap, one job per user)
+project_dir = "$SCRATCH/kv-race/cluv/prime-rl/cluster"
+sbatch_args = { partition = "short-unkillable", gres = "gpu:a100l:4", cpus-per-task = 64, mem = "512G", time = "2:59:00" }

@@ -189,3 +189,6 @@ debug_I2_zero_band
 .idea
 
 third_party/
+# cluv (cluster/): synced results symlink, cache and the empty subproject venv
+cluster/logs
+cluster/.venv
