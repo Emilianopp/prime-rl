@@ -23,5 +23,7 @@ sed -E \
 for want in "seq_len = 16384" "batch_size = 8" "cost_cap = 0.5" "new_tokens = 12288"; do
   grep -q "$want" "$SMOKE" || { echo "smoke config: could not set '$want'"; exit 1; }
 done
-export OUT_ROOT CONFIG=$SMOKE ENVS=craftax_env STEPS=2
+# The orchestrator keeps waiting for a batch past max_steps, so stop the run once the trainer is done.
+WATCH='until grep -qs "RL trainer finished" "$OUT"/run/*/logs/attempt_1/trainer.log; do sleep 15; done; echo "smoke: trainer finished" > "$OUT/STOP"'
+export OUT_ROOT CONFIG=$SMOKE ENVS=craftax_env STEPS=2 WATCH
 exec bash "$REPO/scripts/kv_streams/rl.sbatch"
