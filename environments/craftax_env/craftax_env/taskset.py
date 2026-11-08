@@ -133,6 +133,10 @@ class CraftaxConfig(vf.TasksetConfig):
     """Show the exact action-tag format with a real Craftax action (<action>MOVE_LEFT</action>) in
     the system prompt's RESPONSE FORMAT and in every turn's closing request, and name the format in
     the forfeit feedback. Off: GlyphBench's text (its example is MOVE_FORWARD, not a Craftax action)."""
+    visible_list: bool = False
+    """Add a [Visible] block after every observation's [Grid] (also on the notes turn): what is on screen by
+    kind, nearest first, with map places F<floor> (row,col) (glyph.visible), and say so in the system prompt.
+    Off: GlyphBench's observation. From Emiliano's env.visible_list (remembered positions 57% exact vs 7%)."""
     respawn: bool = False
     """State GlyphBench's TASK block for continuous play: a death respawns the player and
     there is no turn limit (match the env's ``on_death`` and ``max_episode_steps = 0``)."""
@@ -753,6 +757,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         reasoning = bool(task.data.info.get("reasoning", True))
         max_actions = int(task.data.info.get("max_actions", 1))
         example = bool(task.data.info.get("action_example", False))
+        show_visible = bool(task.data.info.get("visible_list", False))
         feedback = cfg.action_feedback
         started = time.time()
         deadline = started + cfg.max_episode_seconds if cfg.max_episode_seconds else None
@@ -796,7 +801,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                                   view=(game.floor, *map(int, game.position)))
             adherence = AdherenceTracker(subgoals, game, achievements_before, explored, cfg.map_claim_tolerance)
             parent_plan_score = self._parent_plan_score(node)
-        opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example, aid())
+        opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example, aid(), show_visible)
         total, done, end = 0.0, False, "terminated"  # terminated: the run stopped answering
         forfeits: Counter[str] = Counter()
         first_try: Counter[str] = Counter()  # forfeit kinds of the replies as first written (before action_retry)
@@ -1003,7 +1008,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     break
                 if nav is not None:
                     await asyncio.to_thread(observe_game, nav, game)
-                observation = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example, aid())
+                observation = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example, aid(), show_visible)
                 # The cut comes before the next action is sampled: the last observation goes
                 # to the model with the notes request instead.
                 if segmented and cfg.segment_turns is not None and turns >= cfg.segment_turns:
@@ -1015,7 +1020,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 segment = await interaction.turn(observation)
             continues = segmented and end in {"segment_turns", "segment_tokens"}
             if continues:
-                shown = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, False)
+                shown = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, False, visible_list=show_visible)
                 # The observation first, the request last: what the model reads last is what it answers.
                 # NOTES_OPENER first (the system prompt's NOTES_PROTOCOL names it), the observation,
                 # then the request last: what the model reads last is what it answers.
@@ -1255,7 +1260,7 @@ class CraftaxTaskset(vf.Taskset[CraftaxTask, CraftaxConfig]):
         cfg = self.config
         base = cfg.seed + (1_000_000 if cfg.split == "eval" else 0)
         system = glyph.system_prompt(cfg.enable_reasoning, cfg.max_output_tokens, cfg.forfeit_mode, cfg.respawn, cfg.max_actions_per_turn,
-                                     action_example=cfg.action_example)
+                                     action_example=cfg.action_example, visible_list=cfg.visible_list)
         for i in range(cfg.num_examples):
             # Prompt-less: the env opens the episode with the first observation of the
             # world it builds, so loading stays instant.
@@ -1268,6 +1273,7 @@ class CraftaxTaskset(vf.Taskset[CraftaxTask, CraftaxConfig]):
                         "seed": base + i, "episode_idx": i, "split": cfg.split, "reasoning": cfg.enable_reasoning,
                         "max_actions": cfg.max_actions_per_turn,
                         "action_example": cfg.action_example,
+                        "visible_list": cfg.visible_list,
                         # what the tree sampler reads (samplers/tree.py): where the segment's info is and
                         # how a child's prompt introduces the summary, so it matches continuation_prompt
                         "segments": {"info_key": "craftax", "continuation_header": CONTINUATION_HEADER,

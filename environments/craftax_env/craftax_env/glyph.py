@@ -207,6 +207,14 @@ OBSERVATION_CONVENTIONS = (
     "and does not repeat per turn."
 )
 
+VISIBLE_CONVENTION = (
+    "After the [Grid] comes a [Visible] block: every non-ground thing on your screen by kind, "
+    "nearest first (at most 4 per kind), with its absolute map position F<floor> (row,col), the "
+    "same numbers as the HUD's Floor and Pos (rows grow south, cols grow east). Copy positions "
+    "from it instead of counting cells in the grid."
+)
+"""The system-prompt note for `visible_list` (appended to OBSERVATION_CONVENTIONS)."""
+
 _REASONING_FORMAT = (
     "RESPONSE FORMAT\n"
     "Reason before acting. {budget} Inspect the observation, "
@@ -309,7 +317,7 @@ _CRAFTAX_EXAMPLE = (
 
 def system_prompt(
     reasoning: bool, max_output_tokens: int | None, forfeit_mode: str, respawn: bool = False, max_actions: int = 1,
-    action_example: bool = False,
+    action_example: bool = False, visible_list: bool = False,
 ) -> str:
     forfeit = _FORFEIT[forfeit_mode]
     if reasoning:
@@ -340,7 +348,8 @@ def system_prompt(
             )
         fmt = _ACTION_ONLY_FORMAT.format(valid=", ".join(ACTION_NAMES), budget=budget)
     game = GAME_PROMPT.replace(_TERMINATION, _CONTINUOUS) if respawn else GAME_PROMPT
-    blocks = [game, OBSERVATION_CONVENTIONS, fmt] + ([_MULTI.format(n=max_actions)] if max_actions > 1 else [])
+    conventions = f"{OBSERVATION_CONVENTIONS} {VISIBLE_CONVENTION}" if visible_list else OBSERVATION_CONVENTIONS
+    blocks = [game, conventions, fmt] + ([_MULTI.format(n=max_actions)] if max_actions > 1 else [])
     return "\n\n---\n".join(blocks)
 
 
@@ -819,17 +828,53 @@ class CraftaxGame:
 # --- the per-turn user message (GlyphBench's render_user_turn, no history frames) ---
 
 
+GROUND = ("grass", "path", "sand", "you", "player", "darkness", "floor", "wall")
+"""Legend names (prefixes) the [Visible] block leaves out: the ground and the player."""
+
+
+def visible(legend: str, grid: str, floor: int, position: tuple[int, int], per_kind: int = 4) -> str:
+    """What is on screen, by kind, nearest first (Chebyshev, as KNOWN PLACES), with map places:
+    ``tree F0 (27,14), F0 (25,13); stone F0 (26,12)``. Ground tiles and the player are left out.
+    Ported from Emiliano's kv-streams/multi-cluster (glyph.visible), with ``place`` positions so a
+    copied place carries its floor and is never read as a view-frame cell (world.parse_places)."""
+    names = {}
+    for line in legend.splitlines():
+        if " — " in line:
+            glyph_, name = line.split(" — ", 1)
+            names[glyph_.strip()] = name.strip()
+    rows = grid.rstrip("\n").split("\n")
+    pr, pc = (int(v) for v in position)
+    r0, c0 = pr - len(rows) // 2, pc - max(len(row) for row in rows) // 2
+    seen: dict[str, list[tuple[int, int, int]]] = {}
+    for i, row in enumerate(rows):
+        for j, ch in enumerate(row):
+            name = names.get(ch)
+            if not name or any(name.lower().startswith(g) for g in GROUND):
+                continue
+            r, c = r0 + i, c0 + j
+            seen.setdefault(name, []).append((max(abs(r - pr), abs(c - pc)), r, c))
+    parts = []
+    for name, cells in sorted(seen.items(), key=lambda kv: min(kv[1])):
+        cells.sort()
+        first = ", ".join(place(floor, (r, c)) for _, r, c in cells[:per_kind])
+        parts.append(f"{name} {first}" + (" ..." if len(cells) > per_kind else ""))
+    return "; ".join(parts) if parts else "nothing but ground"
+
+
 def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1, closing: bool = True,
-              action_example: bool = False, aid: str | None = None) -> str:
+              action_example: bool = False, aid: str | None = None, visible_list: bool = False) -> str:
     """The per-turn message; `closing = False` leaves out the closing request for an
     action (the notes turn shows the last observation without it). `action_example`: the
     closing request shows the exact tag format (see EXAMPLE_ACTION). `aid`: a block shown after
-    the observation (GlyphBench's [Exploration Aid], env.exploration_aid)."""
+    the observation (GlyphBench's [Exploration Aid], env.exploration_aid). `visible_list`: a
+    [Visible] block after the [Grid] (taskset.visible_list)."""
     legend, grid, hud, message = game.render()
     parts = []
     if legend:
         parts.append(f"[Legend]\n{legend}")
     current = [f"[Current Observation — turn {game.turn}]", f"[Grid]\n{grid.rstrip()}"]
+    if visible_list:
+        current.append("[Visible] (absolute positions, nearest first)\n" + visible(legend, grid, game.floor, game.position))
     if hud:
         current.append(f"[HUD]\n{hud.strip()}")
     if message:
