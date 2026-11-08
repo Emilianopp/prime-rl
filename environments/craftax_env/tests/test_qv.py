@@ -34,7 +34,7 @@ def test_score_segment_hands_q_to_the_next_segment_and_stops_at_the_cost_cap(tmp
         (tmp_path / f"{tid}.{side}.json").write_text(json.dumps({**extra, "state": state}))
     prompts = []
 
-    async def fake_call(client, text, model):
+    async def fake_call(client, text, model, url=qv.URL, params=None):
         prompts.append(text)
         tool = 0 if "Step: 1" in text else 1  # the game start, then a better state
         return judge_reply(tool, flaws=("false_fact",) if "SUMMARY UNDER REVIEW" in text else ()), \

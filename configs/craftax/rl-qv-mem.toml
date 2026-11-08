@@ -9,12 +9,12 @@
 # action feedback, the player's memory). Games run on the clock, not to a step limit,
 # and each segment ships to training when the next one opens (stream_segments). At every
 # segment boundary the env writes the true state (env.state_log); the trace_credit
-# algorithm has Gemini grade it: Q = V + G*(1 - D) from the state (V), the gain a good
+# algorithm has an LLM judge grade it: Q = V + G*(1 - D) from the state (V), the gain a good
 # agent could make by the next reset (G*) and the flaws of the handoff summary written
 # there (D). A segment's reward is clip((Q_end - Q_start) / max(G*_start, 1), -1, 1),
 # its advantage that minus a running baseline. No game reward, no format terms. Judge
 # calls stop at a dollar cap, which writes $OUT/STOP and ends the run.
-# 2 trainer + 2 inference GPUs (A100-80GB), one node; GEMINI_API_KEY from the repo's .env.
+# 2 trainer + 2 inference GPUs (A100-80GB), one node; the judge's API key from the repo's .env.
 #
 #   CONFIG=configs/craftax/rl-qv.toml ENVS=craftax_env \
 #     ARGS='--orchestrator.train.algo.log-path $OUT/qv.jsonl' sbatch -p long scripts/kv_streams/rl.sbatch
@@ -46,7 +46,9 @@ group_size = 1  # a streamed segment is its own group: the baseline is a running
 [orchestrator.train.algo]
 type = "trace_credit"
 scorer = "craftax_env.qv:score_segment"
-scorer_args = { state_dir = "$OUT/qv_states", model = "gemini-3.1-flash-lite", cost_cap = 10.0, price_in = 0.25, price_out = 1.5, stop_path = "$OUT/STOP" }
+# Judge: gpt-6-luna at reasoning_effort low (OpenAI; key OPENAI_API_KEY from the repo's .env).
+# Blocks before w0049 were judged by gemini-3.1-flash-lite (temperature 0.2).
+scorer_args = { state_dir = "$OUT/qv_states", model = "gpt-6-luna", url = "https://api.openai.com/v1/chat/completions", key_var = "OPENAI_API_KEY", params = { reasoning_effort = "low" }, cost_cap = 10.0, price_in = 0.10, price_out = 0.50, stop_path = "$OUT/STOP" }
 
 [orchestrator.concurrency]
 # 64 games, each always playing: 32 per inference engine.
