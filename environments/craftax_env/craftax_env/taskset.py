@@ -215,6 +215,12 @@ class CraftaxEnvConfig(vf.EnvConfig):
     the replies as first written. 0: off (forfeit at once, as before)."""
     action_retry_tokens: int = Field(64, ge=8)
     """Output cap of each action_retry request."""
+    forfeit_penalty: float = Field(0.0, ge=0.0)
+    """Per-reply credit for a reply with no valid action (no <action> tag, an unknown name, or cut at the
+    output cap; a failed action_retry reply too): its tokens get ``min(advantage, 0) - forfeit_penalty``
+    (prime_rl ``node_penalties``, applied after the group's advantages), so a forfeit is never
+    reinforced, however good its segment. Not normalized within the group; the other terms are
+    untouched. Logged as ``forfeit_penalized``. 0: off."""
     exploration_aid: bool = False
     """Show GlyphBench's [Exploration Aid] (navigation.py: visits, recent route, frontiers, last-seen
     features on this floor, computed from the observations) after every observation, as its Pro harness
@@ -336,6 +342,25 @@ class CraftaxEnvConfig(vf.EnvConfig):
         if self.adherence_weight > 0 and self.adherence_mode == "judge" and self.judge is None:
             raise ValueError("adherence_weight > 0 with adherence_mode = 'judge' needs a judge")
         return self
+
+
+def request_node_penalties(trace: Any, ordinals: list[int], penalty: float) -> int:
+    """Ask the orchestrator to penalize these sampled replies (1-based ordinals among the trace's
+    sampled nodes, counted when each reply came back): ``trace.info["node_penalties"] = [[node
+    index, penalty], ...]`` (prime_rl.orchestrator.algo.routing.apply_node_penalties). Returns how
+    many nodes it named."""
+    info = getattr(trace, "info", None)
+    if not isinstance(info, dict) or penalty <= 0:
+        return 0
+    wanted, out, k = set(ordinals), [], 0
+    for index, n in enumerate(getattr(trace, "nodes", None) or []):
+        if getattr(n, "sampled", False):
+            k += 1
+            if k in wanted:
+                out.append([index, float(penalty)])
+    if out:
+        info["node_penalties"] = out
+    return len(out)
 
 
 def _new_game(seed: int, max_turns: int | None) -> glyph.CraftaxGame:
@@ -819,6 +844,10 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         facts: str | None = None  # code_facts: the known places + event log the notes turn showed
         wasted = TurnsLost() if segmented and cfg.code_facts else None  # code_facts: turns that changed nothing
         sampled_before_notes = None  # sampled nodes before the notes request (train_on_notes = False)
+        failed_replies: list[int] = []  # forfeit_penalty: ordinals (1-based, among sampled nodes) of replies with no valid action
+
+        def last_sampled() -> int:
+            return sum(1 for n in (getattr(interaction.trace, "nodes", None) or []) if getattr(n, "sampled", False))
         observation = opening
         logging_turns = bool(cfg.episode_log and cfg.turn_log)
         turn_rows: list[dict[str, Any]] = []  # turn_log: one row per model turn
@@ -846,6 +875,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 retry_rows: list[dict[str, Any]] = []
                 if not indices:
                     first_try[classify(*first, failure)] += 1
+                    if cfg.forfeit_penalty > 0:
+                        failed_replies.append(last_sampled())
                     limit = cfg.player.max_total_tokens
                     for _ in range(cfg.action_retry):
                         cap = cfg.action_retry_tokens
@@ -865,6 +896,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         if indices:
                             retry_saved += 1
                             break
+                        if cfg.forfeit_penalty > 0:
+                            failed_replies.append(last_sampled())
                     if segment.terminated:
                         break  # the player stopped answering during a retry (end stays "terminated")
                 if adherence is not None:
@@ -1077,6 +1110,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 trace.info["term_routing"] = {**(trace.info.get("term_routing") or {}), "notes": []}
         elif segmented:  # per-term routing: the notes term trains the notes turn, the others the action turns
             request_term_routing(trace, {"notes": notes_node_indexes(trace, sampled_before_notes if sampled_before_notes is not None else 10**9)})
+        forfeit_penalized = request_node_penalties(trace, failed_replies, cfg.forfeit_penalty) if failed_replies else 0
         trace_id = getattr(trace, "id", None) or uuid.uuid4().hex
         depth = int(node.get("depth", 0)) + 1 if segmented else 0
         record = summary = state_path = state_sha = None
@@ -1134,6 +1168,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "deaths": float(len(deaths)),
                 "forfeits": float(sum(forfeits.values())),
                 "first_try_forfeits": float(sum(first_try.values())),
+                "forfeit_penalized": float(forfeit_penalized),
                 "action_retries": float(retries),
                 "action_retry_rescued": float(retry_saved),
                 "actions_from_reasoning": float(from_reasoning),

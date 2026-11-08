@@ -392,3 +392,32 @@ def test_route_terms_to_no_node_drops_that_term():
     finally:
         grpo.trainable_nodes = original
     assert values == [0.3, 0.3, 0.3]  # notes (3.0) goes to no token; every token gets progress + state
+
+
+def test_node_penalties_make_a_forfeit_never_positive():
+    """``trace.info["node_penalties"] = [[node index, p]]`` (craftax env.forfeit_penalty): that reply's
+    tokens get min(advantage, 0) - p after per-term routing; the other tokens keep theirs."""
+    group = _termed_group([{"progress": (0.0, 1.0)}, {"progress": (2.0, 1.0)}])
+    for episode in group:  # a second sampled reply: the forfeit
+        trace = episode.traces[0]
+        trace.nodes.append(vf.MessageNode(message=vf.UserMessage(content="obs"), token_ids=[900],
+                                          mask=[False], logprobs=[0.0], sampled=False, parent=len(trace.nodes) - 1))
+        trace.nodes.append(vf.MessageNode(message=vf.AssistantMessage(content="no tag"), token_ids=[901, 902],
+                                          mask=[True, True], logprobs=[0.0, 0.0], sampled=True, parent=len(trace.nodes) - 1))
+        trace.info = {"node_penalties": [[len(trace.nodes) - 1, 0.5]]}
+    algo = GRPOAlgorithm(GRPOAlgoConfig(advantage_mode="per_term", term_std_floor={"progress": 0.5}), clients=None)
+    asyncio.run(algo.score_group(group))
+    low = [node for node in group[0].traces[0].nodes if any(node.mask)]
+    high = [node for node in group[1].traces[0].nodes if any(node.mask)]
+    assert low[0].advantages == pytest.approx([-1.0, -1.0]) and low[-1].advantages == pytest.approx([-1.5, -1.5])
+    assert high[0].advantages == pytest.approx([1.0, 1.0]) and high[-1].advantages == pytest.approx([-0.5, -0.5])
+
+
+def test_node_penalties_rejects_a_bad_index():
+    from prime_rl.orchestrator.algo.routing import apply_node_penalties
+
+    group = _termed_group([{"progress": (0.0, 1.0)}])
+    trace = group[0].traces[0]
+    trace.info = {"node_penalties": [[99, 1.0]]}
+    with pytest.raises(ValueError):
+        apply_node_penalties(trace)

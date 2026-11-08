@@ -61,6 +61,29 @@ def assign_advantages(trace: vf.Trace, values: float | list[float]) -> None:
         offset = end
 
 
+def apply_node_penalties(trace: vf.Trace) -> int:
+    """Honour an env's per-reply penalties: ``trace.info["node_penalties"] = [[node index, p], ...]``
+    (p >= 0; a list of pairs so the indexes survive JSON). Each listed sampled node's tokens get
+    ``min(advantage, 0) - p`` after the group's advantages are assigned: never reinforced, however
+    good its trace, and pushed below the trace's own advantage when that is negative (e.g. craftax
+    ``env.forfeit_penalty``: a reply that forfeited its turn). Not normalized within the group, and
+    the other terms' routing is untouched. Returns how many nodes it changed."""
+    request = (trace.info or {}).get("node_penalties") if isinstance(trace.info, dict) else None
+    if not request:
+        return 0
+    changed = 0
+    for pair in request:
+        index, penalty = int(pair[0]), float(pair[1])
+        if not 0 <= index < len(trace.nodes):
+            raise ValueError(f"node_penalties of trace {trace.id!r} names node {index}; the trace has {len(trace.nodes)} nodes")
+        node = trace.nodes[index]
+        if not any(node.mask) or node.advantages is None:
+            continue
+        node.advantages = [min(a, 0.0) - penalty for a in node.advantages]
+        changed += 1
+    return changed
+
+
 def assign_reference_logprobs(branch: vf.Branch, values: list[float]) -> None:
     """Project branch-aligned reference logprobs onto sampled graph nodes."""
     if len(values) != len(branch.token_ids):
