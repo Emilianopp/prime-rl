@@ -8,14 +8,17 @@
 #
 #   cluv run fir -- env WEIGHTS=$SCRATCH/kv-race/cluv/weights/w0049 bash eval_chain.sh
 #
-# Env: WEIGHTS (HF weights dir, required), BLOCKS (5), TIME_LIMIT (game seconds per block, 8640:
-# 5 x 8640 s = 12 h of play), N (games = in-flight episodes, 64), SKIP (first seed, 0), NAME,
-# CHAIN_DIR, ACCOUNT (rrg-bengioy-ad). Extra arguments go to every sbatch.
+# Env: WEIGHTS (HF weights dir, required), BLOCKS (6), TIME_LIMIT (game seconds per block, 7200:
+# 6 x 7200 s = 12 h of play), N (games = in-flight episodes, 64), SKIP (first seed, 0), NAME,
+# CHAIN_DIR, ACCOUNT (rrg-bengioy-ad), AFTER (a job id the first block waits for) and FIRST_BLOCK
+# (number of the first block): extend or re-plan a running chain in the same CHAIN_DIR. Startup
+# (venv copy, engines, weights) takes ~25 min on fir, so keep TIME_LIMIT <= ~8000 s per 3 h block.
+# Extra arguments go to every sbatch.
 set -eu
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/env.sh"
 WEIGHTS=${WEIGHTS:?set WEIGHTS to a HF weights dir}
-BLOCKS=${BLOCKS:-5} TIME_LIMIT=${TIME_LIMIT:-8640} N=${N:-64} SKIP=${SKIP:-0}
+BLOCKS=${BLOCKS:-6} TIME_LIMIT=${TIME_LIMIT:-7200} N=${N:-64} SKIP=${SKIP:-0}
 NAME=${NAME:-$(basename "$WEIGHTS")-$((BLOCKS * TIME_LIMIT / 3600))h}
 CHAIN_DIR=${CHAIN_DIR:-$KVS_ROOT/craftax_eval/$NAME}
 ACCOUNT=${ACCOUNT:-rrg-bengioy-ad}
@@ -27,8 +30,8 @@ esac
 [ -f "$WEIGHTS/config.json" ] || { echo "no config.json in $WEIGHTS"; exit 1; }
 mkdir -p "$CHAIN_DIR/state"
 cd "$HERE"  # job.sh sources $SLURM_SUBMIT_DIR/env.sh
-prev=""
-for block in $(seq 0 $((BLOCKS - 1))); do
+prev=${AFTER:-} FIRST_BLOCK=${FIRST_BLOCK:-0}
+for block in $(seq "$FIRST_BLOCK" $((FIRST_BLOCK + BLOCKS - 1))); do
   prev=$(env EXTRA_TOML="$HERE/rlmem-eval.toml" CONTINUOUS=1 FEEDBACK=1 MAX_ACTIONS=4 SEGMENTS=106496:8192 \
     TIME_LIMIT="$TIME_LIMIT" N="$N" CONC="$N" SKIP="$SKIP" WEIGHTS="$WEIGHTS" STATE_DIR="$CHAIN_DIR/state" \
     OUT_ROOT="$CHAIN_DIR" GIT_COMMIT="$(git -C "$REPO" rev-parse HEAD)" \
