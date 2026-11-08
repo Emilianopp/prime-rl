@@ -57,3 +57,22 @@ def test_score_segment_hands_q_to_the_next_segment_and_stops_at_the_cost_cap(tmp
     assert info_b["start"]["Q"] == info_a["end"]["Q"] and info_b["end"]["Q"] == 4  # the game ended: Q = V
     assert stop.exists() and "cap" in stop.read_text()  # 3 calls x $0.25 passed $0.60
     assert asyncio.run(qv.score_segment(trace("c"), **args))[0] is None and len(prompts) == 3
+
+
+def test_score_segment_subtracts_the_death_penalty_per_death(tmp_path, monkeypatch):
+    died = {**STATE, "hud": "Step: 9", "deaths": 3}
+    for tid, side, extra, state in (("d", "start", {}, STATE), ("d", "end", {"next": None}, died)):
+        (tmp_path / f"{tid}.{side}.json").write_text(json.dumps({**extra, "state": state}))
+
+    async def fake_call(client, text, model, url=qv.URL, params=None):
+        return judge_reply(0), {"prompt_tokens": 0, "total_tokens": 0}
+
+    monkeypatch.setattr(qv, "call", fake_call)
+    monkeypatch.setenv("GEMINI_API_KEY", "test")
+    rewards = []
+    for penalty in (0.0, 0.05):
+        monkeypatch.setattr(qv, "_RUN", qv._Run())
+        r, info = asyncio.run(qv.score_segment(trace("d"), state_dir=str(tmp_path), death_penalty=penalty,
+                                               stop_path=None, wait_seconds=1))
+        rewards.append(r)
+    assert info["deaths"] == [0, 3] and abs(rewards[0] - rewards[1] - 0.15) < 1e-9

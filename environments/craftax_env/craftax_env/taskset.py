@@ -120,7 +120,7 @@ class CraftaxEnvConfig(vf.EnvConfig):
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, return, achievements) to this file."""
     state_dir: str | None = None
-    """Save each game to ``{state_dir}/{seed}.pkl`` (a taskset's variants: ``{seed}-{variant}.pkl``)
+    """(Environment variables expanded, e.g. ``$CHAIN/worlds``.) Save each game to ``{state_dir}/{seed}.pkl`` (a taskset's variants: ``{seed}-{variant}.pkl``)
     every ``save_every`` turns and when the episode ends, and resume it from there: a
     chain of jobs plays the same worlds
     on. At ``max_episode_seconds`` the model first writes a handoff summary (the
@@ -191,7 +191,10 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         segments = self.config.player.segments
         header = segments.summary_header if segments is not None else None
         key = f"{seed}-{task.data.info['variant']}" if "variant" in task.data.info else f"{seed}"
-        path = os.path.join(self.config.state_dir, f"{key}.pkl") if self.config.state_dir else None
+        state_dir = os.path.expandvars(self.config.state_dir) if self.config.state_dir else None
+        if state_dir:
+            os.makedirs(state_dir, exist_ok=True)
+        path = os.path.join(state_dir, f"{key}.pkl") if state_dir else None
         saved = await asyncio.to_thread(_load_state, path) if path else None
         block, played_before, summary = 0, 0.0, None
         if saved is not None:

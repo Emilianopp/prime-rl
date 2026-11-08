@@ -48,7 +48,8 @@ type = "trace_credit"
 scorer = "craftax_env.qv:score_segment"
 # Judge: gpt-6-luna at reasoning_effort low (OpenAI; key OPENAI_API_KEY from the repo's .env).
 # Blocks before w0049 were judged by gemini-3.1-flash-lite (temperature 0.2).
-scorer_args = { state_dir = "$OUT/qv_states", model = "gpt-6-luna", url = "https://api.openai.com/v1/chat/completions", key_var = "OPENAI_API_KEY", params = { reasoning_effort = "low" }, cost_cap = 10.0, price_in = 0.10, price_out = 0.50, stop_path = "$OUT/STOP" }
+# From w0061 on: R minus 0.05 per death in the segment (before the clip to [-1, 1]).
+scorer_args = { state_dir = "$OUT/qv_states", model = "gpt-6-luna", url = "https://api.openai.com/v1/chat/completions", key_var = "OPENAI_API_KEY", params = { reasoning_effort = "low" }, death_penalty = 0.05, cost_cap = 10.0, price_in = 0.10, price_out = 0.50, stop_path = "$OUT/STOP" }
 
 [orchestrator.concurrency]
 # 64 games, each always playing: 32 per inference engine.
@@ -82,6 +83,11 @@ env.death_inventory = "drop_all"
 env.reward = "achievements"  # recorded on a game's last segment only; trace_credit ignores it
 env.action_feedback = true
 env.state_log = "$OUT/qv_states"
+# The same worlds play on across a chain's blocks (scripts/kv_streams/qv/chain.sbatch exports
+# CHAIN): each game resumes from its save, written every 10 replies (a block's time limit kills
+# the job mid-game, so a game loses at most 10 replies and resumes with its last summary).
+env.state_dir = "$CHAIN/worlds"
+env.save_every = 10
 # The summary turn starts at new_tokens - summary_tokens = 98304 new tokens, as in the eval
 # (131072 - 32768); 8192 tokens hold the summary reply (max_completion_tokens 2048).
 env.player.segments.new_tokens = 106496

@@ -358,6 +358,7 @@ async def score_segment(
     url: str = URL,
     key_var: str = "GEMINI_API_KEY",
     params: dict | None = None,
+    death_penalty: float = 0.0,
 ) -> tuple[float | None, dict]:
     """The reward of one segment (a trace of a game played in segments): R from the Q
     of its start (state + inherited summary) and of its end (state + the summary it
@@ -366,6 +367,7 @@ async def score_segment(
     `price_out` per million tokens) it judges nothing more and writes `stop_path`, which
     ends a run under rl.sbatch. The judge is `model` at the OpenAI-compatible `url`, with
     the API key in env var `key_var` and extra request fields `params` (see `call`).
+    `death_penalty` is subtracted from R per death in the segment (before the clip).
     Returns (None, info) when it cannot score."""
     info: dict = {"trace": trace.id}
     if _RUN.stopped:
@@ -406,7 +408,8 @@ async def score_segment(
         _RUN.stopped = f"judge cost ${_RUN.cost:.2f} reached the ${cost_cap:.2f} cap after {_RUN.calls} calls"
         if stop_path:
             Path(os.path.expandvars(stop_path)).write_text(_RUN.stopped + "\n")
-    reward = segment_reward(start, end)
+    died = max(0, int(end_state["deaths"]) - int(start_state["deaths"]))
+    reward = max(-1.0, min(1.0, segment_reward(start, end) - death_penalty * died))
     keep = ("V", "G_star", "D", "Q", "P")
     return reward, {**info, "start": {k: start[k] for k in keep}, "end": {k: end[k] for k in keep},
                     "flaws": [f.get("type") for f in end["flaws"]], "wrote_summary": written is not None,
