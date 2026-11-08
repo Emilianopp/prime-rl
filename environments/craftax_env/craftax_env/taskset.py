@@ -232,6 +232,10 @@ class CraftaxEnvConfig(vf.EnvConfig):
     summary_retry: bool = True
     """Ask once more (segments.SUMMARY_RETRY) when the notes reply holds no <notes> of 80+ characters."""
     train_on_notes: bool = False
+    notes_reward_on_actions: bool = True
+    """With train_on_notes False the notes turn is masked and the notes term has no tokens of its own, so the
+    orchestrator adds it to the segment's action tokens (its actions are credited for its own notes). False:
+    the notes term trains nothing (term routing to no node); it still counts in the trace reward and the beam."""
     """Segments: train on the notes turn (and its retry). False: those replies, and any earlier reply
     that holds <notes>, keep their tokens as context but leave the loss (crafter_env's
     `mask_notes_from_loss`); the notes are still graded and still reach the next segment."""
@@ -290,6 +294,9 @@ class CraftaxEnvConfig(vf.EnvConfig):
     """`code` (2026-11-04): the statuses come from the digest alone (judge.code_adherence_verdict: done by
     code, attempted = came within 2 tiles of the subgoal's place, else ignored; subgoals code cannot check
     are not scored), no LLM call and no gate. `judge`: the LLM status list gated by the parent's plan score."""
+    adherence_gated: bool = False
+    """`code` mode: gate the adherence reward by the parent's plan score as `judge` mode does (reward = plan score x
+    adherence score; 0.5 when the parent has no plan score), so following a plan pays in proportion to its quality."""
 
     @field_validator("judge", mode="before")
     @classmethod
@@ -454,7 +461,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             skip_adherence(trace, weight=cfg.adherence_weight, reason="no parent plan", episode_log=cfg.episode_log)
         elif cfg.adherence_mode == "code":
             apply_adherence(trace, code_adherence_verdict(info), weight=cfg.adherence_weight, timing={"call_s": 0.0},
-                            episode_log=cfg.episode_log, mode="code", gated=False)
+                            episode_log=cfg.episode_log, mode="code", gated=cfg.adherence_gated)
         elif rendezvous and cfg.judge_mode == "group" and info.get("parent"):
             await judge_adherence_group(self._adherence_rendezvous(), CraftaxAdherenceJudge(cfg.judge),
                                         CraftaxGroupAdherenceJudge(cfg.judge), trace, weight=cfg.adherence_weight,
@@ -1012,6 +1019,9 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         notes_masked = {"turn": 0, "mid": 0, "tokens": 0}
         if segmented and not cfg.train_on_notes:
             notes_masked = mask_notes_from_loss(trace, sampled_before_notes if sampled_before_notes is not None else 10**9)
+            if not cfg.notes_reward_on_actions and isinstance(getattr(trace, "info", None), dict):
+                # route the notes term to no node: per-term GRPO then gives the action tokens the other terms only
+                trace.info["term_routing"] = {**(trace.info.get("term_routing") or {}), "notes": []}
         elif segmented:  # per-term routing: the notes term trains the notes turn, the others the action turns
             request_term_routing(trace, {"notes": notes_node_indexes(trace, sampled_before_notes if sampled_before_notes is not None else 10**9)})
         trace_id = getattr(trace, "id", None) or uuid.uuid4().hex

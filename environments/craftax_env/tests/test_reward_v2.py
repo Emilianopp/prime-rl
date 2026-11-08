@@ -229,3 +229,24 @@ def test_term_routing_request(tmp_path, monkeypatch):
     assert notes_node_indexes(fake, 2) == [2]
     request_term_routing(fake, {"notes": [2], "empty": []})
     assert fake.info["term_routing"] == {"notes": [2]}
+
+
+def test_notes_reward_off_the_actions_when_notes_are_not_trained(tmp_path):
+    task, env = make(tmp_path, segment_turns=3, code_facts=True, train_on_notes=False, notes_reward_on_actions=False)
+    out = asyncio.run(env.play_segment(task, SegmentPlayer(first_notes=PLAN_NOTES)))
+    assert out["trace"].info["term_routing"] == {"notes": []}  # the notes term trains no token
+    task, env = make(tmp_path, segment_turns=3, code_facts=True, train_on_notes=False)
+    out = asyncio.run(env.play_segment(task, SegmentPlayer(first_notes=PLAN_NOTES)))
+    assert "term_routing" not in out["trace"].info  # default: as before
+
+
+def test_code_adherence_gated_by_the_parent_plan(tmp_path):
+    task, env = make(tmp_path, segment_turns=3, tree_depth=2, branches=1, keep=1, root_branches=1, code_facts=True,
+                     adherence_weight=0.25, adherence_gated=True)
+    asyncio.run(env.run(task, SimpleNamespace(player=SegmentPlayer(first_notes=PLAN_NOTES))))
+    lines = [json.loads(l) for l in open(tmp_path / "episodes.jsonl")]
+    adh = [l for l in lines if l["task"] == "craftax-adherence"]
+    child = [l for l in lines if l.get("task") == "craftax" and l.get("depth") == 2]
+    assert len(adh) == 1 and adh[0]["mode"] == "code"
+    expected = child[0]["parent_plan_score"] if child and child[0].get("parent_plan_score") is not None else 0.5
+    assert adh[0]["gate"] == pytest.approx(expected) and adh[0]["gate"] != 1.0

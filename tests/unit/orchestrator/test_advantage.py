@@ -375,3 +375,20 @@ def test_per_term_routing_sends_each_term_to_its_nodes():
     assert second[0].advantages == pytest.approx([1.0, 1.0]) and second[-1].advantages == pytest.approx([-0.5] * 3)
     plain = _termed_group([{"progress": (0.0, 1.0), "notes": (0.6, 0.5)}, {"progress": (2.0, 1.0), "notes": (0.4, 0.5)}])
     assert _per_term(plain, term_std_floor={"progress": 0.5}, default_term_std_floor=0.05) == pytest.approx([-0.5, 0.5])  # unrouted: the sum
+
+
+def test_route_terms_to_no_node_drops_that_term():
+    from types import SimpleNamespace
+
+    from prime_rl.orchestrator.algo.grpo import GRPOAlgorithm
+
+    nodes = [SimpleNamespace(sampled=True, mask=[1, 1]), SimpleNamespace(sampled=True, mask=[1])]
+    trace = SimpleNamespace(info={"term_routing": {"notes": []}}, nodes=nodes)
+    import prime_rl.orchestrator.algo.grpo as grpo
+    original = grpo.trainable_nodes
+    grpo.trainable_nodes = lambda t: [n for n in t.nodes if n.sampled]
+    try:
+        values = GRPOAlgorithm.route_terms(trace, {"progress": 0.5, "state": -0.2, "notes": 3.0})
+    finally:
+        grpo.trainable_nodes = original
+    assert values == [0.3, 0.3, 0.3]  # notes (3.0) goes to no token; every token gets progress + state
