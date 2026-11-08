@@ -28,7 +28,8 @@
 # SEGMENTS (not on this branch: its verifiers has no segments; each episode is one trace
 # under a 256k token ceiling), CODE_FACTS (1: the game writes KNOWN PLACES + EVENT LOG, the notes only
 # FINDINGS / PLAN / SURVIVAL; env.code_facts), EXPLORATION_AID (1: GlyphBench's [Exploration Aid] after every
-# observation; env.exploration_aid), ACTION_FROM_REASONING (1: play the tag a reply's reasoning ends with
+# observation; env.exploration_aid), VISIBLE_LIST (1: a [Visible] block after each [Grid], on-screen things with
+# F<floor> (row,col); env.taskset.visible_list), ACTION_FROM_REASONING (1: play the tag a reply's reasoning ends with
 # when its content has none; env.action_from_reasoning), SAFE_RADIUS (N: respawn at a free cell with no hostile mob
 # within N tiles, env.respawn_safe; with CONTINUOUS),
 # CONTINUOUS (1: configs/craftax/eval-continuous.toml - respawn on death, no turn limit,
@@ -48,7 +49,7 @@
 # segment suffice, and each slot left unused is ~24 MB of GPU memory the KV pool loses).
 # The notes judge (with TREE_DEPTH): JUDGE_BACKEND (unset: no judge, arm A0; capi: the Copilot
 # API with ~/.copilot/config.json; openai: Gemini's endpoint with ~/.gemini_key), JUDGE_MODEL
-# (gpt-4.1 for capi, gemini-3.8-flash for openai), JUDGE_MODE (single; group: a node's branches
+# (gpt-4.1 for capi, gemini-3.1-flash-lite for openai), JUDGE_MODE (single; group: a node's branches
 # in one comparative call), NOTES_WEIGHT (0.5), ADHERENCE_WEIGHT (0: off, arm A1; 0.25: arm C, the
 # adherence judge grades how each segment followed its parent's PLAN, same JUDGE_MODE).
 # The 2026-11-04 reward (docs/craftax-reward-v2.md): NOTES_JUDGE (rank: one comparative call per parent
@@ -68,7 +69,7 @@ CONC=${CONC:-$((GPUS * PER_GPU))}
 STEPS=${STEPS:-}
 N=${N:-$([ -n "$STEPS" ] && echo $((3 * CONC)) || echo "$CONC")} SKIP=${SKIP:-0} TURN_TOKENS=${TURN_TOKENS:-2048} TEMPERATURE=${TEMPERATURE:-} NO_THINKING=${NO_THINKING:-}
 DEADLINE_MARGIN=${DEADLINE_MARGIN:-600} MULTIPLEX=${MULTIPLEX:-}
-TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} SAFE_RADIUS=${SAFE_RADIUS:-} CODE_FACTS=${CODE_FACTS:-} EXPLORATION_AID=${EXPLORATION_AID:-} ACTION_FROM_REASONING=${ACTION_FROM_REASONING:-}
+TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} SAFE_RADIUS=${SAFE_RADIUS:-} CODE_FACTS=${CODE_FACTS:-} EXPLORATION_AID=${EXPLORATION_AID:-} VISIBLE_LIST=${VISIBLE_LIST:-} ACTION_FROM_REASONING=${ACTION_FROM_REASONING:-}
 [ -n "$SEGMENTS" ] && [ "$SEGMENTS" != off ] && { echo "SEGMENTS=$SEGMENTS: this branch's verifiers has no segments (use TREE_DEPTH)"; exit 2; }
 TREE_DEPTH=${TREE_DEPTH:-} TREE_CHUNK=${TREE_CHUNK:-} MAMBA_SLOTS=${MAMBA_SLOTS:-} BRANCHES=${BRANCHES:-4} BEAM_KEEP=${BEAM_KEEP:-2} SEGMENT_TURNS=${SEGMENT_TURNS:-100} SEGMENT_TOKENS=${SEGMENT_TOKENS:-96000}
 ROOT_BRANCHES=${ROOT_BRANCHES:-$((BRANCHES * BEAM_KEEP))}
@@ -79,12 +80,12 @@ JUDGE_BACKEND=${JUDGE_BACKEND:-} JUDGE_MODE=${JUDGE_MODE:-single} NOTES_WEIGHT=$
 NOTES_JUDGE=${NOTES_JUDGE:-rank} JUDGE_WEIGHT=${JUDGE_WEIGHT:-0.5} FALSE_PENALTY=${FALSE_PENALTY:-0.2} ADHERENCE_MODE=${ADHERENCE_MODE:-code}
 STATE_WEIGHT=${STATE_WEIGHT:-1} BEAM_CUMULATIVE=${BEAM_CUMULATIVE:-1} PROGRESS_WEIGHT=${PROGRESS_WEIGHT:-1}
 BEAM_SELECT=${BEAM_SELECT:-topk} REBASE_T=${REBASE_T:-1}
-JUDGE_MODEL=${JUDGE_MODEL:-$([ "$JUDGE_BACKEND" = openai ] && echo gemini-3.8-flash || echo gpt-4.1)}
+JUDGE_MODEL=${JUDGE_MODEL:-$([ "$JUDGE_BACKEND" = openai ] && echo gemini-3.1-flash-lite || echo gpt-4.1)}
 [ "$JUDGE_BACKEND" = openai ] && [ -z "${GEMINI_API_KEY:-}" ] && [ -r "$HOME/.gemini_key" ] && export GEMINI_API_KEY=$(cat "$HOME/.gemini_key")
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
-OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink$([ "$NO_THINKING" = text ] && echo -text)}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${SAFE_RADIUS:+_safe$SAFE_RADIUS}${CODE_FACTS:+_codefacts}${EXPLORATION_AID:+_aid}${ACTION_FROM_REASONING:+_actreason}${TREE_DEPTH:+_tree$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-s$SEGMENT_TURNS}${JUDGE_BACKEND:+_judge-$JUDGE_MODE}$([ -n "$JUDGE_BACKEND" ] && [ "$ADHERENCE_WEIGHT" != 0 ] && echo _adh$ADHERENCE_WEIGHT)_skip$SKIP/${SLURM_JOB_ID:-local}
+OUT=${OUT_ROOT:-$SCRATCH/kv-race/craftax_eval}/r${KEEP}-1_n${N}_c${CONC}_tt${TURN_TOKENS}${NO_THINKING:+_nothink$([ "$NO_THINKING" = text ] && echo -text)}${TIME_LIMIT:+_tl$TIME_LIMIT}${STEPS:+_steps$STEPS}${SEGMENTS:+_seg-${SEGMENTS//:/-}}${CONTINUOUS:+_continuous}${FEEDBACK:+_feedback}${MAX_ACTIONS:+_act$MAX_ACTIONS}${SAFE_RADIUS:+_safe$SAFE_RADIUS}${CODE_FACTS:+_codefacts}${EXPLORATION_AID:+_aid}${VISIBLE_LIST:+_vis}${ACTION_FROM_REASONING:+_actreason}${TREE_DEPTH:+_tree$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-s$SEGMENT_TURNS}${JUDGE_BACKEND:+_judge-$JUDGE_MODE}$([ -n "$JUDGE_BACKEND" ] && [ "$ADHERENCE_WEIGHT" != 0 ] && echo _adh$ADHERENCE_WEIGHT)_skip$SKIP/${SLURM_JOB_ID:-local}
 mkdir -p "$OUT"
 
 export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=offline TOKENIZERS_PARALLELISM=false VLLM_API_KEY=EMPTY JAX_PLATFORMS=cpu
@@ -93,7 +94,7 @@ export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_thread
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src:$REPO/environments/craftax_env:$REPO/environments/crafter_env:$REPO/deps/verifiers:$REPO/deps/renderers${CRAFTAX_PY:+:$CRAFTAX_PY}${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
-echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS temp=${TEMPERATURE:-config} thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off} code_facts=${CODE_FACTS:-off} exploration_aid=${EXPLORATION_AID:-off} action_from_reasoning=${ACTION_FROM_REASONING:-off} tree=$([ -n "$TREE_DEPTH" ] && echo "depth$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-r$ROOT_BRANCHES-s$SEGMENT_TURNS-t$SEGMENT_TOKENS-m$MAX_TOKENS" || echo off) judge=$([ -n "$JUDGE_BACKEND" ] && echo "$JUDGE_BACKEND:$JUDGE_MODEL/$JUDGE_MODE/$NOTES_JUDGE/w$NOTES_WEIGHT" || echo off) adherence=$([ "$ADHERENCE_WEIGHT" != 0 ] && echo "$ADHERENCE_MODE/w$ADHERENCE_WEIGHT" || echo off) progress_weight=$PROGRESS_WEIGHT state_weight=$STATE_WEIGHT beam_cumulative=$BEAM_CUMULATIVE select=$BEAM_SELECT$([ "$BEAM_SELECT" = rebase ] && echo "/T$REBASE_T")] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
+echo "[craftax eval gpus$GPUS r$KEEP-1 n$N c$CONC tt$TURN_TOKENS temp=${TEMPERATURE:-config} thinking=${NO_THINKING:+off}${NO_THINKING:-on} time_limit=${TIME_LIMIT:-config} steps=${STEPS:-config} segments=${SEGMENTS:-config} continuous=${CONTINUOUS:-off} feedback=${FEEDBACK:-off} max_actions=${MAX_ACTIONS:-1} safe_radius=${SAFE_RADIUS:-off} code_facts=${CODE_FACTS:-off} exploration_aid=${EXPLORATION_AID:-off} visible_list=${VISIBLE_LIST:-off} action_from_reasoning=${ACTION_FROM_REASONING:-off} tree=$([ -n "$TREE_DEPTH" ] && echo "depth$TREE_DEPTH-b$BRANCHES-k$BEAM_KEEP-r$ROOT_BRANCHES-s$SEGMENT_TURNS-t$SEGMENT_TOKENS-m$MAX_TOKENS" || echo off) judge=$([ -n "$JUDGE_BACKEND" ] && echo "$JUDGE_BACKEND:$JUDGE_MODEL/$JUDGE_MODE/$NOTES_JUDGE/w$NOTES_WEIGHT" || echo off) adherence=$([ "$ADHERENCE_WEIGHT" != 0 ] && echo "$ADHERENCE_MODE/w$ADHERENCE_WEIGHT" || echo off) progress_weight=$PROGRESS_WEIGHT state_weight=$STATE_WEIGHT beam_cumulative=$BEAM_CUMULATIVE select=$BEAM_SELECT$([ "$BEAM_SELECT" = rebase ] && echo "/T$REBASE_T")] skip=$SKIP $(git log --oneline -1)" | tee "$OUT/cell.txt"
 
 # jobs/craftax_eval.sbatch unpacks the venv tarball here first: re-walking ~200k files on scratch costs minutes.
 [ -x "$SLURM_TMPDIR/sgl-venv/bin/python" ] || rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
@@ -141,6 +142,7 @@ sed -i "s/^max_completion_tokens = .*/max_completion_tokens = $TURN_TOKENS/; s/^
 [ -n "$TEMPERATURE" ] && sed -i "s/^temperature = .*/temperature = $TEMPERATURE  # TEMPERATURE knob/" "$OUT/eval.toml"  # the config's value otherwise (eval-tree: 0.7)
 [ -n "$FEEDBACK" ] && sed -i "s|^env.max_episode_steps = .*|&\nenv.action_feedback = true|" "$OUT/eval.toml"
 [ -n "$MAX_ACTIONS" ] && sed -i "s|^env.taskset.split = .*|&\nenv.taskset.max_actions_per_turn = $MAX_ACTIONS|" "$OUT/eval.toml"
+[ -n "$VISIBLE_LIST" ] && sed -i "s|^env.taskset.split = .*|&\nenv.taskset.visible_list = true|" "$OUT/eval.toml"
 # NO_THINKING=text: the renderer's non-thinking mode but GlyphBench's reasoning format (reason in plain
 # text, then the <action> tag), as configs/craftax/kve-*.toml train; any other value: action-only too.
 if [ "$NO_THINKING" = text ]; then sed -i "s/^enable_thinking = true/enable_thinking = false/" "$OUT/eval.toml"
