@@ -11,7 +11,8 @@ Reward: the episode's Craftax return / 226 (GlyphBench's "% of max reward" / 100
 with ``reward = "achievements"`` the unlocked achievements' Craftax reward / 226 (no
 health term, which a respawning game would pay again on every death). Episodes end on
 death (unless ``on_death = "respawn"``: continuous play, as crafter-env's), on the
-boss's defeat, at ``max_episode_steps`` model turns (0: none), on
+boss's defeat, at ``max_episode_steps`` game steps (0: none; the game's clock, so every
+played action and each fast-forwarded sleep step counts, not model replies), on
 ``max_episode_seconds`` or at a turn/token limit of the player.
 
 With ``state_dir`` a game outlives its job: each job of a chain plays the same seeds

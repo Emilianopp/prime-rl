@@ -3,7 +3,7 @@
 #SBATCH --partition=short-unkillable
 #SBATCH --gres=gpu:a100l:4
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=256G
+#SBATCH --mem=512G
 #SBATCH --time=2:59:00
 #SBATCH --output=%x-%j.out
 # An RL run (or smoke) of one config on one 4-GPU node, then per-step trainer and
@@ -12,10 +12,12 @@
 #   CONFIG=configs/textworld/rl-expert-9b.toml STEPS=4 sbatch rl.sbatch
 #
 # Env: CONFIG (rl toml in REPO), STEPS (max_steps override; default the config's),
-# ENVS (environments/ packages on PYTHONPATH, default textworld_env), REPO
-# (prime-rl checkout, deps/ submodules checked out), VENV, SGLANG_VENV, OUT_ROOT.
+# ENVS (environments/ packages on PYTHONPATH, default textworld_env), ARGS (more rl
+# CLI arguments; "$OUT" in them is this job's output dir), WATCH (a command run beside
+# the run with OUT exported: writing "$OUT/STOP" ends the run, its content the reason),
+# REPO (prime-rl checkout, deps/ submodules checked out), VENV, SGLANG_VENV, OUT_ROOT.
 set -u
-CONFIG=${CONFIG:?set CONFIG} STEPS=${STEPS:-} ENVS=${ENVS:-textworld_env}
+CONFIG=${CONFIG:?set CONFIG} STEPS=${STEPS:-} ENVS=${ENVS:-textworld_env} ARGS=${ARGS:-} WATCH=${WATCH:-}
 REPO=${REPO:-$SCRATCH/kv-race/prime-rl-kvs}
 VENV=${VENV:-$REPO/.venv}
 SGLANG_VENV=${SGLANG_VENV:-$SCRATCH/kv-race/sglang/.venv}
@@ -40,9 +42,18 @@ rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python
 export CUDA_HOME=$($SGL_PY -c "import site; print(site.getsitepackages()[0])")/nvidia/cu13
 
+export OUT
 uv run rl @ "$CONFIG" --clean --output-dir "$OUT/run" --inference.sglang.python "$SGL_PY" \
-  ${STEPS:+--max-steps "$STEPS"} --rollout-transport.type zmq --rollout-transport.port 5655 > "$OUT/rl.log" 2>&1
-echo "rl exit $?"
+  ${STEPS:+--max-steps "$STEPS"} --rollout-transport.type zmq --rollout-transport.port 5655 \
+  $(eval echo "$ARGS") > "$OUT/rl.log" 2>&1 &
+RL=$!
+[ -n "$WATCH" ] && { bash -c "$WATCH" > "$OUT/watch.log" 2>&1 & WATCHER=$!; }
+while kill -0 $RL 2>/dev/null; do
+  [ -f "$OUT/STOP" ] && { echo "stop: $(cat "$OUT/STOP")"; kill $RL; break; }
+  sleep 30
+done
+wait $RL; echo "rl exit $? $(date +%T)"
+[ -n "$WATCH" ] && kill $WATCHER 2>/dev/null
 
 L=$(ls -d "$OUT"/run/*/logs/attempt_1 2>/dev/null | head -1)
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }

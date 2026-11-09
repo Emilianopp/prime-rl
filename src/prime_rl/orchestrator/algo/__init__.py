@@ -6,7 +6,7 @@ turns the signal half into runtime objects (the sampling half is interpreted by
 :class:`~prime_rl.orchestrator.envs.TrainEnv`):
 
 - one module per algorithm (``grpo``, ``echo``, ``max_rl``, ``rae``,
-  ``hierarchical_grpo``, ``opd``, ``opsd``, ``sft``, ``debug``) — each named
+  ``hierarchical_grpo``, ``opd``, ``opsd``, ``sft``, ``debug``, ``turn_credit``) — each named
   class owns its scoring hooks
   (``score_episode`` / ``score_group``) and declares what it needs (loss
   component, a "teacher", ...). One instance per env, built by
@@ -33,6 +33,7 @@ from prime_rl.orchestrator.algo.opsd import OPSDAlgorithm
 from prime_rl.orchestrator.algo.rae import RAEAlgorithm
 from prime_rl.orchestrator.algo.routing import assign_advantages, stamp_loss_routing
 from prime_rl.orchestrator.algo.sft import SFTDistillAlgorithm
+from prime_rl.orchestrator.algo.turn_credit import TurnCreditAlgorithm
 
 if TYPE_CHECKING:
     from prime_rl.configs.algorithm import AlgoConfig
@@ -50,6 +51,7 @@ ALGORITHM_CLASSES: dict[str, type[Algorithm]] = {
     "opsd": OPSDAlgorithm,
     "sft": SFTDistillAlgorithm,
     "debug": DebugAlgorithm,
+    "turn_credit": TurnCreditAlgorithm,
 }
 
 
@@ -74,6 +76,7 @@ __all__ = [
     "OPSDAlgorithm",
     "RAEAlgorithm",
     "SFTDistillAlgorithm",
+    "TurnCreditAlgorithm",
     "build_algorithm",
     "assign_advantages",
     "stamp_loss_routing",
