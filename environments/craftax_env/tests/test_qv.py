@@ -76,3 +76,15 @@ def test_score_segment_subtracts_the_death_penalty_per_death(tmp_path, monkeypat
                                                stop_path=None, wait_seconds=1))
         rewards.append(r)
     assert info["deaths"] == [0, 3] and abs(rewards[0] - rewards[1] - 0.15) < 1e-9
+
+
+def test_score_achievements_is_the_points_gained_over_scale(tmp_path):
+    start = {**STATE, "B": 1.0, "achievements": {"collect_wood": 1.0}}
+    end = {**STATE, "B": 9.0, "deaths": 2, "achievements": {"collect_wood": 1.0, "place_table": 1.0, "enter_dungeon": 3.0, "eat_cow": 1.0, "make_wood_pickaxe": 3.0}}
+    (tmp_path / "e.start.json").write_text(json.dumps({"state": start}))
+    (tmp_path / "e.end.json").write_text(json.dumps({"next": None, "state": end}))
+    r, info = asyncio.run(qv.score_achievements(trace("e"), state_dir=str(tmp_path), wait_seconds=1))
+    assert r == 1.0 and info["points"] == 8.0  # 8 points / 5, clipped
+    r, _ = asyncio.run(qv.score_achievements(trace("e"), state_dir=str(tmp_path), scale=10.0, death_penalty=0.05, wait_seconds=1))
+    assert abs(r - (0.8 - 0.1)) < 1e-9
+    assert info["unlocked"] == ["eat_cow", "enter_dungeon", "make_wood_pickaxe", "place_table"]

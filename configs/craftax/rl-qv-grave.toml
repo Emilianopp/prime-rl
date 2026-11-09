@@ -1,7 +1,9 @@
-# configs/craftax/rl-qv-mem.toml with dropped items: a death leaves the inventory where it
-# happened (shown as ⊕), picked back up by walking onto the cell within 300 game steps (one
-# Craftax day); the last 3 drops are kept (env.death_inventory = "drop_grave"). Started from
-# rl-qv-mem's last weights (w0071) on fresh worlds; same judge, death penalty and memory prompt.
+# configs/craftax/rl-qv-mem.toml with dropped items and ladder feedback, from the base model on
+# fresh worlds that never reset (a chain's blocks resume every game): a death leaves the inventory
+# where it happened (shown as ⊕), picked back up by walking onto the cell within 300 game steps
+# (one Craftax day; the last 3 drops kept, env.death_inventory = "drop_grave"), and a DESCEND or
+# ASCEND that does nothing says why (closed ladder, wrong ladder, not on one). Q/V judge reward,
+# no death penalty. Variants: rl-qv-grave-dp (+0.05 per death), rl-ach-grave (game reward, no judge).
 #
 # configs/craftax/rl-qv.toml with the memory prompt from the memory-prompt search
 # (scripts/kv_streams/memopt, variants/a3/g7_vis: optional memory, why it matters, what is
@@ -53,8 +55,8 @@ type = "trace_credit"
 scorer = "craftax_env.qv:score_segment"
 # Judge: gpt-6-luna at reasoning_effort low (OpenAI; key OPENAI_API_KEY from the repo's .env).
 # Blocks before w0049 were judged by gemini-3.1-flash-lite (temperature 0.2).
-# From w0061 on: R minus 0.05 per death in the segment (before the clip to [-1, 1]).
-scorer_args = { state_dir = "$OUT/qv_states", model = "gpt-6-luna", url = "https://api.openai.com/v1/chat/completions", key_var = "OPENAI_API_KEY", params = { reasoning_effort = "low" }, death_penalty = 0.05, cost_cap = 10.0, price_in = 0.10, price_out = 0.50, stop_path = "$OUT/STOP" }
+# No death penalty in this run (rl-qv-mem had 0.05 per death from w0061).
+scorer_args = { state_dir = "$OUT/qv_states", model = "gpt-6-luna", url = "https://api.openai.com/v1/chat/completions", key_var = "OPENAI_API_KEY", params = { reasoning_effort = "low" }, death_penalty = 0.0, cost_cap = 10.0, price_in = 0.10, price_out = 0.50, stop_path = "$OUT/STOP" }
 
 [orchestrator.concurrency]
 # 64 games, each always playing: 32 per inference engine.

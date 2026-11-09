@@ -22,6 +22,11 @@
 #   fails         blocks in a row that saved no new weights (2 stops the chain)
 #
 #   CHAIN=$SCRATCH/kv-race/rl/rl-qv/chain REPO=... VENV=... sbatch scripts/kv_streams/qv/chain.sbatch
+#
+# Elsewhere (the DRAC clusters, cluster/rl_chain.sh) the next block goes through a job script
+# instead of this file's #SBATCH header: CHAIN_JOB (e.g. cluster/job.sh, which loads env.sh)
+# and CHAIN_SBATCH (that cluster's sbatch arguments: account, GPUs, CPUs, memory, time, output).
+# A config without a judge cost_cap (a scorer with no API calls) runs until stopped.
 set -u
 C=${CHAIN:?set CHAIN} REPO=${REPO:?set REPO}
 HERE=$REPO/scripts/kv_streams PY=${VENV:?set VENV}/bin/python
@@ -58,12 +63,20 @@ echo "[chain block $SLURM_JOB_ID] start w$step, spent \$$spent, left \$$left $(d
 # Older blocks' broadcasts are superseded by the saved weights.
 for f in $(cat "$C/ledgers"); do rm -rf "$(dirname "$f")"/run/*/broadcasts; done
 
-sbatch --dependency=afterany:$SLURM_JOB_ID --export=ALL --chdir="$(dirname "$OUT")" "$HERE/qv/chain.sbatch"
+if [ -n "${CHAIN_JOB:-}" ]; then
+  # shellcheck disable=SC2086  # CHAIN_SBATCH is a list of sbatch arguments
+  sbatch --dependency=afterany:$SLURM_JOB_ID --export=ALL --chdir="$(dirname "$CHAIN_JOB")" ${CHAIN_SBATCH:-} \
+    "$CHAIN_JOB" bash "$HERE/qv/chain.sbatch"
+else
+  sbatch --dependency=afterany:$SLURM_JOB_ID --export=ALL --chdir="$(dirname "$OUT")" "$HERE/qv/chain.sbatch"
+fi
 echo "$OUT/qv.jsonl" >> "$C/ledgers"
 
 mkdir -p "$C/cfg"
 sed -E "s/cost_cap = [0-9.]+/cost_cap = $left/" "$REPO/$CONFIG" > "$C/cfg/$NAME.toml"
-grep -q "cost_cap = $left" "$C/cfg/$NAME.toml" || { echo "could not set cost_cap"; exit 1; }
+if grep -q "cost_cap = " "$REPO/$CONFIG"; then
+  grep -q "cost_cap = $left" "$C/cfg/$NAME.toml" || { echo "could not set cost_cap"; exit 1; }
+fi
 
 export STEP0=$step
 CONFIG=$C/cfg/$NAME.toml ENVS=craftax_env \

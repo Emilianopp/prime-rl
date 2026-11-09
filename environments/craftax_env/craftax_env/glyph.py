@@ -104,6 +104,9 @@ def _load(max_timesteps: int) -> tuple[Any, Any, Any]:
             _runtime["block_names"] = {b.value: b.name.lower().replace("_", " ") for b in C.BlockType}
             _runtime["directions"] = np.asarray(C.DIRECTIONS)
             _runtime["table"], _runtime["furnace"] = C.BlockType.CRAFTING_TABLE.value, C.BlockType.FURNACE.value
+            _runtime["ladder_down"] = {C.ItemType.LADDER_DOWN.value, C.ItemType.LADDER_DOWN_BLOCKED.value}
+            _runtime["ladder_up"] = C.ItemType.LADDER_UP.value
+            _runtime["kills_required"] = int(C.MONSTERS_KILLED_TO_CLEAR_LEVEL)
             _runtime.update(
                 weights=np.asarray(C.ACHIEVEMENT_REWARD_MAP, dtype=float),
                 not_walkable=np.asarray(C.SOLID_BLOCK_MAPPING) | np.isin(np.arange(len(C.BlockType)), blocked),
@@ -622,7 +625,24 @@ class CraftaxGame:
             "mob_ahead": bool(np.asarray(st.mob_map[level, tr, tc])) if inside else False,
             "near_table": bool((near == rt["table"]).any()), "near_furnace": bool((near == rt["furnace"]).any()),
             "achievements": len(self.achievements),
+            "under": int(np.asarray(st.item_map[level, r, c])), "kills": int(np.asarray(st.monsters_killed[level])),
         }
+
+    def _ladder_why(self, name: str, before: dict) -> str:
+        """Why DESCEND or ASCEND left the player on the same floor."""
+        rt, under = self._rt, before["under"]
+        if name == "DESCEND":
+            if under in rt["ladder_down"]:
+                left = rt["kills_required"] - before["kills"]
+                return f"the ladder down here is closed: kill {left} more monster{'s' if left != 1 else ''} on this floor to open it"
+            if under == rt["ladder_up"]:
+                return "you are on the ladder up (△), which only goes up (ASCEND); the ladder down (▼) is a different cell on this floor"
+            return "you are not on a ladder down (▼): stand on its cell, then DESCEND"
+        if before["floor"] == 0:
+            return "there is no floor above the Overworld"
+        if under in rt["ladder_down"]:
+            return "you are on the ladder down (▼), which only goes down (DESCEND); the ladder up (△) is a different cell on this floor"
+        return "you are not on a ladder up (△): stand on its cell, then ASCEND"
 
     def feedback(self, action: int, before: dict, after: dict) -> str:
         """One sentence on what ``action`` did, from snapshots taken around it."""
@@ -652,6 +672,8 @@ class CraftaxGame:
                     what = "nothing collected from grass (it drops a sapling 10% of the time)"
                 else:
                     what = f"no effect on {target}"
+        elif name in ("DESCEND", "ASCEND"):
+            what = f"no effect: {self._ladder_why(name, before)}"
         elif changes:
             what = ", ".join(changes)
         elif name in RECIPES or name in PLACEMENTS:

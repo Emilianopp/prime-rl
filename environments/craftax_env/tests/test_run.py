@@ -455,3 +455,26 @@ def test_drops_expire_are_capped_and_survive_a_save():
     other.turn = 69  # the drop made at turn 10 is 59 turns old, the others at most 49
     other.forfeit()
     assert [g["items"]["wood"] for g in other.graves] == [3, 4] and other.grave_stats["expired"] == 1
+
+
+def test_ladder_feedback_says_why_descend_or_ascend_did_nothing():
+    game = glyph.CraftaxGame(seed=7, max_turns=None)
+    rt, jnp = game._rt, game._rt["jax"].numpy
+    r, c = game.position
+    def at(item, floor=0, kills=0):
+        st = game.state
+        game.state = st.replace(
+            player_level=st.player_level * 0 + floor,
+            item_map=st.item_map.at[floor, r, c].set(item),
+            monsters_killed=st.monsters_killed.at[floor].set(kills),
+        )
+        return game.snapshot()
+    down, up = glyph.action_index("DESCEND"), glyph.action_index("ASCEND")
+    snap = at(0)
+    assert "not on a ladder down (▼)" in game.feedback(down, snap, snap)
+    assert "no floor above the Overworld" in game.feedback(up, snap, snap)
+    snap = at(rt["ladder_up"], floor=1)
+    assert "you are on the ladder up (△), which only goes up" in game.feedback(down, snap, snap)
+    snap = at(min(rt["ladder_down"]), floor=1, kills=5)
+    assert "closed: kill 3 more monsters on this floor" in game.feedback(down, snap, snap)
+    assert "you are on the ladder down (▼), which only goes down" in game.feedback(up, snap, snap)

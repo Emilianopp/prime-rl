@@ -416,3 +416,25 @@ async def score_segment(
                     "inherited": inherited is not None, "B": [start_state["B"], end_state["B"]],
                     "deaths": [start_state["deaths"], end_state["deaths"]],
                     "cost": round(_RUN.cost, 4), "calls": _RUN.calls}
+
+
+async def score_achievements(
+    trace, state_dir: str, scale: float = 5.0, wait_seconds: float = 1800.0, death_penalty: float = 0.0,
+) -> tuple[float | None, dict]:
+    """The game's own reward for one segment, no judge: the Craftax achievement points
+    (1/3/5/8 by tier) unlocked between its start and end boundary states, divided by
+    `scale` and clipped to [-1, 1]. 5 puts it on the Q/V judge's spread (segment points
+    have SD ~2.7, judge R ~0.6); one tier-4 achievement alone is 1. `death_penalty` as in
+    `score_segment`. Returns (None, info) when a boundary state is missing."""
+    info: dict = {"trace": trace.id}
+    folder = Path(os.path.expandvars(state_dir))
+    start_rec, end_rec = await asyncio.gather(
+        _boundary(folder, trace.id, "start", wait_seconds), _boundary(folder, trace.id, "end", wait_seconds))
+    if start_rec is None or end_rec is None:
+        return None, {**info, "error": "no boundary state from the env"}
+    s, e = start_rec["state"], end_rec["state"]
+    gained = float(e["B"]) - float(s["B"])
+    died = max(0, int(e["deaths"]) - int(s["deaths"]))
+    reward = max(-1.0, min(1.0, gained / scale - death_penalty * died))
+    return reward, {**info, "B": [s["B"], e["B"]], "points": gained, "deaths": [s["deaths"], e["deaths"]],
+                    "unlocked": sorted(set(e["achievements"]) - set(s["achievements"]))}
