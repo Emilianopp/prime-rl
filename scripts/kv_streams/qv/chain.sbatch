@@ -65,8 +65,9 @@ for f in $(cat "$C/ledgers"); do rm -rf "$(dirname "$f")"/run/*/broadcasts; done
 
 if [ -n "${CHAIN_JOB:-}" ]; then
   # shellcheck disable=SC2086  # CHAIN_SBATCH is a list of sbatch arguments
-  sbatch --dependency=afterany:$SLURM_JOB_ID --export=ALL --chdir="$(dirname "$CHAIN_JOB")" ${CHAIN_SBATCH:-} \
-    "$CHAIN_JOB" bash "$HERE/qv/chain.sbatch"
+  # from the job script's dir: it loads $SLURM_SUBMIT_DIR/env.sh
+  (cd "$(dirname "$CHAIN_JOB")" && sbatch --dependency=afterany:$SLURM_JOB_ID --export=ALL ${CHAIN_SBATCH:-} \
+    "$CHAIN_JOB" bash "$HERE/qv/chain.sbatch")
 else
   sbatch --dependency=afterany:$SLURM_JOB_ID --export=ALL --chdir="$(dirname "$OUT")" "$HERE/qv/chain.sbatch"
 fi
