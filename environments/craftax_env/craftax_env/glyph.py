@@ -257,6 +257,14 @@ _CONTINUOUS = (
 )
 
 
+_GRAVES = (
+    " When you die, everything you carry (materials, tools, armour, potions) drops where you "
+    "died and shows on the map as {glyph}; the death message gives its position and floor. Walk "
+    "onto that cell within {ttl} steps of the death to pick it all back up; after that it is "
+    "gone. Only your {limit} most recent drops are kept."
+)
+
+
 _MULTI = (
     "MULTIPLE ACTIONS (active for this run)\n"
     "You may play up to {n} actions in one reply. This replaces the single final "
@@ -277,8 +285,10 @@ _MULTI = (
 
 
 def system_prompt(
-    reasoning: bool, max_output_tokens: int | None, forfeit_mode: str, respawn: bool = False, max_actions: int = 1
+    reasoning: bool, max_output_tokens: int | None, forfeit_mode: str, respawn: bool = False, max_actions: int = 1,
+    graves: tuple[int, int] | None = None,
 ) -> str:
+    """``graves``: (ttl, limit) when a respawned death drops the inventory where it happened."""
     forfeit = _FORFEIT[forfeit_mode]
     if reasoning:
         if max_output_tokens is None:
@@ -305,7 +315,8 @@ def system_prompt(
                 f"tag, the action is discarded and the turn is forfeited ({forfeit}). "
             )
         fmt = _ACTION_ONLY_FORMAT.format(valid=", ".join(ACTION_NAMES), budget=budget)
-    game = GAME_PROMPT.replace(_TERMINATION, _CONTINUOUS) if respawn else GAME_PROMPT
+    continuous = _CONTINUOUS + (_GRAVES.format(glyph=GRAVE_GLYPH, ttl=graves[0], limit=graves[1]) if graves else "")
+    game = GAME_PROMPT.replace(_TERMINATION, continuous) if respawn else GAME_PROMPT
     blocks = [game, OBSERVATION_CONVENTIONS, fmt] + ([_MULTI.format(n=max_actions)] if max_actions > 1 else [])
     return "\n\n---\n".join(blocks)
 
@@ -385,6 +396,7 @@ class Step:
     done: bool
     unlocked: list[str]
     fast_forward_ticks: int
+    note: str = ""  # what else the step did that the snapshots do not say (picking up dropped items)
 
 
 def _failed_build(name: str, before: dict) -> str:
@@ -404,6 +416,30 @@ def _failed_build(name: str, before: dict) -> str:
         return "nothing placed: needs " + ", ".join(needs)
     target = "a creature" if before["mob_ahead"] else before["ahead"]
     return f"nothing placed: the cell ahead ({target}) can't take it"
+
+
+GRAVE_GLYPH = "⊕"  # not in the fork's table (its own "⚰" is the graveyard's grave marker)
+GRAVE_LEGEND = "dropped items (yours: walk onto the cell to pick them up)"  # not "you...": visible() skips those
+_COUNTS = ("wood", "stone", "coal", "iron", "diamond", "sapphire", "ruby", "sapling", "arrows", "torches", "books")
+_TOOLS = ("pickaxe", "sword", "bow")
+_TIER = {1: "wood", 2: "stone", 3: "iron", 4: "diamond"}
+
+
+def _carried(inv: Any, ench: dict) -> dict:
+    """The inventory (and enchantments) as plain numpy, for a grave."""
+    items = {k: int(np.asarray(getattr(inv, k))) for k in _COUNTS + _TOOLS}
+    items["potions"] = np.asarray(inv.potions).astype(int).tolist()
+    items["armour"] = np.asarray(inv.armour).astype(int).tolist()
+    return {"items": items, "ench": {k: np.asarray(v).astype(int).tolist() for k, v in ench.items()}}
+
+
+def _describe(items: dict) -> str:
+    parts = [f"{k} {items[k]}" for k in _COUNTS if items[k]]
+    parts += [f"{_TIER.get(items[t], '?')} {t}" for t in ("pickaxe", "sword") if items[t]]
+    parts += ["bow"] if items["bow"] else []
+    parts += [f"{sum(items['potions'])} potions"] if sum(items["potions"]) else []
+    parts += [f"{sum(1 for a in items['armour'] if a)} armour pieces"] if any(items["armour"]) else []
+    return ", ".join(parts) or "nothing"
 
 
 class CraftaxGame:
@@ -426,6 +462,11 @@ class CraftaxGame:
         self.show_ahead = False  # the HUD names the faced cell and its absolute position (env.ahead_in_hud)
         self.grid_coords = False  # the grid's rows and columns are labeled with absolute positions (env.grid_coords)
         self.visible_list = False  # a [Visible] line lists what is on screen with absolute positions (env.visible_list)
+        # death_inventory = "drop_grave": what each death dropped, where, until when (env.grave_*)
+        self.graves: list[dict] = []
+        self.grave_limit, self.grave_ttl = 3, 300
+        self.grave_stats: dict[str, int] = {"dropped": 0, "recovered": 0, "expired": 0, "replaced": 0}
+        self.dropped: dict | None = None  # the grave the last respawn left, if any
 
     def dump(self) -> dict[str, Any]:
         """Everything ``restore`` needs to continue this game in another process: the
@@ -437,6 +478,8 @@ class CraftaxGame:
             "turn": self.turn,
             "message": self.message,
             "spawn": self.spawn,
+            "graves": self.graves,
+            "grave_stats": self.grave_stats,
         }
 
     def restore(self, saved: dict[str, Any]) -> None:
@@ -447,6 +490,8 @@ class CraftaxGame:
         self.turn = int(saved["turn"])
         self.message = saved["message"]
         self.spawn = tuple(saved["spawn"])
+        self.graves = list(saved.get("graves", []))
+        self.grave_stats = {**self.grave_stats, **saved.get("grave_stats", {})}
         self.achievements = self._achievement_names()
 
     # state accessors
@@ -482,13 +527,27 @@ class CraftaxGame:
         """Undo a death: back on the Overworld at the free cell nearest the world's spawn
         point, vitals at their maximum, sleep/rest and the vitals' counters reset, the
         inventory per ``death_inventory`` ("drop_all": everything, enchantments included;
-        "drop_materials": materials and consumables, tools and armour kept; "keep").
-        Achievements, XP, attributes, learned spells and the world itself stay."""
+        "drop_grave": everything, left where the player died for ``grave_ttl`` turns (see
+        ``graves``); "drop_materials": materials and consumables, tools and armour kept;
+        "keep"). Achievements, XP, attributes, learned spells and the world itself stay."""
         jnp = self._rt["jax"].numpy
         st, U = self.state, self._rt["max_vitals"]
+        self.dropped = None
+        if death_inventory == "drop_grave":
+            ench = {"sword": st.sword_enchantment, "bow": st.bow_enchantment, "armour": st.armour_enchantments}
+            grave = _carried(st.inventory, ench)
+            if _describe(grave["items"]) != "nothing":
+                floor = self.floor
+                grave.update(floor=floor, pos=self._free_cell(self.position, floor=floor, avoid_mobs=False), at=self.turn)
+                self.graves.append(grave)
+                self.grave_stats["dropped"] += 1
+                while len(self.graves) > self.grave_limit:
+                    self.graves.pop(0)
+                    self.grave_stats["replaced"] += 1
+                self.dropped = grave
         at = self._free_cell(self.spawn)
         inventory, extra = st.inventory, {}
-        if death_inventory == "drop_all":
+        if death_inventory in ("drop_all", "drop_grave"):
             inventory = self._rt["empty_inventory"]()
             extra = {
                 "sword_enchantment": jnp.zeros_like(st.sword_enchantment),
@@ -521,11 +580,12 @@ class CraftaxGame:
         )
         return at
 
-    def _free_cell(self, target: tuple[int, int], radius: int = 16) -> tuple[int, int]:
-        """The walkable, mob-free Overworld cell nearest ``target`` (ring by ring)."""
-        level = np.asarray(self.state.map[0])
-        mobs = np.asarray(self.state.mob_map[0])
-        blocked = self._rt["not_walkable"][level] | mobs
+    def _free_cell(self, target: tuple[int, int], radius: int = 16, floor: int = 0, avoid_mobs: bool = True) -> tuple[int, int]:
+        """The walkable (and, by default, mob-free) cell of ``floor`` nearest ``target`` (ring by ring)."""
+        level = np.asarray(self.state.map[floor])
+        blocked = self._rt["not_walkable"][level]
+        if avoid_mobs:
+            blocked = blocked | np.asarray(self.state.mob_map[floor])
         r0, c0 = target
         for d in range(radius + 1):
             for r in range(r0 - d, r0 + d + 1):
@@ -604,6 +664,44 @@ class CraftaxGame:
             what += "; " + ", ".join(vitals)
         return f"{name}: {what}."
 
+    def _expire_graves(self) -> None:
+        keep = [g for g in self.graves if self.turn - g["at"] <= self.grave_ttl]
+        self.grave_stats["expired"] += len(self.graves) - len(keep)
+        self.graves = keep
+
+    def _pick_up(self) -> str:
+        """Walking onto a grave's cell takes everything back: counts add up (to 99), tools and
+        armour keep the better of carried and dropped, with that one's enchantment."""
+        here = [g for g in self.graves if g["floor"] == self.floor and tuple(g["pos"]) == self.position]
+        if not here:
+            return ""
+        jnp = self._rt["jax"].numpy
+        notes = []
+        for g in here:
+            self.graves.remove(g)
+            self.grave_stats["recovered"] += 1
+            st, items, ench = self.state, g["items"], g["ench"]
+            inv = st.inventory
+            new = {k: min(99, int(np.asarray(getattr(inv, k))) + items[k]) for k in _COUNTS}
+            new["potions"] = np.minimum(99, np.asarray(inv.potions) + np.asarray(items["potions"]))
+            extra = {}
+            for tool, field in (("sword", "sword_enchantment"), ("bow", "bow_enchantment")):
+                have, got = int(np.asarray(getattr(inv, tool))), items[tool]
+                new[tool] = max(have, got)
+                mine = int(np.asarray(getattr(st, field)))
+                extra[field] = ench[tool] if got > have else max(mine, ench[tool]) if got == have else mine
+            new["pickaxe"] = max(int(np.asarray(inv.pickaxe)), items["pickaxe"])
+            have_a, got_a = np.asarray(inv.armour), np.asarray(items["armour"])
+            new["armour"] = np.maximum(have_a, got_a)
+            mine_e, got_e = np.asarray(st.armour_enchantments), np.asarray(ench["armour"])
+            extra["armour_enchantments"] = np.where(got_a > have_a, got_e, np.where(got_a == have_a, np.maximum(mine_e, got_e), mine_e))
+            self.state = st.replace(
+                inventory=inv.replace(**{k: jnp.asarray(v, dtype=getattr(inv, k).dtype) for k, v in new.items()}),
+                **{k: jnp.asarray(v, dtype=getattr(st, k).dtype) for k, v in extra.items()},
+            )
+            notes.append(f"You picked up the items you dropped at ({g['pos'][0]},{g['pos'][1]}): {_describe(items)}.")
+        return " ".join(notes)
+
     def _achievement_names(self) -> set[str]:
         got = np.asarray(self.state.achievements)
         return {a.name.lower() for a in self._rt["achievements"] if bool(got[int(a.value)])}
@@ -632,6 +730,8 @@ class CraftaxGame:
             ticks += 1
         self.achievements = self._achievement_names()
         unlocked = sorted(self.achievements - before)
+        self._expire_graves()
+        pickup = "" if done else self._pick_up()
         note = f" Fast-forwarded {ticks} sleep/rest tick{'s' if ticks != 1 else ''}." if ticks else ""
         if capped:
             note += " Fast-forward cap reached; state may still be asleep/resting."
@@ -639,18 +739,45 @@ class CraftaxGame:
         self.message = f"Last action {name} ({upstream}) yielded reward {reward:+.3f}.{note}"
         if unlocked:
             self.message += f" New achievements: {', '.join(unlocked)}."
-        return Step(reward, done or self.out_of_turns, unlocked, ticks)
+        if pickup:
+            self.message += " " + pickup
+        return Step(reward, done or self.out_of_turns, unlocked, ticks, pickup)
 
     def forfeit(self) -> bool:
         """GlyphBench's "freeze": the turn counts, the world does not move. True if
         that was the last turn."""
         self.turn += 1
+        self._expire_graves()
         return self.out_of_turns
 
     def render(self) -> tuple[str, str, str, str]:
         """(legend, grid, hud, message) of the current state."""
         rendered = api.render_craftax_unicode_grid_local(self.state)
-        return rendered.legend, rendered.grid, self._hud(np.asarray(rendered.status_data)), self.message
+        legend, grid = rendered.legend, rendered.grid
+        if self.graves:
+            grid, shown = self._draw_graves(grid)
+            if shown:
+                legend = "\n".join(sorted([*legend.splitlines(), f"{GRAVE_GLYPH} — {GRAVE_LEGEND}"]))
+        return legend, grid, self._hud(np.asarray(rendered.status_data)), self.message
+
+    def _draw_graves(self, grid: str) -> tuple[str, bool]:
+        """Put ``GRAVE_GLYPH`` on this floor's graves in view: not under a creature, the
+        player or an unseen (dark) cell."""
+        rows = [list(row) for row in grid.split("\n")]
+        r, c = self.position
+        r0, c0 = r - len(rows) // 2, c - len(rows[0]) // 2
+        mobs = np.asarray(self.state.mob_map[self.floor])
+        shown = False
+        for g in self.graves:
+            gr, gc = g["pos"]
+            i, j = gr - r0, gc - c0
+            if g["floor"] != self.floor or not (0 <= i < len(rows) and 0 <= j < len(rows[i])) or (gr, gc) == (r, c):
+                continue
+            if rows[i][j].isspace() or bool(mobs[gr, gc]):
+                continue
+            rows[i][j] = GRAVE_GLYPH
+            shown = True
+        return "\n".join("".join(row) for row in rows), shown
 
     def ahead(self) -> str:
         """The faced cell, "(row,col) what": a creature, a block or the map edge."""
