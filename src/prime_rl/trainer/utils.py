@@ -162,6 +162,15 @@ def bind_process_to_gpu_numa_node() -> None:
             cpus.update(range(int(start), int(end) + 1))
         else:
             cpus.add(int(part))
+    # A scheduler (e.g. a Slurm cpuset) may give this job only some of the node's CPUs, possibly none
+    # on this GPU's node: setting CPUs outside the allowed set fails with EINVAL.
+    allowed = os.sched_getaffinity(0)
+    if not cpus & allowed:
+        logger.warning(
+            f"None of NUMA node {numa_node}'s CPUs (GPU {device_id}) are allowed for this process; skipping NUMA binding"
+        )
+        return
+    cpus &= allowed
     os.sched_setaffinity(0, cpus)
     logger.info(f"Bound rank with GPU {device_id} to NUMA node {numa_node} ({len(cpus)} CPUs)")
 
