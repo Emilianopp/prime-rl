@@ -431,6 +431,20 @@ def requirements(game: Any, explored: np.ndarray, targets: list[str]) -> tuple[l
     return achs, mats, feats
 
 
+def requirement_units(game: Any, explored: np.ndarray, target: str) -> int:
+    """What still separates the player from `target`, in countable pieces: the achievements of its
+    requirement chain not done yet (the target itself included, plus the providers of capabilities it
+    lacks: a pickaxe level, a table or furnace on this floor) and the material units still missing for
+    them (costs summed, as `requirements`). adherence_mode = "target" scores a segment by how many it removed."""
+    achs, _, _ = requirements(game, explored, [target])
+    items = game.snapshot()["items"]
+    need: dict[str, int] = {}
+    for a in achs:
+        for k, n in _cost(a).items():
+            need[k] = need.get(k, 0) + n
+    return len(achs) + sum(max(0, n - int(items.get(k, 0))) for k, n in need.items())
+
+
 def critical_path(game: Any, explored: np.ndarray, steps: int = 1) -> tuple[list[str], set[str], set[str]]:
     """The next `steps` unmet LADDER steps (a pickaxe lost at a death counts as unmet) with, recursively,
     the providers of the capabilities they lack: (achievements, materials still missing, features to find)."""

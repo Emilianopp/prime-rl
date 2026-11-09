@@ -997,6 +997,21 @@ def code_adherence_verdict(info: dict[str, Any], near_tiles: int = CODE_NEAR_TIL
     return {"score": float(score), "statuses": statuses, "rationale": rationale, "failed": False}
 
 
+def target_adherence_verdict(info: dict[str, Any]) -> dict[str, Any]:
+    """`adherence_mode = "target"` (2026-11-09): the fraction of the pieces (world.requirement_units) between
+    the player and the parent plan's target (its first subgoal for an achievement not yet unlocked) that the
+    segment removed, 1.0 when it unlocked the target, clipped at 0 (a death that drops the tools adds pieces).
+    A parent plan that names no new achievement scores 0. No LLM call."""
+    tp = info.get("target_progress")
+    if not tp:
+        return {"score": 0.0, "statuses": {}, "failed": False, "rationale": "the parent plan names no new achievement",
+                "target": None}
+    note = f"target {tp['target']}: {tp['units']} pieces missing at the start, {tp['units_end']} at the end"
+    return {"score": float(tp["score"]), "statuses": {}, "failed": False,
+            "rationale": note + (" (unlocked)" if tp.get("unlocked") else ""), "target": tp["target"],
+            "target_unlocked": bool(tp.get("unlocked"))}
+
+
 async def judge_adherence(
     judge: CraftaxAdherenceJudge,
     trace: Any,

@@ -131,10 +131,17 @@ if it is night then wall in with stone next to the table F0 (25,30) and sleep
 
 Be specific. Reply with <notes>...</notes> only, no <action> tag."""
 
+PLAN_PROMPT_NO_FINDINGS = 'Your notes for the next segment. This reply is not a game turn: no action will be played. The game continues from exactly this state in a fresh context, which will show the game\'s own record of your state, the KNOWN PLACES, TURNS LOST and EVENT LOG above, so do not copy any of them. Write only what the game cannot: what you will do and why, inside <notes>...</notes>, under these two headers:\n\nPLAN: 2 to 4 numbered subgoals in order, one per line: `N. <achievement or item count> at <place> - done when <what the HUD will show>`. Take every place from KNOWN PLACES as written there, F<floor> (row,col); for something never seen, give a direction to search. Subgoal 1 is the step that is marked "needed next" unless a vital or a danger comes first, and then say so. Plan only achievements that are not in [Achievements already unlocked], or item counts you do not hold yet, and make sure each subgoal has its tools and station from the inventory or an earlier subgoal.\n\nSURVIVAL: one or two rules, each `if <vital or condition> then <what to do, where>`, with places from KNOWN PLACES.\n\nAn example from a different game (its places and facts are not yours, do not copy them):\n<notes>\nPLAN:\n1. 2 wood from the trees near F0 (22,31), going around the lake by its south shore - done when Wood:2\n2. make_stone_pickaxe at the table F0 (25,30) - done when the HUD shows a stone pickaxe\n3. collect_iron at F0 (14,36) - done when Iron:1\nSURVIVAL:\nif drink < 4 then drink at the water F0 (27,26)\nif it is night then wall in with stone next to the table F0 (25,30) and sleep\n</notes>\n\nBe specific. Reply with <notes>...</notes> only, no <action> tag.'
+"""PLAN_PROMPT without the FINDINGS section (`notes_findings = False`, 2026-11-09): the game already writes
+the event log and the turns lost, and the model's causes were mostly invented mechanics."""
+
+
 PLAN_RETRY = """\
 END OF SEGMENT, still: the game is paused and no action will be played now. Write the notes \
 for the next segment inside <notes>...</notes>, under the headers FINDINGS, PLAN and SURVIVAL as \
 asked above, with places as KNOWN PLACES writes them. Do not output an <action> tag."""
+
+PLAN_RETRY_NO_FINDINGS = PLAN_RETRY.replace("the headers FINDINGS, PLAN and SURVIVAL", "the headers PLAN and SURVIVAL")
 
 EVENT_LOG_LINES = 15
 EVENT_LOG_HEADER = "EVENT LOG of the previous segment (written by the game{tail})"

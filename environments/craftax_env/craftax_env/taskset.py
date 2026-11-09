@@ -45,7 +45,9 @@ from craftax_env.segments import (
     SUMMARY_PROMPT,
     SUMMARY_RETRY,
     PLAN_PROMPT,
+    PLAN_PROMPT_NO_FINDINGS,
     PLAN_RETRY,
+    PLAN_RETRY_NO_FINDINGS,
     PLAN_SECTIONS,
     SECTIONS,
     event_log,
@@ -73,6 +75,7 @@ from craftax_env.judge import (
     apply_adherence,
     apply_verdict,
     code_adherence_verdict,
+    target_adherence_verdict,
     group_adherence_verdicts,
     group_verdicts,
     judge_adherence,
@@ -101,6 +104,16 @@ def _retry_why(failure: str | None, finish: str | None) -> str:
     if failure == "unknown_name":
         return "an action name that is not in the action list"
     return "no <action> tag before the output limit" if finish == "length" else "no <action> tag"
+
+
+def _target_progress(start: dict[str, Any] | None, game: Any, explored: Any, before: list[str]) -> dict[str, Any] | None:
+    """adherence_mode = "target": the parent target's pieces at the start and the end of the segment, and the score."""
+    if start is None:
+        return None
+    unlocked = start["target"] in set(game.achievements) - set(before)
+    end = world.requirement_units(game, explored, start["target"])
+    score = 1.0 if unlocked else (max(0.0, (start["units"] - end) / start["units"]) if start["units"] > 0 else 0.0)
+    return {**start, "units_end": end, "unlocked": unlocked, "score": float(score)}
 
 
 class CraftaxData(vf.TaskData):
@@ -320,10 +333,16 @@ class CraftaxEnvConfig(vf.EnvConfig):
     adherence_weight: float = Field(0.0, ge=0.0)
     """Weight of the `adherence` reward (0: off; arm C: 0.25). `judge_mode` applies as for the notes when
     `adherence_mode` is "judge". The digest is logged whenever a segment has a parent PLAN."""
-    adherence_mode: Literal["judge", "code"] = "code"
+    adherence_mode: Literal["judge", "code", "target"] = "code"
     """`code` (2026-11-04): the statuses come from the digest alone (judge.code_adherence_verdict: done by
     code, attempted = came within 2 tiles of the subgoal's place, else ignored; subgoals code cannot check
-    are not scored), no LLM call and no gate. `judge`: the LLM status list gated by the parent's plan score."""
+    are not scored), no LLM call and no gate. `judge`: the LLM status list gated by the parent's plan score.
+    `target` (2026-11-09): progress toward the parent plan's target, its first subgoal for an achievement not yet
+    unlocked: the fraction of world.requirement_units removed in the segment (1.0 when the target unlocks, 0 when
+    the plan names no new achievement); judge.target_adherence_verdict, no LLM call."""
+    notes_findings: bool = True
+    """`code_facts`: ask for FINDINGS in the notes (segments.PLAN_PROMPT). False (2026-11-09): PLAN and SURVIVAL
+    only (PLAN_PROMPT_NO_FINDINGS); the game already writes the event log and the turns lost."""
     adherence_gated: bool = False
     """`code` mode: gate the adherence reward by the parent's plan score as `judge` mode does (reward = plan score x
     adherence score; 0.5 when the parent has no plan score), so following a plan pays in proportion to its quality."""
@@ -435,7 +454,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
 
     def adhering(self) -> bool:
         cfg = self.config
-        return cfg.adherence_weight > 0 and (cfg.adherence_mode == "code" or cfg.judge is not None)
+        return cfg.adherence_weight > 0 and (cfg.adherence_mode in ("code", "target") or cfg.judge is not None)
 
     def _adherence_rendezvous(self) -> GroupRendezvous:
         rv = self.__dict__.get("_adherence_rendezvous_obj")
@@ -508,9 +527,10 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             return
         if not digest.get("subgoals"):
             skip_adherence(trace, weight=cfg.adherence_weight, reason="no parent plan", episode_log=cfg.episode_log)
-        elif cfg.adherence_mode == "code":
-            apply_adherence(trace, code_adherence_verdict(info), weight=cfg.adherence_weight, timing={"call_s": 0.0},
-                            episode_log=cfg.episode_log, mode="code", gated=cfg.adherence_gated)
+        elif cfg.adherence_mode in ("code", "target"):
+            verdict = target_adherence_verdict(info) if cfg.adherence_mode == "target" else code_adherence_verdict(info)
+            apply_adherence(trace, verdict, weight=cfg.adherence_weight, timing={"call_s": 0.0},
+                            episode_log=cfg.episode_log, mode=cfg.adherence_mode, gated=cfg.adherence_gated)
         elif rendezvous and cfg.judge_mode == "group" and info.get("parent"):
             await judge_adherence_group(self._adherence_rendezvous(), CraftaxAdherenceJudge(cfg.judge),
                                         CraftaxGroupAdherenceJudge(cfg.judge), trace, weight=cfg.adherence_weight,
@@ -623,7 +643,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             return
         graded = [r for r in done if (r["trace"].info.get("craftax") or {}).get("adherence_digest") is not None]
         with_plan = [r for r in graded if r["trace"].info["craftax"]["adherence_digest"].get("subgoals")]
-        if cfg.adherence_mode == "code" or len(with_plan) <= 1 or len(with_plan) < len(graded):  # siblings share the plan
+        if cfg.adherence_mode in ("code", "target") or len(with_plan) <= 1 or len(with_plan) < len(graded):  # siblings share the plan
             for r in graded:
                 await self._grade_adherence(r["trace"], rendezvous=False)
             return
@@ -818,7 +838,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         score_before = game.achievement_score
         achievements_before = sorted(game.achievements)
         # The parent's PLAN, tracked for the adherence judge (segments below the root's children).
-        adherence = parent_plan_score = None
+        adherence = parent_plan_score = target_start = None
         if segmented and int(node.get("depth", 0)) > 0:
             names = [a.name.lower() for a in game._rt["achievements"]]
             # The parent wrote its PLAN in the view of this segment's first observation.
@@ -826,6 +846,12 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                                   view=(game.floor, *map(int, game.position)))
             adherence = AdherenceTracker(subgoals, game, achievements_before, explored, cfg.map_claim_tolerance)
             parent_plan_score = self._parent_plan_score(node)
+            if cfg.adherence_mode == "target":  # the parent's target, checked on the state the parent ended in
+                plan_check = check_plan(game, explored, parse_notes(notes_of_summary(node.get("summary")))["PLAN"],
+                                        view=(game.floor, *map(int, game.position)))
+                if plan_check.target:
+                    target_start = {"target": plan_check.target, "on_track": plan_check.on_track,
+                                    "units": world.requirement_units(game, explored, plan_check.target)}
         opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example, aid(), show_visible)
         total, done, end = 0.0, False, "terminated"  # terminated: the run stopped answering
         forfeits: Counter[str] = Counter()
@@ -1064,7 +1090,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         lambda: (f"{world.known_places(game, explored)}\n\n{exploration_aid(nav, game.floor)}\n\n"
                                  f"{wasted.text(turns)}\n\n{event_log(timeline.lines())}"))
                     message = (f"{NOTES_OPENER}\n\nThe state at the end of the segment:\n\n{shown}\n\n{facts}\n\n"
-                               f"[Achievements already unlocked]\n{unlocked}\n\n{cfg.summary_prompt or PLAN_PROMPT}")
+                               f"[Achievements already unlocked]\n{unlocked}\n\n{cfg.summary_prompt or (PLAN_PROMPT if cfg.notes_findings else PLAN_PROMPT_NO_FINDINGS)}")
                 else:
                     message = (f"{NOTES_OPENER}\n\nThe state at the end of the segment:\n\n{shown}\n\n"
                                f"[Achievements already unlocked]\n{unlocked}\n\n{cfg.summary_prompt or SUMMARY_PROMPT}")
@@ -1092,11 +1118,11 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     if cfg.summary_retry and retry_reason is not None and (cap is None or cap >= 256):
                         notes_retried = True
                         async with _turn_sampling(interaction, cap):
-                            reply = await interaction.turn(PLAN_RETRY if cfg.code_facts else SUMMARY_RETRY)
+                            reply = await interaction.turn((PLAN_RETRY if cfg.notes_findings else PLAN_RETRY_NO_FINDINGS) if cfg.code_facts else SUMMARY_RETRY)
                         if not reply.terminated:
                             content, thinking, _ = reply_parts(reply, interaction.trace)
                             if logging_turns:
-                                notes_rows.append({"obs": PLAN_RETRY if cfg.code_facts else SUMMARY_RETRY,
+                                notes_rows.append({"obs": (PLAN_RETRY if cfg.notes_findings else PLAN_RETRY_NO_FINDINGS) if cfg.code_facts else SUMMARY_RETRY,
                                                    "reasoning": thinking, "content": content})
                             notes = extract_notes(content, thinking) or notes
                 if reply.terminated:
@@ -1228,6 +1254,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "forfeit_kinds": dict(tracker.kinds), "ended_at": time.time(), **judge_inputs,
                 "adherence_digest": adherence.digest() if adherence is not None else None,
                 "parent_plan_score": parent_plan_score,
+                "target_progress": _target_progress(target_start, game, explored, achievements_before),
             })
         trace.info["craftax"] = info
         if cfg.episode_log:
@@ -1264,7 +1291,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     "map_claims", "map_check", "map_claim_counts", "actions_hist", "forfeit_kinds", "adherence_digest",
                     "parent_plan_score", "code_facts", "facts", "plan_feasible", "plan_on_path", "plan_on_track",
                     "plan_target", "critical_path", "plan_check", "findings_count", "turns_lost", "turns_lost_total",
-                    "achievement_score_before", "state_value", "state_parts") if k in info}
+                    "achievement_score_before", "state_value", "state_parts", "target_progress") if k in info}
                     | {"state_bytes": state_bytes, "explored_cells": int(explored.sum())})
             with open(cfg.episode_log, "a") as f:
                 f.write(json.dumps(line) + "\n")
