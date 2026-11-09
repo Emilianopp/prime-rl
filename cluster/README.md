@@ -34,6 +34,8 @@ cluv submit fir --time=1:00:00 -- bash smoke.sh          # 2-step smoke test of 
 cluv submit first --time=12:00:00 -- env CONFIG=configs/craftax/rl-qv-mem.toml ENVS=craftax_env \
     bash ../scripts/kv_streams/rl.sbatch                 # race all clusters, keep the first to start
 cluv status                               # queues + GPU availability everywhere
+cluv run fir -- env CONFIG=configs/craftax/rl-qv-grave.toml BUDGET=30 bash rl_chain.sh
+                                          # judge-RL chain of 3 h blocks on one cluster (games and weights carry over)
 ```
 
 - Jobs run `job.sh <command>` from `cluster/`, with `env.sh` loaded. `env.sh` sets the paths, caches,
