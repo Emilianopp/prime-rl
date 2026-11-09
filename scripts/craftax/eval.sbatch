@@ -29,6 +29,7 @@
 # entries capped at N tokens - the model's own memory, kept across segments and resumes),
 # WEIGHTS (a HF weights dir, e.g. a trainer's run/broadcasts/step_N: loaded into the
 # engines before the eval).
+# EXTRA_TOML (a TOML fragment appended to the eval config, e.g. cluster/rlmem-eval.toml).
 set -u
 KEEP=${KEEP:-50} N=${N:-64} CONC=${CONC:-64} SKIP=${SKIP:-0} TURN_TOKENS=${TURN_TOKENS:-2048} NO_THINKING=${NO_THINKING:-}
 TIME_LIMIT=${TIME_LIMIT:-} STEPS=${STEPS:-} SEGMENTS=${SEGMENTS:-} CONTINUOUS=${CONTINUOUS:-} FEEDBACK=${FEEDBACK:-} MAX_ACTIONS=${MAX_ACTIONS:-} CRAFTAX_PY=${CRAFTAX_PY:-} STATE_DIR=${STATE_DIR:-} MEMORY=${MEMORY:-} WEIGHTS=${WEIGHTS:-}
@@ -92,6 +93,7 @@ elif [ -n "$SEGMENTS" ]; then
   IFS=: read -r SEG_B SEG_S <<< "$SEGMENTS"
   sed -i "s/^env.player.segments.new_tokens = .*/env.player.segments.new_tokens = $SEG_B/; s/^env.player.segments.summary_tokens = .*/env.player.segments.summary_tokens = $SEG_S/" "$OUT/eval.toml"
 fi
+[ -n "${EXTRA_TOML:-}" ] && cat "$EXTRA_TOML" >> "$OUT/eval.toml"
 uv run eval @ "$OUT/eval.toml" --clean --output-dir "$OUT/run" --dashboard false \
   ${WEIGHTS:+--client.skip-model-check true} \
   --select.skip "$SKIP" --select.limit "$N" --concurrency.min-inflight "$CONC" --concurrency.max-inflight "$CONC" \

@@ -9,12 +9,12 @@
 # action feedback, the player's memory). Games run on the clock, not to a step limit,
 # and each segment ships to training when the next one opens (stream_segments). At every
 # segment boundary the env writes the true state (env.state_log); the trace_credit
-# algorithm has Gemini grade it: Q = V + G*(1 - D) from the state (V), the gain a good
+# algorithm has an LLM judge grade it: Q = V + G*(1 - D) from the state (V), the gain a good
 # agent could make by the next reset (G*) and the flaws of the handoff summary written
 # there (D). A segment's reward is clip((Q_end - Q_start) / max(G*_start, 1), -1, 1),
 # its advantage that minus a running baseline. No game reward, no format terms. Judge
 # calls stop at a dollar cap, which writes $OUT/STOP and ends the run.
-# 2 trainer + 2 inference GPUs (A100-80GB), one node; GEMINI_API_KEY from the repo's .env.
+# 2 trainer + 2 inference GPUs (A100-80GB), one node; the judge's API key from the repo's .env.
 #
 #   CONFIG=configs/craftax/rl-qv.toml ENVS=craftax_env \
 #     ARGS='--orchestrator.train.algo.log-path $OUT/qv.jsonl' sbatch -p long scripts/kv_streams/rl.sbatch
@@ -46,7 +46,10 @@ group_size = 1  # a streamed segment is its own group: the baseline is a running
 [orchestrator.train.algo]
 type = "trace_credit"
 scorer = "craftax_env.qv:score_segment"
-scorer_args = { state_dir = "$OUT/qv_states", model = "gemini-3.1-flash-lite", cost_cap = 10.0, price_in = 0.25, price_out = 1.5, stop_path = "$OUT/STOP" }
+# Judge: gpt-6-luna at reasoning_effort low (OpenAI; key OPENAI_API_KEY from the repo's .env).
+# Blocks before w0049 were judged by gemini-3.1-flash-lite (temperature 0.2).
+# From w0061 on: R minus 0.05 per death in the segment (before the clip to [-1, 1]).
+scorer_args = { state_dir = "$OUT/qv_states", model = "gpt-6-luna", url = "https://api.openai.com/v1/chat/completions", key_var = "OPENAI_API_KEY", params = { reasoning_effort = "low" }, death_penalty = 0.05, cost_cap = 10.0, price_in = 0.10, price_out = 0.50, stop_path = "$OUT/STOP" }
 
 [orchestrator.concurrency]
 # 64 games, each always playing: 32 per inference engine.
@@ -80,6 +83,11 @@ env.death_inventory = "drop_all"
 env.reward = "achievements"  # recorded on a game's last segment only; trace_credit ignores it
 env.action_feedback = true
 env.state_log = "$OUT/qv_states"
+# The same worlds play on across a chain's blocks (scripts/kv_streams/qv/chain.sbatch exports
+# CHAIN): each game resumes from its save, written every 10 replies (a block's time limit kills
+# the job mid-game, so a game loses at most 10 replies and resumes with its last summary).
+env.state_dir = "$CHAIN/worlds"
+env.save_every = 10
 # The summary turn starts at new_tokens - summary_tokens = 98304 new tokens, as in the eval
 # (131072 - 32768); 8192 tokens hold the summary reply (max_completion_tokens 2048).
 env.player.segments.new_tokens = 106496

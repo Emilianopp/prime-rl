@@ -70,6 +70,13 @@ class CraftaxConfig(vf.TasksetConfig):
     respawn: bool = False
     """State GlyphBench's TASK block for continuous play: a death respawns the player and
     there is no turn limit (match the env's ``on_death`` and ``max_episode_steps = 0``)."""
+    death_drops: bool = False
+    """With ``respawn``: say that a death drops the inventory where it happened, to be picked
+    up within ``grave_ttl`` steps (match the env's ``death_inventory = "drop_grave"``)."""
+    grave_ttl: int = Field(300, ge=1)
+    """The steps the prompt says a drop lasts (match the env's ``grave_ttl``)."""
+    grave_limit: int = Field(3, ge=1)
+    """The drops the prompt says are kept (match the env's ``grave_limit``)."""
     episodes: list[int] | None = None
     """Play only these episode indices of the split (None: the first ``num_examples``)."""
     variants: int = Field(1, ge=1)
@@ -95,9 +102,15 @@ class CraftaxEnvConfig(vf.EnvConfig):
     """`end`: death ends the episode, as in Craftax and GlyphBench. `respawn`: the player
     comes back on the Overworld at the free cell nearest the world's spawn point with
     full vitals, in the same world and trace, achievements, XP and attributes kept."""
-    death_inventory: Literal["drop_all", "drop_materials", "keep"] = "drop_all"
-    """What a death takes: every item (enchantments too), the materials and consumables
-    but not the tools and armour, or nothing."""
+    death_inventory: Literal["drop_all", "drop_grave", "drop_materials", "keep"] = "drop_all"
+    """What a death takes: every item (enchantments too); every item, but left where the
+    player died (shown as ⊕) to pick up by walking onto it within ``grave_ttl`` steps;
+    the materials and consumables but not the tools and armour; or nothing."""
+    grave_ttl: int = Field(300, ge=1)
+    """``drop_grave``: game steps (forfeited turns included) a drop stays before it is gone.
+    300 is one Craftax day; most deaths are 8-25 cells from the respawn point."""
+    grave_limit: int = Field(3, ge=1)
+    """``drop_grave``: drops kept at once; a newer death removes the oldest."""
     death_penalty: float = Field(0.0, ge=0.0)
     """Subtracted from the episode reward per death (the reward is out of 1: 1/226 is one
     tier-1 achievement)."""
@@ -120,7 +133,7 @@ class CraftaxEnvConfig(vf.EnvConfig):
     episode_log: str | None = None
     """Append one JSON line per finished episode (wall-clock start/end, return, achievements) to this file."""
     state_dir: str | None = None
-    """Save each game to ``{state_dir}/{seed}.pkl`` (a taskset's variants: ``{seed}-{variant}.pkl``)
+    """(Environment variables expanded, e.g. ``$CHAIN/worlds``.) Save each game to ``{state_dir}/{seed}.pkl`` (a taskset's variants: ``{seed}-{variant}.pkl``)
     every ``save_every`` turns and when the episode ends, and resume it from there: a
     chain of jobs plays the same worlds
     on. At ``max_episode_seconds`` the model first writes a handoff summary (the
@@ -180,6 +193,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         game.show_ahead = self.config.ahead_in_hud
         game.grid_coords = self.config.grid_coords
         game.visible_list = self.config.visible_list
+        game.grave_ttl, game.grave_limit = self.config.grave_ttl, self.config.grave_limit
         total, done, end = 0.0, False, "terminated"  # terminated: the run stopped answering
         forfeits: Counter[str] = Counter()
         actions: Counter[str] = Counter()
@@ -191,7 +205,10 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         segments = self.config.player.segments
         header = segments.summary_header if segments is not None else None
         key = f"{seed}-{task.data.info['variant']}" if "variant" in task.data.info else f"{seed}"
-        path = os.path.join(self.config.state_dir, f"{key}.pkl") if self.config.state_dir else None
+        state_dir = os.path.expandvars(self.config.state_dir) if self.config.state_dir else None
+        if state_dir:
+            os.makedirs(state_dir, exist_ok=True)
+        path = os.path.join(state_dir, f"{key}.pkl") if state_dir else None
         saved = await asyncio.to_thread(_load_state, path) if path else None
         block, played_before, summary = 0, 0.0, None
         if saved is not None:
@@ -255,7 +272,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         game.message = f"Your last reply had {why}, so the turn was forfeited: the world did not move."
                 else:
                     indices = indices or [glyph.NOOP]
-                    lines, reward_sum, unlocked, played = [], 0.0, [], 0
+                    lines, reward_sum, unlocked, played, pickups = [], 0.0, [], 0, []
                     for index in indices:
                         played += 1
                         actions[glyph.ACTION_NAMES[index]] += 1
@@ -274,7 +291,10 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         max_floor = max(max_floor, game.floor)
                         if feedback:
                             note = f" Fast-forwarded {step.fast_forward_ticks} sleep/rest ticks." if step.fast_forward_ticks else ""
+                            note += f" {step.note}" if step.note else ""
                             lines.append(game.feedback(index, before, game.snapshot()) + note)
+                        elif step.note:
+                            pickups.append(step.note)
                         if done:
                             break
                     per_turn[played] += 1
@@ -286,6 +306,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         game.message = " ".join(filter(None, [
                             head, body,
                             f"New achievements: {', '.join(unlocked)}." if unlocked else "",
+                            " ".join(pickups),
                             f"{dropped} more action tag{'s were' if dropped != 1 else ' was'} not played "
                             f"(at most {max_actions} per reply, and a run stops at an unknown name)." if dropped else "",
                         ]))
@@ -293,9 +314,12 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 if done and died and not game.out_of_turns and self.config.on_death == "respawn":
                     where = {"turn": game.turn, "floor": game.floor, "pos": list(game.position)}
                     at = await asyncio.to_thread(game.respawn, self.config.death_inventory)
-                    deaths.append({**where, "respawn": list(at)})
+                    deaths.append({**where, "respawn": list(at), **({"dropped": game.dropped is not None} if self.config.death_inventory == "drop_grave" else {})})
+                    g = game.dropped
                     lost = {
                         "drop_all": "lost your inventory",
+                        "drop_grave": (f"dropped your inventory ({glyph._describe(g['items'])}) at ({g['pos'][0]},{g['pos'][1]}) on floor {g['floor']}: "
+                                       f"walk onto that cell by step {g['at'] + game.grave_ttl} to pick it up" if g else "had nothing to drop"),
                         "drop_materials": "lost your materials (tools and armour kept)",
                         "keep": "kept your inventory",
                     }
@@ -378,6 +402,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "ended_by": end,
                 "survived": game.health > 0,
                 "max_floor": max_floor,
+                **({"graves": dict(game.grave_stats)} if self.config.death_inventory == "drop_grave" else {}),
                 "seed": seed,
                 "block": block,  # jobs this game has run in before this one (state_dir)
                 "played_seconds": played_before + time.time() - started,
@@ -393,7 +418,8 @@ class CraftaxTaskset(vf.Taskset[CraftaxTask, CraftaxConfig]):
     def load(self) -> Iterator[CraftaxTask]:
         cfg = self.config
         base = cfg.seed + (1_000_000 if cfg.split == "eval" else 0)
-        system = glyph.system_prompt(cfg.enable_reasoning, cfg.max_output_tokens, cfg.forfeit_mode, cfg.respawn, cfg.max_actions_per_turn)
+        system = glyph.system_prompt(cfg.enable_reasoning, cfg.max_output_tokens, cfg.forfeit_mode, cfg.respawn, cfg.max_actions_per_turn,
+                                     (cfg.grave_ttl, cfg.grave_limit) if cfg.respawn and cfg.death_drops else None)
         for i in cfg.episodes if cfg.episodes is not None else range(cfg.num_examples):
             for v in range(cfg.variants):
                 # Prompt-less: the env opens the episode with the first observation of the

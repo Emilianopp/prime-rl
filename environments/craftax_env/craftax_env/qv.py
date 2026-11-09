@@ -230,12 +230,15 @@ def segment_reward(start: dict, end: dict) -> float:
     return max(-1.0, min(1.0, (end["Q"] - start["Q"]) / max(start["G_star"], 1.0)))
 
 
-async def call(client: httpx.AsyncClient, text: str, model: str = MODEL) -> tuple[dict, dict]:
+async def call(client: httpx.AsyncClient, text: str, model: str = MODEL, url: str = URL,
+               params: dict | None = None) -> tuple[dict, dict]:
+    """One judge call to an OpenAI-compatible chat endpoint; `params` are extra request
+    fields (default temperature 0.2; reasoning models take e.g. reasoning_effort instead)."""
     body = {"model": model, "messages": [{"role": "user", "content": text}],
-            "response_format": {"type": "json_object"}, "temperature": 0.2}
+            "response_format": {"type": "json_object"}, **({"temperature": 0.2} if params is None else params)}
     for attempt in range(5):
         try:
-            r = await client.post(URL, json=body, timeout=300)
+            r = await client.post(url, json=body, timeout=300)
             if r.status_code == 429 or r.status_code >= 500:
                 raise httpx.HTTPStatusError(str(r.status_code), request=r.request, response=r)
             r.raise_for_status()
@@ -331,10 +334,11 @@ def _written_summary(trace) -> str | None:
     return summary
 
 
-async def _judge(text: str, model: str, price_in: float, price_out: float) -> dict:
+async def _judge(text: str, model: str, price_in: float, price_out: float, url: str, key_var: str,
+                 params: dict | None) -> dict:
     if _RUN.client is None:
-        _RUN.client = httpx.AsyncClient(headers={"Authorization": f"Bearer {os.environ['GEMINI_API_KEY']}"})
-    j, usage = await call(_RUN.client, text, model)
+        _RUN.client = httpx.AsyncClient(headers={"Authorization": f"Bearer {os.environ[key_var]}"})
+    j, usage = await call(_RUN.client, text, model, url=url, params=params)
     prompt_tokens = usage.get("prompt_tokens", 0) or 0
     out_tokens = (usage.get("total_tokens", 0) or 0) - prompt_tokens  # thinking is billed as output
     _RUN.cost += (prompt_tokens * price_in + out_tokens * price_out) / 1e6
@@ -351,13 +355,20 @@ async def score_segment(
     price_out: float = 1.5,
     stop_path: str | None = "$OUT/STOP",
     wait_seconds: float = 1800.0,
+    url: str = URL,
+    key_var: str = "GEMINI_API_KEY",
+    params: dict | None = None,
+    death_penalty: float = 0.0,
 ) -> tuple[float | None, dict]:
     """The reward of one segment (a trace of a game played in segments): R from the Q
     of its start (state + inherited summary) and of its end (state + the summary it
     wrote). Q at a reset is judged once, by the segment that wrote the summary there, and
     handed to the next segment. Past `cost_cap` dollars of judge calls (at `price_in` /
     `price_out` per million tokens) it judges nothing more and writes `stop_path`, which
-    ends a run under rl.sbatch. Returns (None, info) when it cannot score."""
+    ends a run under rl.sbatch. The judge is `model` at the OpenAI-compatible `url`, with
+    the API key in env var `key_var` and extra request fields `params` (see `call`).
+    `death_penalty` is subtracted from R per death in the segment (before the clip).
+    Returns (None, info) when it cannot score."""
     info: dict = {"trace": trace.id}
     if _RUN.stopped:
         return None, {**info, "skipped": _RUN.stopped}
@@ -383,7 +394,7 @@ async def score_segment(
         jobs = {"end": prompt(rules, end_state, written is not None, written, inherited)}
         if start is None:
             jobs["start"] = prompt(rules, start_state, inherited is not None, inherited, None)
-        replies = dict(zip(jobs, await asyncio.gather(*(_judge(t, model, price_in, price_out) for t in jobs.values()))))
+        replies = dict(zip(jobs, await asyncio.gather(*(_judge(t, model, price_in, price_out, url, key_var, params) for t in jobs.values()))))
         if start is None:
             start = score(start_state, replies["start"], inherited is not None, inherited)
         end = score(end_state, replies["end"], written is not None, written)
@@ -397,10 +408,33 @@ async def score_segment(
         _RUN.stopped = f"judge cost ${_RUN.cost:.2f} reached the ${cost_cap:.2f} cap after {_RUN.calls} calls"
         if stop_path:
             Path(os.path.expandvars(stop_path)).write_text(_RUN.stopped + "\n")
-    reward = segment_reward(start, end)
+    died = max(0, int(end_state["deaths"]) - int(start_state["deaths"]))
+    reward = max(-1.0, min(1.0, segment_reward(start, end) - death_penalty * died))
     keep = ("V", "G_star", "D", "Q", "P")
     return reward, {**info, "start": {k: start[k] for k in keep}, "end": {k: end[k] for k in keep},
                     "flaws": [f.get("type") for f in end["flaws"]], "wrote_summary": written is not None,
                     "inherited": inherited is not None, "B": [start_state["B"], end_state["B"]],
                     "deaths": [start_state["deaths"], end_state["deaths"]],
                     "cost": round(_RUN.cost, 4), "calls": _RUN.calls}
+
+
+async def score_achievements(
+    trace, state_dir: str, scale: float = 5.0, wait_seconds: float = 1800.0, death_penalty: float = 0.0,
+) -> tuple[float | None, dict]:
+    """The game's own reward for one segment, no judge: the Craftax achievement points
+    (1/3/5/8 by tier) unlocked between its start and end boundary states, divided by
+    `scale` and clipped to [-1, 1]. 5 puts it on the Q/V judge's spread (segment points
+    have SD ~2.7, judge R ~0.6); one tier-4 achievement alone is 1. `death_penalty` as in
+    `score_segment`. Returns (None, info) when a boundary state is missing."""
+    info: dict = {"trace": trace.id}
+    folder = Path(os.path.expandvars(state_dir))
+    start_rec, end_rec = await asyncio.gather(
+        _boundary(folder, trace.id, "start", wait_seconds), _boundary(folder, trace.id, "end", wait_seconds))
+    if start_rec is None or end_rec is None:
+        return None, {**info, "error": "no boundary state from the env"}
+    s, e = start_rec["state"], end_rec["state"]
+    gained = float(e["B"]) - float(s["B"])
+    died = max(0, int(e["deaths"]) - int(s["deaths"]))
+    reward = max(-1.0, min(1.0, gained / scale - death_penalty * died))
+    return reward, {**info, "B": [s["B"], e["B"]], "points": gained, "deaths": [s["deaths"], e["deaths"]],
+                    "unlocked": sorted(set(e["achievements"]) - set(s["achievements"]))}
