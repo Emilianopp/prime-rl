@@ -37,6 +37,8 @@ export PATH=$HOME/.local/bin:$PATH UV_NO_SYNC=1 WANDB_MODE=${WANDB_MODE:-offline
 export UV_PROJECT_ENVIRONMENT=$VENV
 export PYTHONPATH=$REPO/src:$REPO/packages/prime-rl-configs/src$(for e in $ENVS; do printf ":%s" "$REPO/environments/$e"; done):$REPO/deps/verifiers:$REPO/deps/renderers${PYTHONPATH:+:$PYTHONPATH}
 cd "$REPO"
+# API keys for env judges (e.g. GEMINI_API_KEY for craftax_env.qv); .env is gitignored.
+[ -f "$REPO/.env" ] && { set -a; . "$REPO/.env"; set +a; }
 
 rsync -a "$SGLANG_VENV/" "$SLURM_TMPDIR/sgl-venv/"
 SGL_PY=$SLURM_TMPDIR/sgl-venv/bin/python

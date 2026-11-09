@@ -423,6 +423,9 @@ class CraftaxGame:
         self.message = ""
         self.achievements = self._achievement_names()
         self.spawn = self.position
+        self.show_ahead = False  # the HUD names the faced cell and its absolute position (env.ahead_in_hud)
+        self.grid_coords = False  # the grid's rows and columns are labeled with absolute positions (env.grid_coords)
+        self.visible_list = False  # a [Visible] line lists what is on screen with absolute positions (env.visible_list)
 
     def dump(self) -> dict[str, Any]:
         """Everything ``restore`` needs to continue this game in another process: the
@@ -649,6 +652,18 @@ class CraftaxGame:
         rendered = api.render_craftax_unicode_grid_local(self.state)
         return rendered.legend, rendered.grid, self._hud(np.asarray(rendered.status_data)), self.message
 
+    def ahead(self) -> str:
+        """The faced cell, "(row,col) what": a creature, a block or the map edge."""
+        st, rt = self.state, self._rt
+        r, c = self.position
+        dr, dc = rt["directions"][int(np.asarray(st.player_direction))]
+        tr, tc = r + int(dr), c + int(dc)
+        game_map = np.asarray(st.map[self.floor])
+        if not (0 <= tr < game_map.shape[0] and 0 <= tc < game_map.shape[1]):
+            return "the map edge"
+        what = "a creature" if bool(np.asarray(st.mob_map[self.floor, tr, tc])) else rt["block_names"].get(int(game_map[tr, tc]), "?")
+        return f"({tr},{tc}) {what}"
+
     def _hud(self, sd: np.ndarray) -> str:
         R = self._rt["renderer"]
         floor = int(sd[R.S_FLOOR])
@@ -712,7 +727,7 @@ class CraftaxGame:
                 f"Mana: {int(sd[R.S_MANA])}/{int(sd[R.S_MAX_MANA])}",
                 f"XP: {int(sd[R.S_XP])}    Str: {int(sd[R.S_STR])}    Dex: {int(sd[R.S_DEX])}    Int: {int(sd[R.S_INT])}",
                 f"Floor: {floor} ({floor_name})    Pos: ({int(sd[R.S_POS_ROW])},{int(sd[R.S_POS_COL])})    "
-                f"Facing: {facing}    Light: {light_name}",
+                f"Facing: {facing}    " + (f"Ahead: {self.ahead()}    " if self.show_ahead else "") + f"Light: {light_name}",
                 "[Inventory] " + inventory,
                 "[Equipment] " + equipment,
                 "[Armor] " + (" | ".join(armor_parts) if armor_parts else "None"),
@@ -726,12 +741,59 @@ class CraftaxGame:
 # --- the per-turn user message (GlyphBench's render_user_turn, no history frames) ---
 
 
+def label_grid(grid: str, position: tuple[int, int]) -> str:
+    """The local grid with absolute row numbers on the left and absolute column numbers
+    (tens over ones) on top, as the full map is labeled; the player is the middle cell."""
+    rows = grid.rstrip().split("\n")
+    r0 = position[0] - len(rows) // 2
+    c0 = position[1] - len(rows[0]) // 2
+    cols = [c0 + j for j in range(len(rows[0]))]
+    tens = "".join(str(c // 10) if c >= 0 else " " for c in cols)
+    ones = "".join(str(c % 10) if c >= 0 else " " for c in cols)
+    body = [f"{r0 + i:>3} {row}" if r0 + i >= 0 else f"    {row}" for i, row in enumerate(rows)]
+    return "\n".join([f"    {tens}", f"    {ones}", *body])
+
+
+GROUND = ("grass", "path", "sand", "you", "darkness", "floor", "wall")
+
+
+def visible(legend: str, grid: str, position: tuple[int, int], per_kind: int = 4) -> str:
+    """What is on screen, by kind, nearest first, with absolute (row,col) positions:
+    "tree (27,14) (25,13); stone (26,12); cow (24,18)". Ground tiles are left out."""
+    names = {}
+    for line in legend.splitlines():
+        if " — " in line:
+            glyph_, name = line.split(" — ", 1)
+            names[glyph_.strip()] = name.strip()
+    rows = grid.rstrip().split("\n")
+    r0, c0 = position[0] - len(rows) // 2, position[1] - len(rows[0]) // 2
+    seen: dict[str, list[tuple[int, int, int]]] = {}
+    for i, row in enumerate(rows):
+        for j, ch in enumerate(row):
+            name = names.get(ch)
+            if not name or any(name.startswith(g) for g in GROUND):
+                continue
+            r, c = r0 + i, c0 + j
+            seen.setdefault(name, []).append((abs(r - position[0]) + abs(c - position[1]), r, c))
+    parts = []
+    for name, cells in sorted(seen.items(), key=lambda kv: min(kv[1])):
+        cells.sort()
+        parts.append(name + " " + " ".join(f"({r},{c})" for _, r, c in cells[:per_kind]) + (" ..." if len(cells) > per_kind else ""))
+    return "; ".join(parts) if parts else "nothing but ground"
+
+
 def user_turn(game: CraftaxGame, reasoning: bool, max_actions: int = 1) -> str:
     legend, grid, hud, message = game.render()
     parts = []
     if legend:
         parts.append(f"[Legend]\n{legend}")
-    current = [f"[Current Observation — turn {game.turn}]", f"[Grid]\n{grid.rstrip()}"]
+    if game.grid_coords:
+        grid_block = "[Grid] (rows and columns labeled with absolute positions (row,col), as in the HUD's Pos)\n" + label_grid(grid, game.position)
+    else:
+        grid_block = f"[Grid]\n{grid.rstrip()}"
+    current = [f"[Current Observation — turn {game.turn}]", grid_block]
+    if game.visible_list:
+        current.append("[Visible] (absolute positions, nearest first)\n" + visible(legend, grid, game.position))
     if hud:
         current.append(f"[HUD]\n{hud.strip()}")
     if message:

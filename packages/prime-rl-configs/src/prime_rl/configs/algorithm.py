@@ -2,7 +2,7 @@
 
 An algorithm is a named, self-contained config — a discriminated union keyed
 on ``type`` (``grpo``, ``max_rl``, ``rae``, ``hierarchical_grpo``, ``opd``,
-``opsd``, ``sft``, ``echo``, ``debug``, ``turn_credit``).
+``opsd``, ``sft``, ``echo``, ``debug``, ``turn_credit``, ``trace_credit``).
 The bundle *is* the algorithm: each variant carries
 its sampling component and its credit-assignment / loss-routing parameters,
 and its class defaults are the vetted setting — ``type = "opd"`` with a
@@ -424,6 +424,29 @@ class TurnCreditAlgoConfig(BaseAlgoConfig):
     tokens, reasons, rewards): what a run monitor reads."""
 
 
+class TraceCreditAlgoConfig(BaseAlgoConfig):
+    type: Literal["trace_credit"] = "trace_credit"
+    """Per-trace credit from an env's own async scorer: every sampled token of a trace
+    carries the trace's reward minus a running baseline (an exponential average of the
+    rewards before it). For segments shipped on their own (``stream_segments``), where
+    no group shares a start to compare against."""
+
+    action_loss_type: ClassVar[ActionLossType] = "rl"
+
+    scorer: str
+    """``module:function``: an async function taking a trace (plus ``scorer_args``) and
+    returning ``(reward or None, info dict)``, e.g. ``craftax_env.qv:score_segment``."""
+
+    scorer_args: dict[str, Any] = Field(default_factory=dict)
+    """Keyword arguments for the scorer."""
+
+    baseline_decay: float = Field(0.9, ge=0.0, lt=1.0)
+    """Weight of the old baseline in each update (0: the previous trace's reward)."""
+
+    log_path: Path | None = None
+    """Append one JSON line per scored trace (reward, advantage, baseline, the scorer's info)."""
+
+
 AlgoConfig: TypeAlias = Annotated[
     GRPOAlgoConfig
     | EchoAlgoConfig
@@ -434,7 +457,8 @@ AlgoConfig: TypeAlias = Annotated[
     | OPSDAlgoConfig
     | SFTAlgoConfig
     | DebugAlgoConfig
-    | TurnCreditAlgoConfig,
+    | TurnCreditAlgoConfig
+    | TraceCreditAlgoConfig,
     Field(discriminator="type"),
 ]
 """The training algorithm: sampling plus the per-token training signal (credit
@@ -452,6 +476,7 @@ its class defaults are the vetted setting.
 - ``debug`` — the same constant advantage on every sampled token, ignoring
   rewards. Debugging only: for infra work that needs every token trainable.
 - ``turn_credit`` — each reply's tokens carry the reward an env scorer gives that reply.
+- ``trace_credit`` — each trace's tokens carry an env scorer's reward for the trace minus a running baseline.
 
 A new credit-assignment scheme is a new named algorithm in code (subclass
 ``Algorithm``, register it), not a config that points at an import path.
