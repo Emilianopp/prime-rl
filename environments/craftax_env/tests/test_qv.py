@@ -34,7 +34,7 @@ def test_score_segment_hands_q_to_the_next_segment_and_stops_at_the_cost_cap(tmp
         (tmp_path / f"{tid}.{side}.json").write_text(json.dumps({**extra, "state": state}))
     prompts = []
 
-    async def fake_call(client, text, model):
+    async def fake_call(client, text, model, url=qv.URL, params=None):
         prompts.append(text)
         tool = 0 if "Step: 1" in text else 1  # the game start, then a better state
         return judge_reply(tool, flaws=("false_fact",) if "SUMMARY UNDER REVIEW" in text else ()), \
@@ -57,3 +57,34 @@ def test_score_segment_hands_q_to_the_next_segment_and_stops_at_the_cost_cap(tmp
     assert info_b["start"]["Q"] == info_a["end"]["Q"] and info_b["end"]["Q"] == 4  # the game ended: Q = V
     assert stop.exists() and "cap" in stop.read_text()  # 3 calls x $0.25 passed $0.60
     assert asyncio.run(qv.score_segment(trace("c"), **args))[0] is None and len(prompts) == 3
+
+
+def test_score_segment_subtracts_the_death_penalty_per_death(tmp_path, monkeypatch):
+    died = {**STATE, "hud": "Step: 9", "deaths": 3}
+    for tid, side, extra, state in (("d", "start", {}, STATE), ("d", "end", {"next": None}, died)):
+        (tmp_path / f"{tid}.{side}.json").write_text(json.dumps({**extra, "state": state}))
+
+    async def fake_call(client, text, model, url=qv.URL, params=None):
+        return judge_reply(0), {"prompt_tokens": 0, "total_tokens": 0}
+
+    monkeypatch.setattr(qv, "call", fake_call)
+    monkeypatch.setenv("GEMINI_API_KEY", "test")
+    rewards = []
+    for penalty in (0.0, 0.05):
+        monkeypatch.setattr(qv, "_RUN", qv._Run())
+        r, info = asyncio.run(qv.score_segment(trace("d"), state_dir=str(tmp_path), death_penalty=penalty,
+                                               stop_path=None, wait_seconds=1))
+        rewards.append(r)
+    assert info["deaths"] == [0, 3] and abs(rewards[0] - rewards[1] - 0.15) < 1e-9
+
+
+def test_score_achievements_is_the_points_gained_over_scale(tmp_path):
+    start = {**STATE, "B": 1.0, "achievements": {"collect_wood": 1.0}}
+    end = {**STATE, "B": 9.0, "deaths": 2, "achievements": {"collect_wood": 1.0, "place_table": 1.0, "enter_dungeon": 3.0, "eat_cow": 1.0, "make_wood_pickaxe": 3.0}}
+    (tmp_path / "e.start.json").write_text(json.dumps({"state": start}))
+    (tmp_path / "e.end.json").write_text(json.dumps({"next": None, "state": end}))
+    r, info = asyncio.run(qv.score_achievements(trace("e"), state_dir=str(tmp_path), wait_seconds=1))
+    assert r == 1.0 and info["points"] == 8.0  # 8 points / 5, clipped
+    r, _ = asyncio.run(qv.score_achievements(trace("e"), state_dir=str(tmp_path), scale=10.0, death_penalty=0.05, wait_seconds=1))
+    assert abs(r - (0.8 - 0.1)) < 1e-9
+    assert info["unlocked"] == ["eat_cow", "enter_dungeon", "make_wood_pickaxe", "place_table"]

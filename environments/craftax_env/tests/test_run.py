@@ -95,7 +95,7 @@ def test_respawn_prompt():
     assert "Death does not end the episode" in system and "The episode terminates on death" not in system
 
 
-@pytest.mark.parametrize("death_inventory", ["drop_all", "keep"])
+@pytest.mark.parametrize("death_inventory", ["drop_all", "keep", "drop_grave"])
 def test_respawn_continues_the_game(tmp_path, monkeypatch, death_inventory):
     step, calls = glyph.CraftaxGame.step, []
 
@@ -122,7 +122,10 @@ def test_respawn_continues_the_game(tmp_path, monkeypatch, death_inventory):
     after = interaction.received[5]  # the observation after the first death
     assert "You died (death 1, on floor 1" in after and "You respawned on the Overworld" in after
     assert "Floor: 0 (Overworld)" in after and "HP: 9/9" in after
-    assert ("Wood:0" in after) == (death_inventory == "drop_all")
+    assert ("Wood:0" in after) == (death_inventory in ("drop_all", "drop_grave"))
+    if death_inventory == "drop_grave":
+        assert "dropped your inventory (wood 5) at (" in after and "on floor 1: walk onto that cell by step 305" in after
+        assert line["graves"]["dropped"] == 2 and all(d["dropped"] for d in line["deaths"])
     assert "Step: 5    Upstream timestep" in after  # no turn limit in the HUD
     assert interaction.trace.rewards["craftax_achievements"] == pytest.approx(line["achievement_score"] / 226 - 0.02)
 
@@ -386,3 +389,92 @@ def test_segment_boundaries_are_written_for_the_judge(tmp_path):
     assert json.loads((folder / "seg-b.end.json").read_text())["next"] is None
     state = b_start["state"]
     assert state["hud"].startswith("Step:") and "Legend" not in state["map"] and len(state["map"].splitlines()) == 50
+
+
+def test_respawn_prompt_with_drops():
+    system = glyph.system_prompt(True, 2048, "freeze", respawn=True, graves=(300, 3))
+    assert f"shows on the map as {glyph.GRAVE_GLYPH}" in system and "within 300 steps" in system and "3 most recent" in system
+
+
+def _armed(game, **items):
+    st = game.state
+    inv = st.inventory.replace(**{k: getattr(st.inventory, k) * 0 + v for k, v in items.items()})
+    game.state = st.replace(inventory=inv)
+
+
+def _walkable_near(game, r, c):
+    level = glyph.np.asarray(game.state.map[0])
+    mobs = glyph.np.asarray(game.state.mob_map[0])
+    for dr, dc in ((0, 2), (0, -2), (2, 0), (-2, 0), (1, 1), (-1, -1)):
+        if not game._rt["not_walkable"][level[r + dr, c + dc]] and not mobs[r + dr, c + dc]:
+            return r + dr, c + dc
+    raise AssertionError("no walkable cell near the spawn")
+
+
+def test_a_death_drops_the_inventory_where_it_happened_and_walking_there_picks_it_up():
+    game = glyph.CraftaxGame(seed=7, max_turns=None)
+    jnp = game._rt["jax"].numpy
+    spot = _walkable_near(game, *game.spawn)
+    game.state = game.state.replace(player_position=jnp.asarray(spot, dtype=game.state.player_position.dtype))
+    _armed(game, wood=5, pickaxe=2, sword=1)
+    game.turn = 40
+    game.respawn("drop_grave")
+    assert game.dropped["pos"] == spot and game.dropped["floor"] == 0 and game.dropped["at"] == 40
+    assert int(game.state.inventory.wood) == 0 and int(game.state.inventory.pickaxe) == 0
+    legend, grid, _, _ = game.render()  # the drop is 2 cells from the respawn point: in view
+    assert f"{glyph.GRAVE_GLYPH} — {glyph.GRAVE_LEGEND}" in legend
+    assert f"dropped items (yours: walk onto the cell to pick them up) ({spot[0]},{spot[1]})" in glyph.visible(legend, grid, game.position)
+    rows = grid.split("\n")
+    r, c = game.position
+    assert rows[spot[0] - r + len(rows) // 2][spot[1] - c + len(rows[0]) // 2] == glyph.GRAVE_GLYPH
+    # picked up by standing on the cell after a step; counts add, tools keep the better one
+    _armed(game, wood=2, sword=2)
+    game.state = game.state.replace(player_position=jnp.asarray(spot, dtype=game.state.player_position.dtype))
+    step = game.step(glyph.NOOP)
+    assert "You picked up the items you dropped at" in step.note and "wood 5" in step.note
+    inv = game.state.inventory
+    assert (int(inv.wood), int(inv.pickaxe), int(inv.sword)) == (7, 2, 2)
+    assert game.graves == [] and game.grave_stats["recovered"] == 1
+    assert glyph.GRAVE_GLYPH not in game.render()[1]
+
+
+def test_drops_expire_are_capped_and_survive_a_save():
+    game = glyph.CraftaxGame(seed=7, max_turns=None)
+    game.grave_ttl, game.grave_limit = 50, 3
+    for k in range(4):
+        _armed(game, wood=k + 1)
+        game.turn = 10 * k
+        game.respawn("drop_grave")
+    assert [g["items"]["wood"] for g in game.graves] == [2, 3, 4] and game.grave_stats["replaced"] == 1
+    game.respawn("drop_grave")  # nothing carried: no drop
+    assert game.dropped is None and game.grave_stats["dropped"] == 4
+    other = glyph.CraftaxGame(seed=7, max_turns=None)
+    other.restore(game.dump())
+    assert other.graves == game.graves and other.grave_stats == game.grave_stats
+    other.grave_ttl = 50
+    other.turn = 69  # the drop made at turn 10 is 59 turns old, the others at most 49
+    other.forfeit()
+    assert [g["items"]["wood"] for g in other.graves] == [3, 4] and other.grave_stats["expired"] == 1
+
+
+def test_ladder_feedback_says_why_descend_or_ascend_did_nothing():
+    game = glyph.CraftaxGame(seed=7, max_turns=None)
+    rt, jnp = game._rt, game._rt["jax"].numpy
+    r, c = game.position
+    def at(item, floor=0, kills=0):
+        st = game.state
+        game.state = st.replace(
+            player_level=st.player_level * 0 + floor,
+            item_map=st.item_map.at[floor, r, c].set(item),
+            monsters_killed=st.monsters_killed.at[floor].set(kills),
+        )
+        return game.snapshot()
+    down, up = glyph.action_index("DESCEND"), glyph.action_index("ASCEND")
+    snap = at(0)
+    assert "not on a ladder down (▼)" in game.feedback(down, snap, snap)
+    assert "no floor above the Overworld" in game.feedback(up, snap, snap)
+    snap = at(rt["ladder_up"], floor=1)
+    assert "you are on the ladder up (△), which only goes up" in game.feedback(down, snap, snap)
+    snap = at(min(rt["ladder_down"]), floor=1, kills=5)
+    assert "closed: kill 3 more monsters on this floor" in game.feedback(down, snap, snap)
+    assert "you are on the ladder down (▼), which only goes down" in game.feedback(up, snap, snap)
