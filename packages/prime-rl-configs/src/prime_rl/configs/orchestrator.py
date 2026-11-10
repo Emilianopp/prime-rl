@@ -239,6 +239,21 @@ class TreeSamplerConfig(BaseConfig):
     its tools at a death is simply not picked again and the game before the death is. `keep` and
     `max_roots` are not used."""
 
+    puct_scope: Literal["world", "archive"] = "world"
+    """`puct`: where the rule is applied. `archive`: over all nodes of all worlds (the paper's rule; with a
+    value that only adds up along a lineage it puts every pick into the deepest world). `world`: at most
+    `max_roots` worlds are in the archive, the next expansion goes to the world with the fewest
+    expansions so far (at most `world_inflight` at a time per world), and the PUCT score picks the node
+    inside that world. A world leaves after `world_patience` expansions in a row without a new best
+    value, which frees its place for a new world; while all places are taken, new worlds are still
+    played (`fresh_root_share`) but not archived."""
+
+    world_inflight: int = Field(1, ge=1)
+    """`puct_scope = "world"`: expansions of one world in flight at a time."""
+
+    world_patience: int = Field(8, ge=1)
+    """`puct_scope = "world"`: a world is dropped after this many expansions in a row without raising its best value."""
+
     puct_c: float = Field(1.0, ge=0)
     """The exploration coefficient of the `puct` rule."""
 

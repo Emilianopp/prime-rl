@@ -105,6 +105,9 @@ class TreeSampler(TaskSampler):
         self.fresh_issued = 0
         self.reexpansions = 0  # picks of a node that had been expanded before
         self.archive_evicted = 0
+        # puct_scope = "world": root id -> {"n" expansions, "best" value, "stale" expansions without a new best}
+        self.worlds: dict[str, dict[str, Any]] = {}
+        self.worlds_retired = 0
 
     # --- tasks out ---------------------------------------------------------------
     def __next__(self) -> vf.Task | None:
@@ -134,20 +137,20 @@ class TreeSampler(TaskSampler):
             node = self._new_root()
             self.fresh_issued += 1
         else:
-            self.puct_inflight[node["id"]] = {"lineage": list(node.get("lineage", [node["id"]])), "sent_at": now}
+            self.puct_inflight[node["id"]] = {"lineage": list(node.get("lineage", [node["id"]])), "sent_at": now, "root": node["root"]}
             self.reexpansions += node["n"] > 0
         self.expansions += 1
         return self._task_for(node)
 
-    def _puct_scores(self) -> list[tuple[float, dict[str, Any]]]:
-        """(score, node) for every archived node, best value first."""
-        ranked = sorted(self.archive.values(), key=lambda n: (-n["score"], n["n"], n["depth"]))
+    def _puct_scores(self, nodes: Any = None, expansions: int | None = None) -> list[tuple[float, dict[str, Any]]]:
+        """(score, node) for every node of `nodes` (default: the whole archive), best value first."""
+        ranked = sorted(self.archive.values() if nodes is None else nodes, key=lambda n: (-n["score"], n["n"], n["depth"]))
         if not ranked:
             return []
         size = len(ranked)
         total = size * (size + 1) / 2
         scale = (ranked[0]["score"] - ranked[-1]["score"]) or 1.0
-        explore = self.config.puct_c * scale * math.sqrt(1 + self.puct_expansions)
+        explore = self.config.puct_c * scale * math.sqrt(1 + (self.puct_expansions if expansions is None else expansions))
         out = []
         for rank, node in enumerate(ranked):
             q = node["m"] if node["n"] > 0 and node["m"] is not None else node["score"]
@@ -157,16 +160,40 @@ class TreeSampler(TaskSampler):
     def _select_puct(self) -> dict[str, Any] | None:
         """The archive's best node by the PUCT score, skipping the lineages in flight (the ancestors and
         descendants of a node being expanded) and nodes at their world's depth cap."""
+        if self.config.puct_scope == "world":
+            return self._select_world()
+        return self._best_free(self._puct_scores())
+
+    def _best_free(self, scored: list[tuple[float, dict[str, Any]]]) -> dict[str, Any] | None:
         busy_ids = set(self.puct_inflight)
         busy_ancestors = {a for sent in self.puct_inflight.values() for a in sent["lineage"]}
         best, best_score = None, -math.inf
-        for score, node in self._puct_scores():
+        for score, node in scored:
             if score <= best_score or node["depth"] >= self._cap(node):
                 continue
             if node["id"] in busy_ancestors or busy_ids.intersection(node.get("lineage", ())):
                 continue
             best, best_score = node, score
         return best
+
+    def _select_world(self) -> dict[str, Any] | None:
+        """`puct_scope = "world"`: the world with the fewest expansions gets the next one (a world's
+        value never decides how often it is picked: values only add up, so the deepest world would
+        take every pick), and the PUCT score picks the node inside it."""
+        flying: dict[str, int] = {}
+        for sent in self.puct_inflight.values():
+            flying[sent.get("root")] = flying.get(sent.get("root"), 0) + 1
+        by_world: dict[str, list[dict[str, Any]]] = {}
+        for node in self.archive.values():
+            by_world.setdefault(node["root"], []).append(node)
+        order = sorted(self.worlds, key=lambda r: (self.worlds[r]["n"] + flying.get(r, 0), -self.worlds[r]["best"]))
+        for root in order:
+            if flying.get(root, 0) >= self.config.world_inflight:
+                continue
+            node = self._best_free(self._puct_scores(by_world.get(root, []), self.worlds[root]["n"]))
+            if node is not None:
+                return node
+        return None
 
     def set_step(self, step: int) -> None:
         self.step = int(step)
@@ -318,6 +345,8 @@ class TreeSampler(TaskSampler):
         """`puct`: one expansion of `node` reported. Its best branch value is the node's Q, the node and
         its ancestors count a visit, and its best branches enter the archive."""
         self.puct_inflight.pop(node["id"], None)
+        if self.config.puct_scope == "world" and not self._world_reports(node, branches, values):
+            return
         if node["depth"] > 0:  # an archive pick (a fresh root is not a state of the archive)
             self.puct_expansions += 1
             parent = self.archive.get(node["id"])
@@ -334,10 +363,52 @@ class TreeSampler(TaskSampler):
         extra = len(self.archive) - self.config.archive_size
         if extra > 0:
             busy = {a for sent in self.puct_inflight.values() for a in sent["lineage"][-1:]}
-            for old in sorted((n for n in self.archive.values() if n["id"] not in busy), key=lambda n: (n["score"], -n["n"]))[:extra]:
+            for _ in range(extra):
+                free = [n for n in self.archive.values() if n["id"] not in busy]
+                if self.config.puct_scope == "world":  # the largest world gives up a node, not the youngest world
+                    sizes: dict[str, int] = {}
+                    for n in self.archive.values():
+                        sizes[n["root"]] = sizes.get(n["root"], 0) + 1
+                    free.sort(key=lambda n: (-sizes[n["root"]], n["score"], -n["n"]))
+                else:
+                    free.sort(key=lambda n: (n["score"], -n["n"]))
+                if not free:
+                    break
+                old = free[0]
                 del self.archive[old["id"]]
                 self._delete_state(old)
                 self.archive_evicted += 1
+
+    def _world_reports(self, node: dict[str, Any], branches: list[dict[str, Any]], values: list[float]) -> bool:
+        """`puct_scope = "world"`: admit, update or retire the world of the expansion that reported.
+        False: its branches do not enter the archive (their saved games are deleted)."""
+        root, world = node["root"], self.worlds.get(node["root"])
+        if node["depth"] == 0 and world is None:
+            if self.config.max_roots is None or len(self.worlds) < self.config.max_roots:
+                # a new world starts level with the least expanded one, so it does not take every pick to catch up
+                world = self.worlds[root] = {"n": min((w["n"] for w in self.worlds.values()), default=0), "best": max(values, default=0.0), "stale": 0}
+                return True
+        if world is None or node["depth"] == 0:  # no room for a new world, or the world was retired in flight
+            for child in branches:
+                self._delete_state(child)
+            return False
+        world["n"] += 1
+        best = max(values, default=-math.inf)
+        if best > world["best"]:
+            world["best"], world["stale"] = best, 0
+        else:
+            world["stale"] += 1
+        still_flying = any(sent.get("root") == root for sent in self.puct_inflight.values())
+        if world["stale"] >= self.config.world_patience and not still_flying:
+            for child in branches:
+                self._delete_state(child)
+            for old in [n for n in self.archive.values() if n["root"] == root]:
+                del self.archive[old["id"]]
+                self._delete_state(old)
+            del self.worlds[root]
+            self.worlds_retired += 1
+            return False
+        return True
 
     def _close_level(self, root: str, depth: int) -> None:
         level = self.levels.pop((root, depth), None)
@@ -406,7 +477,8 @@ class TreeSampler(TaskSampler):
                          "deepest_floor": self.deepest_floor},
             "segments_per_depth": dict(self.segments_per_depth),
             "puct": {"archive": list(self.archive.values()), "expansions": self.puct_expansions, "fresh_issued": self.fresh_issued,
-                     "reexpansions": self.reexpansions, "evicted": self.archive_evicted},
+                     "reexpansions": self.reexpansions, "evicted": self.archive_evicted,
+                     "worlds": self.worlds, "worlds_retired": self.worlds_retired},
         }
 
     def _root_index(self, root_id: str) -> int:
@@ -450,6 +522,7 @@ class TreeSampler(TaskSampler):
         self.puct_inflight = {}
         self.puct_expansions, self.fresh_issued = int(puct.get("expansions", 0)), int(puct.get("fresh_issued", 0))
         self.reexpansions, self.archive_evicted = int(puct.get("reexpansions", 0)), int(puct.get("evicted", 0))
+        self.worlds, self.worlds_retired = dict(puct.get("worlds", {})), int(puct.get("worlds_retired", 0))
 
     def metrics(self) -> dict[str, float]:
         puct = {}
@@ -462,6 +535,9 @@ class TreeSampler(TaskSampler):
                 "archive_unvisited": float(sum(n["n"] == 0 for n in nodes)),
                 "archive_worlds": float(len({n["root"] for n in nodes})),
                 "archive_evicted": float(self.archive_evicted),
+                "worlds_active": float(len(self.worlds)),
+                "worlds_retired": float(self.worlds_retired),
+                "world_expansions_max_share": max((w["n"] for w in self.worlds.values()), default=0) / max(1, sum(w["n"] for w in self.worlds.values())),
                 "puct_expansions": float(self.puct_expansions),
                 "puct_inflight": float(len(self.puct_inflight)),
                 "reexpansions": float(self.reexpansions),

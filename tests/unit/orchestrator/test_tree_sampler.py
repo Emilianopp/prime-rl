@@ -252,7 +252,7 @@ def valued(task: vf.Task, tmp_path, *, value: float, reward: float = 0.0) -> vf.
 
 def puct_sampler(tmp_path, **kw) -> TreeSampler:
     config = TreeSamplerConfig(selection="puct", state_dir=str(tmp_path), value_key="search_value",
-                               **{"fresh_root_share": 0.0, "max_depth": 5, **kw})
+                               **{"fresh_root_share": 0.0, "max_depth": 5, "puct_scope": "archive", **kw})
     return TreeSampler(config, [make_root(i) for i in range(4)])
 
 
@@ -369,3 +369,87 @@ def test_beam_is_unchanged_by_the_value_key(tmp_path):
     root = next(sampler)
     sampler.observe([valued(root, tmp_path, value=9.0, reward=0.1), valued(root, tmp_path, value=1.0, reward=0.8)])
     assert sampler.frontier[0]["score"] == 0.8 and not sampler.archive
+
+
+def world_sampler(tmp_path, **kw) -> TreeSampler:
+    config = TreeSamplerConfig(selection="puct", state_dir=str(tmp_path), value_key="search_value",
+                               **{"fresh_root_share": 0.5, "max_depth": 50, "max_roots": 3, **kw})
+    return TreeSampler(config, [make_root(i) for i in range(200)])
+
+
+def run_worlds(sampler: TreeSampler, tmp_path, steps: int, value) -> list[vf.Task]:
+    """One expansion at a time; `value(task)` gives the two branch values."""
+    issued = []
+    for _ in range(steps):
+        task = next(sampler)
+        issued.append(task)
+        sampler.observe([valued(task, tmp_path, value=v) for v in value(task)])
+    return issued
+
+
+def test_puct_world_scope_spreads_expansions_over_worlds_whatever_their_value(tmp_path):
+    sampler = world_sampler(tmp_path, world_patience=1000)
+    # world 0 is worth 100x the others and every step adds value: the archive-wide rule would only pick it
+    def value(task):
+        node = task.data.info["node"]
+        gain = 100.0 if node["root"].startswith("0-") or node["root"] == sampler_first[0] else 1.0
+        return (gain * (node["depth"] + 1), gain * (node["depth"] + 1) - 0.5)
+    sampler_first = [None]
+    first = next(sampler)
+    sampler_first[0] = first.data.info["node"]["root"]
+    sampler.observe([valued(first, tmp_path, value=v) for v in (100.0, 99.5)])
+    issued = run_worlds(sampler, tmp_path, 60, value)
+    assert len(sampler.worlds) == 3
+    counts = [w["n"] for w in sampler.worlds.values()]
+    assert max(counts) - min(counts) <= 1  # level, not by value
+    picked = [t.data.info["node"]["root"] for t in issued if t.data.info["node"]["depth"] > 0]
+    assert len(set(picked)) == 3
+
+
+def test_puct_world_scope_one_expansion_in_flight_per_world(tmp_path):
+    sampler = world_sampler(tmp_path, fresh_root_share=0.0, max_roots=2)
+    roots = [next(sampler), next(sampler)]  # an empty archive starts worlds
+    for task in roots:
+        sampler.observe([valued(task, tmp_path, value=v) for v in (2.0, 1.0)])
+    a, b = next(sampler), next(sampler)
+    assert a.data.info["node"]["depth"] == 1 and b.data.info["node"]["depth"] == 1
+    assert a.data.info["node"]["root"] != b.data.info["node"]["root"]
+    assert next(sampler).data.info["node"]["depth"] == 0  # both worlds busy: a new world is played instead
+
+
+def test_puct_world_scope_retires_a_stalled_world_and_admits_a_new_one(tmp_path):
+    sampler = world_sampler(tmp_path, fresh_root_share=0.0, max_roots=1, world_patience=3)
+    root = next(sampler)
+    first = root.data.info["node"]["root"]
+    group = [valued(root, tmp_path, value=v) for v in (5.0, 4.0)]
+    sampler.observe(group)
+    kept = [state_of(e) for e in group]
+    for _ in range(3):  # no expansion beats 5.0
+        task = next(sampler)
+        assert task.data.info["node"]["root"] == first
+        sampler.observe([valued(task, tmp_path, value=v) for v in (1.0, 0.5)])
+    assert first not in sampler.worlds and sampler.worlds_retired == 1 and not sampler.archive
+    assert not any(os.path.exists(path) for path in kept)
+    task = next(sampler)
+    assert task.data.info["node"]["depth"] == 0
+    sampler.observe([valued(task, tmp_path, value=v) for v in (2.0, 1.0)])
+    assert list(sampler.worlds) == [task.data.info["node"]["root"]]
+
+
+def test_puct_world_scope_full_archive_plays_new_worlds_without_keeping_them(tmp_path):
+    sampler = world_sampler(tmp_path, fresh_root_share=1.0, max_roots=1)
+    root = next(sampler)
+    sampler.observe([valued(root, tmp_path, value=v) for v in (5.0, 4.0)])
+    extra = next(sampler)
+    group = [valued(extra, tmp_path, value=v) for v in (9.0, 8.0)]
+    sampler.observe(group)
+    assert len(sampler.worlds) == 1 and len(sampler.archive) == 2
+    assert not any(os.path.exists(state_of(e)) for e in group)
+
+
+def test_puct_world_scope_checkpoint_round_trip(tmp_path):
+    sampler = world_sampler(tmp_path)
+    run_worlds(sampler, tmp_path, 12, lambda task: (task.data.info["node"]["depth"] + 1.0, 0.5))
+    restored = world_sampler(tmp_path)
+    restored.load_state_dict(sampler.state_dict())
+    assert restored.worlds == sampler.worlds and set(restored.archive) == set(sampler.archive)
