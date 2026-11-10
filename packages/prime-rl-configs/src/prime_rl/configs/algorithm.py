@@ -443,6 +443,14 @@ class TraceCreditAlgoConfig(BaseAlgoConfig):
     baseline_decay: float = Field(0.9, ge=0.0, lt=1.0)
     """Weight of the old baseline in each update (0: the previous trace's reward)."""
 
+    baseline: Literal["running", "group"] = "running"
+    """``running``: each trace's reward minus the exponential average above (segments
+    streamed one at a time, no shared start). ``group``: each episode's segment trace (one
+    segment per episode, ``info["segment"] == 0``) minus the mean of its group's - the
+    ``group_size`` branches of one saved world (the population sampler). The branches share
+    one start score: the node's ``info["tree"]["start_score"]`` if it has one, else the
+    first branch's judged start. The reward lands in ``trace.info["score"]``."""
+
     log_path: Path | None = None
     """Append one JSON line per scored trace (reward, advantage, baseline, the scorer's info)."""
 

@@ -191,8 +191,60 @@ class DifficultyPoolSamplerConfig(BaseConfig):
         return self
 
 
+class PopulationSamplerConfig(BaseConfig):
+    """A fixed population of games played one segment per task, asynchronously: a task is a
+    node (a fresh seed, or a saved world plus the handoff that ended its last segment), and
+    the env's ``group_size`` episodes of it are its branches. When a node's branches come
+    back, the best one (by the algorithm's reward) continues the lineage, unless the
+    population is short of young games and this lineage's recent progress is among the
+    weakest: then it is recycled into a fresh seed. ``craftax_env``'s ``info["tree"]`` mode
+    plays the segments; ``trace_credit`` with ``baseline = "group"`` scores them."""
+
+    type: Literal["population"] = "population"
+
+    lineages: int = Field(16, ge=1)
+    """Games played at once: at most this many nodes are in flight (each as ``group_size``
+    branches). Set ``max_inflight`` to ``lineages * group_size``."""
+
+    state_dir: str
+    """(Environment variables expanded.) Where branches save their worlds and the sampler
+    keeps ``population.json``, its state: a later run with the same folder resumes every
+    lineage from its last kept node (in-flight nodes are replayed)."""
+
+    young_frac: float = Field(0.25, ge=0.0, le=1.0)
+    """Target share of lineages that are young (fewer than ``grace`` segments played). While
+    fewer are young, a lineage past ``grace`` whose recent progress ranks in the bottom
+    ``cull_frac`` of the lineages past ``grace`` is recycled into a fresh seed."""
+
+    grace: int = Field(3, ge=0)
+    """Segments a fresh lineage plays before it can be recycled."""
+
+    window: int = Field(3, ge=1)
+    """Recent progress = achievement points gained over a lineage's last ``window`` segments."""
+
+    cull_frac: float = Field(0.5, gt=0.0, le=1.0)
+    """Rank cutoff: only a lineage whose recent progress is in this bottom fraction of the
+    mature lineages (ties broken by total points, then at random) can be recycled."""
+
+    min_mature: int = Field(4, ge=1)
+    """Recycle only once at least this many lineages are past ``grace`` (a rank needs peers)."""
+
+    max_depth: int = Field(1_000_000, ge=1)
+    """Segments after which a lineage ends and a fresh seed takes its place (huge: never)."""
+
+    max_retries: int = Field(2, ge=0)
+    """Replays of a node whose branches all failed (or were lost) before its lineage ends."""
+
+    lost_after_s: float = Field(10800.0, gt=0)
+    """A node in flight this long with no result (its group was cancelled, e.g. stale) is
+    replayed."""
+
+    seed: int = 0
+    """Seeds the tie-breaking between equally ranked lineages."""
+
+
 TaskSamplerConfig: TypeAlias = Annotated[
-    StandardSamplerConfig | DifficultyPoolSamplerConfig,
+    StandardSamplerConfig | DifficultyPoolSamplerConfig | PopulationSamplerConfig,
     Field(discriminator="type"),
 ]
 
@@ -294,7 +346,12 @@ class TrainSourceConfig(EnvConfig):
                 )
         elif in_segments and not episode_credit and self.algo.type != "turn_credit":
             # turn_credit scores each reply from its own segment: no episode reward involved.
-            raise ValueError(f"Source '{self.resolved_name}' runs agents in segments: set algo.credit = 'episode'")
+            # trace_credit with a group baseline scores each segment trace on its own too
+            # (the population sampler plays one segment per episode).
+            if not (self.algo.type == "trace_credit" and getattr(self.algo, "baseline", None) == "group"):
+                raise ValueError(f"Source '{self.resolved_name}' runs agents in segments: set algo.credit = 'episode'")
+        if getattr(self.algo, "baseline", None) == "group" and self.group_size < 2:
+            raise ValueError(f"Source '{self.resolved_name}': a group baseline needs group_size >= 2")
         return self
 
 

@@ -27,6 +27,7 @@ import logging
 import os
 import pickle
 import time
+import uuid
 from collections import Counter
 from collections.abc import Iterator
 from typing import Literal
@@ -35,6 +36,7 @@ from pydantic import Field
 
 import verifiers.v1 as vf
 from verifiers.v1.memory import Memory, tokens
+from verifiers.v1.segments import segment_new_tokens
 
 from craftax_env import glyph, qv
 
@@ -205,11 +207,26 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         segments = self.config.player.segments
         header = segments.summary_header if segments is not None else None
         key = f"{seed}-{task.data.info['variant']}" if "variant" in task.data.info else f"{seed}"
-        state_dir = os.path.expandvars(self.config.state_dir) if self.config.state_dir else None
-        if state_dir:
-            os.makedirs(state_dir, exist_ok=True)
-        path = os.path.join(state_dir, f"{key}.pkl") if state_dir else None
-        saved = await asyncio.to_thread(_load_state, path) if path else None
+        # A population sampler's node (info["tree"]): one segment from the node's saved world
+        # ("load"; none for a fresh seed), saved to a file of this branch's own in "dir", so
+        # the node's branches never share a save. The segment ends at the segments' summary
+        # threshold with the handoff summary on this trace: one trace per episode.
+        tree = task.data.info.get("tree")
+        if tree is not None:
+            if segments is None:
+                raise ValueError("craftax tree nodes need player.segments (the segment's token budget)")
+            tree_dir = os.path.expandvars(tree["dir"])
+            os.makedirs(tree_dir, exist_ok=True)
+            path = os.path.join(tree_dir, f"{uuid.uuid4().hex}.pkl")
+            saved = await asyncio.to_thread(_load_state, tree["load"]) if tree.get("load") else None
+            if tree.get("load") and saved is None:
+                raise FileNotFoundError(f"tree node save {tree['load']} is gone")
+        else:
+            state_dir = os.path.expandvars(self.config.state_dir) if self.config.state_dir else None
+            if state_dir:
+                os.makedirs(state_dir, exist_ok=True)
+            path = os.path.join(state_dir, f"{key}.pkl") if state_dir else None
+            saved = await asyncio.to_thread(_load_state, path) if path else None
         block, played_before, summary = 0, 0.0, None
         if saved is not None:
             await asyncio.to_thread(game.restore, saved["game"])
@@ -338,6 +355,9 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         end = "won"
                     break
                 observation = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions)
+                if tree is not None and segment_new_tokens(interaction.trace) >= segments.new_tokens - segments.summary_tokens:
+                    end = "segment_end"  # the node's segment is done: its handoff summary closes it below
+                    break
                 before = trace_id()
                 segment = await interaction.turn(observation)
                 if trace_id() != before:  # a segment switch: the game is as the summary turn found it
@@ -345,7 +365,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             await boundary(trace_id(), None)
             if path:
                 handoff = None
-                if end == "time_limit" and hasattr(interaction, "summarize"):
+                if end in ("time_limit", "segment_end") and hasattr(interaction, "summarize"):
                     # The game pauses here: the model writes the summary the next job opens with,
                     # over the observation it will be shown again (the cut-off reply's actions
                     # were not played).
@@ -382,6 +402,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             "seed": seed,
             "max_floor": max_floor,
             "deaths": deaths,
+            "points": game.achievement_score,  # Craftax achievement points so far (1/3/5/8 by tier)
+            **({"state_path": path, "continues": end == "segment_end"} if tree is not None else {}),
         }
         if self.config.episode_log:
             line = {

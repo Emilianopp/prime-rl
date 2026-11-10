@@ -35,9 +35,14 @@ class TrainSource:
         self._admitted: dict[str, int] = defaultdict(int)
         self._rejected: dict[str, int] = defaultdict(int)
 
-    def next_task(self, *, step: int) -> TaskRequest:
+    def next_task(self, *, step: int) -> TaskRequest | None:
+        """None when the chosen env's sampler has nothing to hand out now (a population
+        sampler with every game in flight): the dispatcher asks again on its next pass."""
         env_name = self.rng.choices(self.env_names, weights=self.weights, k=1)[0]
-        return TaskRequest(env_name=env_name, task=next(self.curricula[env_name].sampler), step=step)
+        task = next(self.curricula[env_name].sampler)
+        if task is None:
+            return None
+        return TaskRequest(env_name=env_name, task=task, step=step)
 
     def on_result(self, group: list[vf.Episode]) -> bool:
         """Report a finalized group and return whether it should train."""
