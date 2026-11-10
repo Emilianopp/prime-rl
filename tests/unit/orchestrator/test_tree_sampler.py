@@ -239,3 +239,133 @@ def test_train_source_passes_the_step_to_the_depth_schedule():
     source = TrainSource([SimpleNamespace(name="craftax", tasks=roots, num_tasks=len(roots), config=config)])
     caps = [source.next_task(step=step).task.data.info["node"]["max_depth"] for step in (3, 60, 120)]
     assert caps == [10, 25, 50]
+
+
+# --- selection = "puct" (TTT-Discover's reuse rule) ---------------------------------------------
+
+
+def valued(task: vf.Task, tmp_path, *, value: float, reward: float = 0.0) -> vf.Episode:
+    episode = branch(task, tmp_path, score=reward)
+    episode.traces[0].info["crafter"]["search_value"] = value
+    return episode
+
+
+def puct_sampler(tmp_path, **kw) -> TreeSampler:
+    config = TreeSamplerConfig(selection="puct", state_dir=str(tmp_path), value_key="search_value",
+                               **{"fresh_root_share": 0.0, "max_depth": 5, **kw})
+    return TreeSampler(config, [make_root(i) for i in range(4)])
+
+
+def state_of(episode: vf.Episode) -> str:
+    return episode.traces[0].info["crafter"]["state_path"]
+
+
+def test_puct_archives_the_best_branches_by_state_value_and_keeps_the_parent(tmp_path):
+    sampler = puct_sampler(tmp_path)
+    root = next(sampler)  # an empty archive starts a world
+    assert root.data.info["node"]["depth"] == 0 and sampler.fresh_issued == 1
+    group = [valued(root, tmp_path, value=v, reward=r) for v, r in ((1.0, 0.9), (5.0, 0.1), (3.0, 0.5), (2.0, 0.7))]
+    sampler.observe(group)
+    assert sorted(n["score"] for n in sampler.archive.values()) == [3.0, 5.0]  # the value, not the reward
+    assert [os.path.exists(state_of(e)) for e in group] == [False, True, True, False]
+    assert sampler.puct_expansions == 0  # a fresh root is not an archive expansion
+    first = next(sampler)
+    node = first.data.info["node"]
+    assert node["depth"] == 1 and node["state_path"] == state_of(group[1]) and first.data.system_prompt.endswith("notes 0.1")
+    children = [valued(first, tmp_path, value=v) for v in (4.0, 6.0, 0.5)]
+    sampler.observe(children)
+    parent = sampler.archive[node["id"]]
+    assert os.path.exists(parent["state_path"])  # the game before a death can be played again
+    assert parent["n"] == 1 and parent["m"] == 6.0 and sampler.puct_expansions == 1
+    assert len(sampler.archive) == 4 and not os.path.exists(state_of(children[2]))
+    assert sampler.metrics()["archive"] == 4 and sampler.metrics()["archive_unvisited"] == 3
+
+
+def test_puct_comes_back_to_the_parent_when_its_branches_lost_everything(tmp_path):
+    sampler = puct_sampler(tmp_path, puct_c=0.0)
+    root = next(sampler)
+    sampler.observe([valued(root, tmp_path, value=v) for v in (5.0, 3.0)])
+    best = next(sampler)
+    assert best.data.info["node"]["score"] == 5.0
+    sampler.observe([valued(best, tmp_path, value=v) for v in (1.0, 0.5)])  # both branches died: tools gone
+    # Q(best) is now its best branch (1.0): the untouched 3.0 node is next, and the dead branches are last.
+    picks = []
+    for _ in range(2):
+        task = next(sampler)
+        picks.append(task.data.info["node"]["score"])
+        sampler.observe([valued(task, tmp_path, value=task.data.info["node"]["score"] - 0.1)])
+    assert picks[0] == 3.0 and 0.5 not in picks
+
+
+def test_puct_exploration_bonus_spreads_the_picks(tmp_path):
+    def picks(c: float) -> set[float]:
+        sampler = puct_sampler(tmp_path, puct_c=c, puct_keep_children=4, max_depth=2)
+        root = next(sampler)
+        sampler.observe([valued(root, tmp_path, value=v) for v in (5.0, 4.9, 4.8, 4.7)])
+        seen = set()
+        for _ in range(12):
+            task = next(sampler)
+            seen.add(task.data.info["node"]["score"])
+            sampler.observe([valued(task, tmp_path, value=6.0)])  # leaves at the cap: every node's Q becomes 6
+        return seen
+
+    assert picks(0.0) == {5.0}  # greedy: the first node to show a 6 is expanded for ever
+    # The bonus is in units of the archive's value range (0.3 here, the leaves' 6 is outside it), so it takes a
+    # large c to beat a gap of 1.1; it shrinks with a node's visits, so the under-visited nodes get their turn.
+    assert len(picks(20.0)) >= 3
+
+
+def test_puct_blocks_the_lineage_in_flight_and_starts_a_world_when_nothing_is_free(tmp_path):
+    sampler = puct_sampler(tmp_path)
+    root = next(sampler)
+    sampler.observe([valued(root, tmp_path, value=v) for v in (5.0, 3.0)])
+    a, b = next(sampler), next(sampler)
+    assert {a.data.info["node"]["score"], b.data.info["node"]["score"]} == {5.0, 3.0}  # the same node is not sent twice
+    assert next(sampler).data.info["node"]["depth"] == 0  # both in flight: a new world
+    sampler.observe([valued(a, tmp_path, value=7.0)])
+    child = next(sampler)  # a's branch is free; a itself is free again too
+    assert child.data.info["node"]["parent"] == a.data.info["node"]["id"]
+    assert next(sampler).data.info["node"]["depth"] == 0  # a is an ancestor of the node in flight, b is in flight
+
+
+def test_puct_fresh_root_share(tmp_path):
+    sampler = puct_sampler(tmp_path, fresh_root_share=0.5, puct_keep_children=4)
+    depths = []
+    for _ in range(40):
+        task = next(sampler)
+        depths.append(task.data.info["node"]["depth"])
+        sampler.observe([valued(task, tmp_path, value=float(len(depths)))])
+    assert 18 <= sum(d == 0 for d in depths) <= 22 and sampler.metrics()["fresh_root_share"] == pytest.approx(0.5, abs=0.05)
+
+
+def test_puct_archive_size_evicts_the_lowest_values_and_their_states(tmp_path):
+    sampler = puct_sampler(tmp_path, archive_size=3, puct_keep_children=4)
+    root = next(sampler)
+    group = [valued(root, tmp_path, value=v) for v in (1.0, 2.0, 3.0, 4.0)]
+    sampler.observe(group)
+    assert sorted(n["score"] for n in sampler.archive.values()) == [2.0, 3.0, 4.0]
+    assert not os.path.exists(state_of(group[0])) and sampler.archive_evicted == 1
+    assert len(os.listdir(tmp_path)) == 3
+
+
+def test_puct_depth_cap_and_checkpoint(tmp_path):
+    sampler = puct_sampler(tmp_path, max_depth=2)
+    root = next(sampler)
+    sampler.observe([valued(root, tmp_path, value=1.0)])
+    first = next(sampler)
+    sampler.observe([valued(first, tmp_path, value=2.0)])  # depth 2 = the cap: a leaf, not archived
+    assert len(sampler.archive) == 1
+    pending = next(sampler)  # in flight at the checkpoint
+    assert pending.data.info["node"]["depth"] == 1
+    state = sampler.state_dict()
+    resumed = puct_sampler(tmp_path, max_depth=2)
+    resumed.load_state_dict(state)
+    assert set(resumed.archive) == set(sampler.archive) and resumed.puct_expansions == 1 and not resumed.puct_inflight
+    assert next(resumed).data.info["node"]["id"] == pending.data.info["node"]["id"]  # free again after a resume
+
+
+def test_beam_is_unchanged_by_the_value_key(tmp_path):
+    sampler = TreeSampler(TreeSamplerConfig(keep=1, max_depth=3, state_dir=str(tmp_path), value_key="search_value"), [make_root(0)])
+    root = next(sampler)
+    sampler.observe([valued(root, tmp_path, value=9.0, reward=0.1), valued(root, tmp_path, value=1.0, reward=0.8)])
+    assert sampler.frontier[0]["score"] == 0.8 and not sampler.archive

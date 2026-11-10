@@ -482,6 +482,16 @@ def state_value(game: Any, explored: np.ndarray) -> tuple[float, dict[str, float
     return float(sum(parts.values())), parts
 
 
+def search_value(game: Any, explored: np.ndarray, achievement_score: float) -> float:
+    """What a tree search ranks saved games by (the sampler's `value_key`): the lineage's achievement
+    points, plus `state_value` (tools and stations: a death under drop_all loses them), plus under one
+    point for how close the next ladder step is (1 / (1 + requirement_units)) and a health tie-break."""
+    points, _ = state_value(game, explored)
+    heads = critical_path(game, explored, 1)[0]
+    near = 1.0 / (1 + requirement_units(game, explored, heads[-1])) if heads else 1.0
+    return float(achievement_score) + points + 0.9 * near + 0.01 * max(0, int(game.health))
+
+
 _COMPASS = {(-1, 0): "north", (1, 0): "south", (0, 1): "east", (0, -1): "west",
             (-1, 1): "north-east", (-1, -1): "north-west", (1, 1): "south-east", (1, -1): "south-west"}
 

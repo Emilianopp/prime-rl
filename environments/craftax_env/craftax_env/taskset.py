@@ -1262,6 +1262,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "first_turn": first_turn, "achievements_before": achievements_before,
                 "achievement_reward_delta": delta, "achievement_score_before": float(score_before),
                 "state_value": float(state_points), "state_parts": state_parts,
+                "search_value": world.search_value(game, explored, game.achievement_score),
                 "events": events[:80], "stations": stations,
                 "floor": game.floor, "position": list(game.position), "actions_hist": dict(actions),
                 "forfeit_kinds": dict(tracker.kinds), "ended_at": time.time(), **judge_inputs,

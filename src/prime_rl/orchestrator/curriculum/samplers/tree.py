@@ -24,12 +24,19 @@ A branch that reaches the final goal ends its lineage: it is recorded (depth, st
 and the lineage of node ids) and the root is not expanded further. Nothing in
 flight is ever waited for: a sampler must always return a task, so an empty frontier
 starts the next root seed.
+
+``selection = "puct"`` replaces the beam with one archive over all worlds (TTT-Discover's reuse
+rule, appendix A.2): the best ``puct_keep_children`` branches of every expansion enter it with the
+value the env gives their state, a parent's saved game stays, and the next node is the archive's
+best by ``Q + c * scale * P * sqrt(1 + T) / (1 + n)`` unless an ancestor or descendant of it is in
+flight. ``fresh_root_share`` of the expansions start a new world instead.
 """
 
 from __future__ import annotations
 
 import glob
 import itertools
+import math
 import os
 import time
 from collections import Counter
@@ -91,9 +98,18 @@ class TreeSampler(TaskSampler):
         self._observes = 0
         self._last_sweep = time.time()
         self.step = 0  # the orchestrator step (TrainSource.next_task sets it): picks a new world's cap
+        # selection = "puct": node id -> node (with "n" visits and "m", the best value among its branches)
+        self.archive: dict[str, dict[str, Any]] = {}
+        self.puct_inflight: dict[str, dict[str, Any]] = {}  # archive nodes being expanded: {"lineage", "sent_at"}
+        self.puct_expansions = 0  # T: archive expansions that reported
+        self.fresh_issued = 0
+        self.reexpansions = 0  # picks of a node that had been expanded before
+        self.archive_evicted = 0
 
     # --- tasks out ---------------------------------------------------------------
     def __next__(self) -> vf.Task | None:
+        if self.config.selection == "puct":
+            return self._next_puct()
         node = self._pop_ready() or self._release_greedy()
         if node is None:
             if self.config.max_roots is not None and len(self._open_roots()) >= self.config.max_roots:
@@ -106,6 +122,51 @@ class TreeSampler(TaskSampler):
         level.setdefault("inflight", []).append(dict(node))
         self.expansions += 1
         return self._task_for(node)
+
+    def _next_puct(self) -> vf.Task:
+        now = time.time()
+        for node_id in [k for k, v in self.puct_inflight.items() if now - v["sent_at"] > self.config.sweep_after_s]:
+            del self.puct_inflight[node_id]  # a stale-cancelled group never reports: the node may be picked again
+        node = None
+        if self.fresh_issued >= self.config.fresh_root_share * (self.expansions + 1):
+            node = self._select_puct()
+        if node is None:
+            node = self._new_root()
+            self.fresh_issued += 1
+        else:
+            self.puct_inflight[node["id"]] = {"lineage": list(node.get("lineage", [node["id"]])), "sent_at": now}
+            self.reexpansions += node["n"] > 0
+        self.expansions += 1
+        return self._task_for(node)
+
+    def _puct_scores(self) -> list[tuple[float, dict[str, Any]]]:
+        """(score, node) for every archived node, best value first."""
+        ranked = sorted(self.archive.values(), key=lambda n: (-n["score"], n["n"], n["depth"]))
+        if not ranked:
+            return []
+        size = len(ranked)
+        total = size * (size + 1) / 2
+        scale = (ranked[0]["score"] - ranked[-1]["score"]) or 1.0
+        explore = self.config.puct_c * scale * math.sqrt(1 + self.puct_expansions)
+        out = []
+        for rank, node in enumerate(ranked):
+            q = node["m"] if node["n"] > 0 and node["m"] is not None else node["score"]
+            out.append((q + explore * ((size - rank) / total) / (1 + node["n"]), node))
+        return out
+
+    def _select_puct(self) -> dict[str, Any] | None:
+        """The archive's best node by the PUCT score, skipping the lineages in flight (the ancestors and
+        descendants of a node being expanded) and nodes at their world's depth cap."""
+        busy_ids = set(self.puct_inflight)
+        busy_ancestors = {a for sent in self.puct_inflight.values() for a in sent["lineage"]}
+        best, best_score = None, -math.inf
+        for score, node in self._puct_scores():
+            if score <= best_score or node["depth"] >= self._cap(node):
+                continue
+            if node["id"] in busy_ancestors or busy_ids.intersection(node.get("lineage", ())):
+                continue
+            best, best_score = node, score
+        return best
 
     def set_step(self, step: int) -> None:
         self.step = int(step)
@@ -184,7 +245,8 @@ class TreeSampler(TaskSampler):
         if not node or node.get("root") not in self.root_tasks:
             return  # not one of ours (a resumed run's stragglers, or another sampler's task)
         root, depth = node["root"], int(node["depth"]) + 1
-        level = self.levels.setdefault((root, depth), self._new_level())
+        puct = self.config.selection == "puct"
+        level = self._new_level() if puct else self.levels.setdefault((root, depth), self._new_level())
         level["observed"] += 1
         inflight = level.setdefault("inflight", [])
         for i, sent in enumerate(inflight):
@@ -192,6 +254,7 @@ class TreeSampler(TaskSampler):
                 inflight.pop(i)
                 break
         self._observes += 1
+        values: list[float] = []
         key = _segments_info(_data_info(group[0].task.data)).get("info_key") or self.config.info_key
         if not any(isinstance(trace.info.get(key), dict) for episode in group for trace in episode.traces):
             # The env wrote nothing under `key`: every branch would be a leaf and the tree never grows.
@@ -215,28 +278,66 @@ class TreeSampler(TaskSampler):
                 child = {
                     "id": info.get("node_id") or trace.id, "parent": node["id"], "root": root, "root_index": node.get("root_index", 0),
                     "depth": depth, "state_path": info.get("state_path"), "state_sha256": info.get("state_sha256"),
-                    "summary": info.get("summary"), "score": float(trace.reward), "achievements": sorted(achievements),
+                    "summary": info.get("summary"), "score": self._value(info, trace), "achievements": sorted(achievements),
                     "lineage": [*node.get("lineage", [node["id"]]), info.get("node_id") or trace.id],
                     "max_depth": node.get("max_depth"),
                 }
+                values.append(child["score"])
                 if info.get("final_goal_reached"):
                     self.found.append({"root": root, "depth": depth, "node": child["id"], "lineage": child["lineage"],
                                        "game_step": info.get("game_step"), "expansions": self.expansions, "segments": self.segments,
                                        "trace_id": trace.id, "at": time.time()})
                     get_logger().info(f"TreeSampler: final goal reached at depth {depth} by node {child['id']} (root {root})")
-                    self.finished_roots.add(root)
+                    if not puct:
+                        self.finished_roots.add(root)
                     self._delete_state(child)
                 elif episode.ok and getattr(trace, "ok", True) and info.get("continues") and info.get("state_path") and depth < self._cap(node):
                     level["candidates"].append(child)
                 else:
                     self._delete_state(child)
-        self._delete_state(node)  # every branch restored it; the beam never comes back
-        if root in self.finished_roots:
+        if puct:
+            self._archive_branches(node, level["candidates"], values)
+        else:
+            self._delete_state(node)  # every branch restored it; the beam never comes back
+        if puct:
+            pass
+        elif root in self.finished_roots:
             self._drop_root(root)
         elif level["observed"] >= level["expected"]:
             self._close_level(root, depth)
         if self.config.state_dir and time.time() - self._last_sweep > self.config.sweep_after_s / 4:
             self._sweep()
+
+    def _value(self, info: dict[str, Any], trace: Any) -> float:
+        """A branch's value: the beam's score, and under `puct` the value of the state it reached."""
+        key = self.config.value_key if self.config.selection == "puct" else None
+        value = info.get(key) if key else None
+        return float(value) if isinstance(value, (int, float)) else float(trace.reward)
+
+    def _archive_branches(self, node: dict[str, Any], branches: list[dict[str, Any]], values: list[float]) -> None:
+        """`puct`: one expansion of `node` reported. Its best branch value is the node's Q, the node and
+        its ancestors count a visit, and its best branches enter the archive."""
+        self.puct_inflight.pop(node["id"], None)
+        if node["depth"] > 0:  # an archive pick (a fresh root is not a state of the archive)
+            self.puct_expansions += 1
+            parent = self.archive.get(node["id"])
+            if parent is not None and values:
+                parent["m"] = max(values) if parent["m"] is None else max(parent["m"], max(values))
+            for ancestor in node.get("lineage", [node["id"]]):
+                if ancestor in self.archive:
+                    self.archive[ancestor]["n"] += 1
+        branches.sort(key=lambda n: -n["score"])
+        for child in branches[: self.config.puct_keep_children]:
+            self.archive[child["id"]] = {**child, "n": 0, "m": None}
+        for child in branches[self.config.puct_keep_children :]:
+            self._delete_state(child)
+        extra = len(self.archive) - self.config.archive_size
+        if extra > 0:
+            busy = {a for sent in self.puct_inflight.values() for a in sent["lineage"][-1:]}
+            for old in sorted((n for n in self.archive.values() if n["id"] not in busy), key=lambda n: (n["score"], -n["n"]))[:extra]:
+                del self.archive[old["id"]]
+                self._delete_state(old)
+                self.archive_evicted += 1
 
     def _close_level(self, root: str, depth: int) -> None:
         level = self.levels.pop((root, depth), None)
@@ -273,6 +374,7 @@ class TreeSampler(TaskSampler):
 
     def _referenced(self) -> set[str]:
         nodes = list(self.frontier) + [n for level in self.levels.values() for n in level["candidates"] + level.get("inflight", [])]
+        nodes += list(self.archive.values())
         return {n["state_path"] for n in nodes if n.get("state_path")}
 
     def _sweep(self) -> None:
@@ -303,6 +405,8 @@ class TreeSampler(TaskSampler):
                          "deepest": self.deepest, "deepest_tier": self.deepest_tier, "states_deleted": self.states_deleted,
                          "deepest_floor": self.deepest_floor},
             "segments_per_depth": dict(self.segments_per_depth),
+            "puct": {"archive": list(self.archive.values()), "expansions": self.puct_expansions, "fresh_issued": self.fresh_issued,
+                     "reexpansions": self.reexpansions, "evicted": self.archive_evicted},
         }
 
     def _root_index(self, root_id: str) -> int:
@@ -340,9 +444,30 @@ class TreeSampler(TaskSampler):
             self._close_level(*key)
         self.frontier.extend(replay)
         self.replayed = len(replay)
+        # puct: the archive keeps every node an in-flight group was expanding, so nothing is replayed.
+        puct = state_dict.get("puct") or {}
+        self.archive = {n["id"]: n for n in puct.get("archive", [])}
+        self.puct_inflight = {}
+        self.puct_expansions, self.fresh_issued = int(puct.get("expansions", 0)), int(puct.get("fresh_issued", 0))
+        self.reexpansions, self.archive_evicted = int(puct.get("reexpansions", 0)), int(puct.get("evicted", 0))
 
     def metrics(self) -> dict[str, float]:
-        return {
+        puct = {}
+        if self.config.selection == "puct":
+            nodes = list(self.archive.values())
+            puct = {
+                "archive": float(len(nodes)),
+                "archive_best_value": max((n["score"] for n in nodes), default=0.0),
+                "archive_mean_depth": sum(n["depth"] for n in nodes) / len(nodes) if nodes else 0.0,
+                "archive_unvisited": float(sum(n["n"] == 0 for n in nodes)),
+                "archive_worlds": float(len({n["root"] for n in nodes})),
+                "archive_evicted": float(self.archive_evicted),
+                "puct_expansions": float(self.puct_expansions),
+                "puct_inflight": float(len(self.puct_inflight)),
+                "reexpansions": float(self.reexpansions),
+                "fresh_root_share": self.fresh_issued / self.expansions if self.expansions else 0.0,
+            }
+        return puct | {
             "frontier": float(len(self.frontier)),
             "replayed_on_resume": float(getattr(self, "replayed", 0)),
             "open_depths": float(len(self.levels)),

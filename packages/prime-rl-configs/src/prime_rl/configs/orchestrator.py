@@ -228,6 +228,35 @@ class TreeSamplerConfig(BaseConfig):
     slot waits for one of them instead of starting a new world, so the same worlds go deeper.
     None: start a new root whenever no node is ready."""
 
+    selection: Literal["beam", "puct"] = "beam"
+    """How the next node is picked. `beam`: per root and depth the `keep` best branches continue and a
+    parent's saved game is deleted once its branches have reported. `puct`: every kept node stays in one
+    archive over all worlds and the next node is the one with the highest
+    ``Q + puct_c * (Rmax - Rmin) * P * sqrt(1 + T) / (1 + n)`` (TTT-Discover, appendix A.2): Q the best
+    value among the node's branches (its own value before its first expansion), P a linear rank prior
+    over the archive by value, n the expansions of the node or its descendants, T all archive
+    expansions. A node whose ancestor or descendant is in flight is not picked. A lineage that lost
+    its tools at a death is simply not picked again and the game before the death is. `keep` and
+    `max_roots` are not used."""
+
+    puct_c: float = Field(1.0, ge=0)
+    """The exploration coefficient of the `puct` rule."""
+
+    fresh_root_share: float = Field(0.5, ge=0, le=1)
+    """`puct`: the share of expansions that start a new world from reset (the policy must still play
+    the early game); the rest are picked from the archive. A new world also starts whenever no
+    archived node can be picked."""
+
+    puct_keep_children: int = Field(2, ge=1)
+    """`puct`: how many of a node's branches (the best by value) enter the archive."""
+
+    archive_size: int = Field(256, ge=1)
+    """`puct`: nodes kept, the best by value; the saved games of the others are deleted."""
+
+    value_key: str | None = None
+    """`puct`: the entry of the env's segment info (`trace.info[info_key]`) that values a node's state
+    (craftax-env: `search_value`). None, or an episode without it: the branch's reward."""
+
     info_key: str = "crafter"
     """The `trace.info` entry the env fills with `continues`, `state_path`, `summary`, ...
     A root task's `info["segments"]["info_key"]` (craftax-env sets it) takes precedence."""
