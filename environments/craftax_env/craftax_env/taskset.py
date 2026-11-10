@@ -146,6 +146,10 @@ class CraftaxConfig(vf.TasksetConfig):
     """Show the exact action-tag format with a real Craftax action (<action>MOVE_LEFT</action>) in
     the system prompt's RESPONSE FORMAT and in every turn's closing request, and name the format in
     the forfeit feedback. Off: GlyphBench's text (its example is MOVE_FORWARD, not a Craftax action)."""
+    recipes: bool = False
+    """Add a RECIPES block to the system prompt (table / furnace placement, the three pickaxes, which
+    tool mines what) and, when a craft or placement changes nothing, say why in the next [Message]
+    (what is missing, or which station is not within one step). Off: GlyphBench's text."""
     visible_list: bool = False
     """Add a [Visible] block after every observation's [Grid] (also on the notes turn): what is on screen by
     kind, nearest first, with map places F<floor> (row,col) (glyph.visible), and say so in the system prompt.
@@ -386,6 +390,8 @@ def _new_game(seed: int, max_turns: int | None) -> glyph.CraftaxGame:
     return glyph.CraftaxGame(seed, max_turns)
 
 
+_BUILDS = frozenset(glyph.RECIPES) | frozenset(glyph.PLACEMENTS)
+"""Crafts and placements: with env.recipes a failed one says why in the next message."""
 _PLACE_STATIONS = {glyph.ACTION_NAMES.index("PLACE_TABLE"): ("table", glyph.TABLE_BLOCK),
                    glyph.ACTION_NAMES.index("PLACE_FURNACE"): ("furnace", glyph.FURNACE_BLOCK)}
 _SLEEP = glyph.ACTION_NAMES.index("SLEEP")
@@ -804,6 +810,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         example = bool(task.data.info.get("action_example", False))
         show_visible = bool(task.data.info.get("visible_list", False))
         feedback = cfg.action_feedback
+        recipes = bool(task.data.info.get("recipes", False))
         started = time.time()
         deadline = started + cfg.max_episode_seconds if cfg.max_episode_seconds else None
         store = self._store() if segmented else None
@@ -962,7 +969,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         if row is not None:
                             row["acts"].append(int(index))
                         logged = segmented and _logs_feedback(index)
-                        before = game.snapshot() if feedback or logged or wasted is not None else None
+                        why_failed = recipes and not feedback and glyph.ACTION_NAMES[index] in _BUILDS
+                        before = game.snapshot() if feedback or logged or why_failed or wasted is not None else None
                         floor_before = game.floor
                         ahead = game.block_ahead() if segmented and index in _PLACE_STATIONS else None
                         # The cell a DO hits, to tell the agent's own DO from an arrow when a station goes.
@@ -1009,6 +1017,11 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                                 timeline.add(game.turn, f"slept {step.fast_forward_ticks} ticks at {glyph.place(game.floor, game.position)}")
                             floor, mask = game.visible()
                             explored[floor] |= mask
+                        if why_failed:
+                            after = game.snapshot()
+                            text = game.feedback(index, before, after)
+                            if ": nothing made" in text or ": nothing placed" in text:  # the game's reason for a failed build
+                                game.message = f"{game.message} {text}".strip()
                         if feedback:
                             note = f" Fast-forwarded {step.fast_forward_ticks} sleep/rest ticks." if step.fast_forward_ticks else ""
                             lines.append(game.feedback(index, before, game.snapshot()) + note)
@@ -1322,7 +1335,7 @@ class CraftaxTaskset(vf.Taskset[CraftaxTask, CraftaxConfig]):
         cfg = self.config
         base = cfg.seed + (1_000_000 if cfg.split == "eval" else 0)
         system = glyph.system_prompt(cfg.enable_reasoning, cfg.max_output_tokens, cfg.forfeit_mode, cfg.respawn, cfg.max_actions_per_turn,
-                                     action_example=cfg.action_example, visible_list=cfg.visible_list)
+                                     action_example=cfg.action_example, visible_list=cfg.visible_list, recipes=cfg.recipes)
         for i in range(cfg.num_examples):
             # Prompt-less: the env opens the episode with the first observation of the
             # world it builds, so loading stays instant.
@@ -1336,6 +1349,7 @@ class CraftaxTaskset(vf.Taskset[CraftaxTask, CraftaxConfig]):
                         "max_actions": cfg.max_actions_per_turn,
                         "action_example": cfg.action_example,
                         "visible_list": cfg.visible_list,
+                        "recipes": cfg.recipes,
                         # what the tree sampler reads (samplers/tree.py): where the segment's info is and
                         # how a child's prompt introduces the summary, so it matches continuation_prompt
                         "segments": {"info_key": "craftax", "continuation_header": CONTINUATION_HEADER,

@@ -315,9 +315,26 @@ _CRAFTAX_EXAMPLE = (
 )
 
 
+# recipes = True (opt-in; off keeps GlyphBench's text byte for byte): the crafting rules the game never
+# states. Rescue test 11629237: from a full kit the step-120 policy made the iron pickaxe in 0/120
+# children without this block and 19/120 with it.
+RECIPES_PROMPT = (
+    "RECIPES (the game's exact rules)\n"
+    "- PLACE_TABLE: uses 2 wood; the cell you face must be free.\n"
+    "- PLACE_FURNACE: uses 1 stone; the cell you face must be free.\n"
+    "- MAKE_WOOD_PICKAXE: uses 1 wood, with a table within one step of you.\n"
+    "- MAKE_STONE_PICKAXE: uses 1 wood and 1 stone, with a table within one step of you.\n"
+    "- MAKE_IRON_PICKAXE: uses 1 wood, 1 stone, 1 coal and 1 iron, with a table AND a furnace both "
+    "within one step of you (the 8 cells around you).\n"
+    "- Stone and coal need a wood pickaxe to mine, iron needs a stone pickaxe, diamond needs an iron pickaxe.\n"
+    "- Making a pickaxe or sword you already hold at that level or better does nothing.\n"
+    "- A craft or placement that fails says why in the next [Message]."
+)
+
+
 def system_prompt(
     reasoning: bool, max_output_tokens: int | None, forfeit_mode: str, respawn: bool = False, max_actions: int = 1,
-    action_example: bool = False, visible_list: bool = False,
+    action_example: bool = False, visible_list: bool = False, recipes: bool = False,
 ) -> str:
     forfeit = _FORFEIT[forfeit_mode]
     if reasoning:
@@ -349,7 +366,7 @@ def system_prompt(
         fmt = _ACTION_ONLY_FORMAT.format(valid=", ".join(ACTION_NAMES), budget=budget)
     game = GAME_PROMPT.replace(_TERMINATION, _CONTINUOUS) if respawn else GAME_PROMPT
     conventions = f"{OBSERVATION_CONVENTIONS} {VISIBLE_CONVENTION}" if visible_list else OBSERVATION_CONVENTIONS
-    blocks = [game, conventions, fmt] + ([_MULTI.format(n=max_actions)] if max_actions > 1 else [])
+    blocks = [game] + ([RECIPES_PROMPT] if recipes else []) + [conventions, fmt] + ([_MULTI.format(n=max_actions)] if max_actions > 1 else [])
     return "\n\n---\n".join(blocks)
 
 
