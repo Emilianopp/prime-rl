@@ -22,6 +22,7 @@ class FakeEngine:
     def __init__(self, completion=(90, 91), abort=False):
         self.completion = list(completion)
         self.abort = abort
+        self.misforce = False  # sample something else than a forced (logit_bias) token
         self.calls: list[tuple] = []
         self.open: set[str] = set()
         self.gate: asyncio.Event | None = None
@@ -52,13 +53,16 @@ class FakeEngine:
         aborted = self.abort or rid in self.aborted
         finish = {"type": "abort", "message": "boom"} if aborted else {"type": "stop"}
         state = {"state_id": f"s{len(self.evictions)}"} if kv_eviction is not None else None
+        completion = list(self.completion)
+        if sampling_params.get("logit_bias"):
+            completion = [int(next(iter(sampling_params["logit_bias"]))) + self.misforce]
         return {
-            "output_ids": list(self.completion),
+            "output_ids": completion,
             "meta_info": {
                 "id": "r",
                 "kv_eviction": {"cache_state": state} if state else None,
                 "finish_reason": finish,
-                "output_token_logprobs": [(-0.1, t, None) for t in self.completion],
+                "output_token_logprobs": [(-0.1, t, None) for t in completion],
             },
         }
 
@@ -584,3 +588,90 @@ def test_aborted_delta_call_is_retried_on_the_full_prompt():
     engine = run(scenario())
     # The retry reopens on the full chronological prompt, rebuilt from the session.
     assert engine.calls[-2] == ("generate", "t.1", SYSTEM + USER + GEN + [90, E] + BRIDGE + USER + GEN)
+
+
+def _window_table(engine, replay=True):
+    return SessionTable(engine, timeout=60, eviction=TurnWindow(max_turns=2, stride=1, message_end_id=E), replay=replay)
+
+
+async def _turns(table, prompt, n):
+    for _ in range(n):
+        await table.generate("t", prompt, {})
+        prompt = prompt + [90, E] + BRIDGE + USER + GEN
+    return prompt
+
+
+def test_replay_rebuilds_the_session_after_a_weight_update():
+    async def scenario():
+        engine, control = FakeEngine(completion=(90, E)), FakeEngine(completion=(90, E))
+        table, plain = _window_table(engine), _window_table(control)
+        prompt = await _turns(table, SYSTEM + USER + GEN, 4)
+        await _turns(plain, SYSTEM + USER + GEN, 4)
+        table.weights_updated()
+        await table.generate("t", prompt, {})
+        await plain.generate("t", prompt, {})
+        return engine, control, table
+
+    engine, control, table = run(scenario())
+    resident = SYSTEM + USER + GEN + 4 * ([90, E] + BRIDGE + USER + GEN)
+    resident = resident[: -len(BRIDGE + USER + GEN)]  # the session holds up to the last reply
+    # Calls 2 and 3 evicted, beginning at resident lengths 14 and 20: three chunks,
+    # each ending on the token its original call left without KV, sampled forced.
+    replay = [c for c in engine.calls if c[0] == "generate" and c[1] == "t.1"]
+    assert [c[2] for c in replay[:3]] == [resident[0:13], resident[14:19], resident[20:25]]
+    assert ("close", "t.0") in engine.calls and ("open", "t.1") in engine.calls
+    replayed = [e for e in engine.evictions if e["cache_id"] == "t.1"]
+    assert [e["evict_spans"] for e in replayed[:3]] == [[], [[3, 8]], [[3, 9]]]
+    assert [e["call_index"] for e in replayed] == [0, 1, 2, 3]
+    assert [e["expected_state_id"] for e in replayed] == [None, "s5", "s6", "s7"]
+    # The real call then runs as it would have without the update: same tail, same eviction.
+    assert replay[3][2] == control.calls[-1][2]
+    assert replayed[3]["evict_spans"] == control.evictions[-1]["evict_spans"]
+    assert table.stats["replays"] == 1 and table.stats["replay_calls"] == 3
+    assert table.stats["replay_tokens"] == len(resident)
+
+
+def test_no_replay_without_a_weight_update_or_with_replay_off():
+    async def scenario():
+        engine, off = FakeEngine(completion=(90, E)), FakeEngine(completion=(90, E))
+        table, table_off = _window_table(engine), _window_table(off, replay=False)
+        await _turns(table, SYSTEM + USER + GEN, 4)
+        table_off.weights_updated()
+        await _turns(table_off, SYSTEM + USER + GEN, 4)
+        return table, table_off
+
+    table, table_off = run(scenario())
+    assert table.stats["replays"] == 0 and table_off.stats["replays"] == 0
+
+
+def test_replay_runs_once_per_weight_update():
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        table = _window_table(engine)
+        prompt = await _turns(table, SYSTEM + USER + GEN, 3)
+        table.weights_updated()
+        await _turns(table, prompt, 2)
+        return table
+
+    assert run(scenario()).stats["replays"] == 1
+
+
+def test_a_failed_replay_fails_the_call():
+    async def scenario():
+        engine = FakeEngine(completion=(90, E))
+        table = _window_table(engine)
+        prompt = await _turns(table, SYSTEM + USER + GEN, 3)
+        table.weights_updated()
+        engine.misforce = True
+        with pytest.raises(GenerateRequestError):
+            await table.generate("t", prompt, {})
+        return engine, table
+
+    engine, table = run(scenario())
+    assert table.stats["replays_failed"] == 1 and table.stats["replays"] == 0
+    assert not engine.open  # neither the stale nor the half-built session is left open
+
+
+def test_replay_needs_an_eviction_schedule():
+    with pytest.raises(ValueError):
+        SessionTable(FakeEngine(), timeout=60, replay=True)

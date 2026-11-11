@@ -187,6 +187,12 @@ class CompactionConfig(BaseConfig):
     message_end_token: str = "<|im_end|>"
     """The token that ends a chat message in the model's template (turn boundaries)."""
 
+    reprefill_on_weight_update: bool = False
+    """KV-Streams: after each weight update, rebuild every live session's KV under the
+    new weights before its next call, by re-prefilling the trace's history with each
+    eviction applied where it happened (the trainer's mask is unchanged). Off, sessions
+    keep the KV their earlier policies computed."""
+
     @model_validator(mode="after")
     def validate_built(self):
         if self.strategy != "sliding_window":
@@ -854,6 +860,8 @@ class RLConfig(BaseConfig):
             if self.inference.sglang.eviction not in (None, eviction):
                 raise ValueError("set [compaction] instead of inference.sglang.eviction")
             self.inference.sglang.eviction = eviction
+            if compaction is not None and compaction.reprefill_on_weight_update:
+                self.inference.sglang.reprefill_on_weight_update = True
         return self
 
     @model_validator(mode="after")

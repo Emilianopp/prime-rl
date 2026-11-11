@@ -11,7 +11,7 @@ from prime_rl.configs.inference import InferenceConfig
 SERVER_SCRIPT = Path(__file__).with_name("server.py")
 
 # [inference.sglang] fields prime-rl reads itself; everything else is a ServerArgs field.
-PRIME_RL_FIELDS = {"python", "session_timeout", "allow_session_rewrite", "eviction"}
+PRIME_RL_FIELDS = {"python", "session_timeout", "allow_session_rewrite", "reprefill_on_weight_update", "eviction"}
 
 # KV-Streams on a hybrid model evicts attention KV only and keeps each session's live
 # recurrent state, which needs SGLang's no_buffer state cache without overlap scheduling.
@@ -107,6 +107,7 @@ def server(config: InferenceConfig) -> None:
         "sessions": config.sglang.sessions,
         "session_timeout": config.sglang.session_timeout,
         "allow_session_rewrite": config.sglang.allow_session_rewrite,
+        "reprefill_on_weight_update": config.sglang.reprefill_on_weight_update,
         "eviction": eviction_launch_args(config),
     }
     args_path.write_text(json.dumps(launch, indent=2))

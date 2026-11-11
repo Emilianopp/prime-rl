@@ -273,6 +273,11 @@ class _TraceSession:
     ends: list[int] = field(default_factory=list)
     # Each eviction plan's own state for this session.
     plan_states: list[dict[str, Any]] = field(default_factory=list)
+    # The session's evicting calls, in order: (resident length when the call began,
+    # its ``evict_spans``), all a replay needs besides ``resident`` and ``protected``.
+    evictions: list[tuple[int, list[list[int]]]] = field(default_factory=list)
+    # The weight version the session's KV was computed under (see ``SessionTable.replay``).
+    weight_version: int = 0
 
 
 class SessionDesyncError(Exception):
@@ -307,6 +312,12 @@ class SessionTable:
     raises ``SessionDesyncError`` (HTTP 409) and the client resends in full. A
     response that ran on the session is marked ``"session": true``, and a client
     sends deltas only after one, so a server without sessions (vLLM) never gets one.
+
+    ``replay``: weight updates keep the KV cache, so a session's KV mixes every
+    policy it ran under. With ``replay`` on (KV-Streams only), the first call on a
+    session after a weight update first rebuilds its KV under the new weights: a
+    fresh session re-prefills the trace's history in chunks, applying each recorded
+    eviction where it happened, so the rebuilt KV is what the trainer's mask replays.
     """
 
     def __init__(
@@ -317,9 +328,14 @@ class SessionTable:
         overlap_schedule: bool = False,
         plans: list[EvictionPlan] = (),
         allow_rewrite: bool = False,
+        replay: bool = False,
     ):
         self.engine = engine
         self.timeout = timeout
+        if replay and eviction is None:
+            raise ValueError("replay rebuilds KV-Streams sessions: it needs an eviction schedule")
+        self.replay = replay
+        self.weight_version = 0
         # A rewritten history raises SessionRewriteError unless allowed: a client bug
         # (a re-tokenized prompt) must fail loudly, not resurrect evicted turns.
         self.allow_rewrite = allow_rewrite
@@ -342,7 +358,18 @@ class SessionTable:
             "failed_calls": 0,
             "resurrected": 0,
             "rewrites_refused": 0,
+            "replays": 0,
+            "replay_calls": 0,
+            "replay_tokens": 0,
+            "replays_failed": 0,
         }
+
+    def weights_updated(self) -> None:
+        """The engine now runs new weights: every live session's KV is stale."""
+        self.weight_version += 1
+        if self.replay:
+            live = sum(trace.engine_session is not None for trace in self._traces.values())
+            logger.info("weights updated (version %d): %d sessions replay at their next call", self.weight_version, live)
 
     async def generate(
         self,
@@ -364,6 +391,8 @@ class SessionTable:
                 raise SessionDesyncError(
                     f"trace {trace_id}: delta on {prefix_len} tokens, session holds {len(trace.resident)}"
                 )
+            if self.replay and trace.engine_session is not None and trace.weight_version != self.weight_version:
+                await self._replay(trace_id, trace, kwargs)
             for attempt in range(2):
                 resident = trace.resident
                 held = len(resident)
@@ -394,11 +423,12 @@ class SessionTable:
                     self._note_resurrection(trace_id, trace)
                     reopen = trace.engine_session is not None or attempt > 0
                     await self._close(trace)
-                    engine_session = f"{_SESSION_UNSAFE.sub('-', trace_id)[:200]}.{next(self._incarnation)}"
+                    engine_session = self._session_name(trace_id)
                     if not await self.engine.open_session(engine_session, self.timeout):
                         logger.warning("could not open an SGLang session for trace %s; running stateless", trace_id)
                         return await self.engine.generate(token_ids, sampling_params, **kwargs)
                     trace.engine_session = engine_session
+                    trace.weight_version = self.weight_version
                     self.stats["reopened" if reopen else "opened"] += 1
                     if trace.finished:
                         # finish() ran while the session opened, so it had nothing to abort or
@@ -463,9 +493,81 @@ class SessionTable:
                         # eviction - the previous call's last sampled token, or (with
                         # overlap scheduling, which computes that one early) the new tail.
                         ret["eviction"] = {"spans": plan.spans, "at": held - (0 if self.overlap_schedule else 1)}
+                        trace.evictions.append((held, plan.request["evict_spans"]))
                     trace.dead = plan.dead
                 ret["prompt_len"] = prompt_len
                 return ret
+
+    def _session_name(self, trace_id: str) -> str:
+        return f"{_SESSION_UNSAFE.sub('-', trace_id)[:200]}.{next(self._incarnation)}"
+
+    async def _replay(self, trace_id: str, trace: _TraceSession, kwargs: dict[str, Any]) -> None:
+        """Rebuild the trace's session KV under the current weights (``replay``).
+
+        A fresh session re-prefills ``resident`` in one call per evicting call: each
+        chunk ends where an evicting call began, and the next chunk's call applies that
+        call's eviction before prefilling on, so every token's KV is computed with the
+        same tokens dead as when it was first computed. A chunk's last token is the one
+        the original call left without KV (the previous call's last sampled token): the
+        replay call samples it, forced, as its one token, so each chunk leaves the
+        session as the original call did, and the recorded ``evict_spans`` (survivor
+        coordinates) apply unchanged. A failed replay fails the call: continuing on a
+        resurrected or half-built session would silently break the training mask."""
+        resident = trace.resident
+        ends = [held for held, _ in trace.evictions] + [len(resident)]
+        starts = [0, *ends[:-1]]
+        evictions = [[], *(spans for _, spans in trace.evictions)]
+        stale, trace.engine_session = trace.engine_session, None
+        await self.engine.close_session(stale)  # its KV is stale anyway: free it first
+        engine_session = self._session_name(trace_id)
+        state_id = None
+        try:
+            if not await self.engine.open_session(engine_session, self.timeout):
+                raise GenerateRequestError(f"trace {trace_id}: could not open a session to replay into")
+            trace.engine_session = engine_session
+            for index, (start, end, evict_spans) in enumerate(zip(starts, ends, evictions)):
+                if end - start < 2:
+                    raise GenerateRequestError(f"trace {trace_id}: replay chunk [{start}, {end}) has no prompt")
+                forced = resident[end - 1]
+                request = {
+                    "version": 1,
+                    "cache_id": engine_session,
+                    "call_id": f"{engine_session}.c{index}",
+                    "call_index": index,
+                    "expected_state_id": state_id,
+                    "protected_prefix_len": trace.protected,
+                    "evict_spans": evict_spans,
+                }
+                trace.inflight_rid = request["call_id"]
+                try:
+                    ret = await self.engine.generate(
+                        resident[start : end - 1],
+                        {"max_new_tokens": 1, "temperature": 0.0, "logit_bias": {str(forced): 1e4}},
+                        session_id=engine_session,
+                        kv_eviction=request,
+                        rid=request["call_id"],
+                        **kwargs,
+                    )
+                finally:
+                    trace.inflight_rid = None
+                if trace.finished:
+                    raise GenerateRequestError(f"trace {trace_id} finished during its replay")
+                if _aborted(ret) or list(ret.get("output_ids") or []) != [forced]:
+                    finish = ret["meta_info"].get("finish_reason")
+                    raise GenerateRequestError(
+                        f"trace {trace_id}: replay call {index} returned {ret.get('output_ids')} "
+                        f"(forced {forced}, finish {finish})"
+                    )
+                state_id = ((ret["meta_info"].get("kv_eviction") or {}).get("cache_state") or {}).get("state_id")
+                self.stats["replay_calls"] += 1
+        except BaseException:
+            self.stats["replays_failed"] += 1
+            await self._close(trace)
+            raise
+        trace.call_index, trace.state_id = len(ends), state_id
+        trace.weight_version = self.weight_version
+        self.stats["replays"] += 1
+        self.stats["replay_tokens"] += len(resident)
 
     def _note_resurrection(self, trace_id: str, trace: _TraceSession) -> None:
         """A fresh session holds the whole prompt again, evicted turns included, so
@@ -562,7 +664,7 @@ class SessionTable:
         if engine_session is not None:
             # SGLang defers the close until an in-flight request on it finishes.
             await self.engine.close_session(engine_session)
-        trace.resident, trace.ends, trace.dead, trace.plan_states = [], [], [], []
+        trace.resident, trace.ends, trace.dead, trace.plan_states, trace.evictions = [], [], [], [], []
         trace.call_index, trace.state_id, trace.protected = 0, None, 0
 
 
@@ -765,6 +867,8 @@ async def update_weights(request: Request):
     )
     if not success:
         return _error(f"weight update failed: {message}", 500)
+    if _STATE["sessions"] is not None:
+        _STATE["sessions"].weights_updated()
     return {"status": "ok"}
 
 
@@ -805,7 +909,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--server-args-json",
         required=True,
-        help='JSON file: {"server_args": {SGLang ServerArgs fields}, "sessions": bool, "session_timeout": seconds, "allow_session_rewrite": bool, '
+        help='JSON file: {"server_args": {SGLang ServerArgs fields}, "sessions": bool, "session_timeout": seconds, "allow_session_rewrite": bool, "reprefill_on_weight_update": bool, '
         '"eviction": {"max_turns", "stride", "message_end_id", "model_eviction"?: {"name", "ids"}} or null}',
     )
     args = parser.parse_args(argv)
@@ -826,6 +930,7 @@ def main(argv: list[str] | None = None) -> None:
             overlap_schedule=not launch["server_args"].get("disable_overlap_schedule", False),
             plans=[model_evictions.build(model["name"], model["ids"])] if model else [],
             allow_rewrite=bool(launch.get("allow_session_rewrite", False)),
+            replay=bool(launch.get("reprefill_on_weight_update", False)),
         )
     dp_size = int(launch["server_args"].get("dp_size") or 1)
     if dp_size > 1:

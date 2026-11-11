@@ -245,6 +245,17 @@ class SglangConfig(BaseConfig):
     such a request fails with an error: an append-only client never sends one, so it
     means a client bug (e.g. a re-tokenized history) that would corrupt the trace."""
 
+    reprefill_on_weight_update: bool = False
+    """KV-Streams: after each weight update, rebuild every live session's KV under the
+    new weights before its next call (a chunked re-prefill that applies each eviction
+    where it happened). In an RL run, set ``compaction.reprefill_on_weight_update``."""
+
+    @model_validator(mode="after")
+    def validate_reprefill(self):
+        if self.reprefill_on_weight_update and self.eviction is None:
+            raise ValueError("inference.sglang.reprefill_on_weight_update needs KV-Streams eviction")
+        return self
+
     @property
     def sessions(self) -> bool:
         """Streaming sessions run only with KV-Streams eviction: full context needs
