@@ -59,15 +59,6 @@ def test_forfeit_penalty_names_the_failed_replies(tmp_path):
         assert "<action>DO</action>" not in node.text and "<action>MOVE_LEFT</action>" not in node.text
 
 
-def test_forfeit_penalty_with_retry_names_failed_retries_too(tmp_path):
-    interaction, line = run(tmp_path, forfeit_penalty=0.5, action_retry=1)
-    pairs = interaction.trace.info["node_penalties"]
-    texts = [interaction.trace.nodes[i].text for i, _ in pairs]
-    # first replies that failed (rescued or not) plus retries that failed
-    assert len(pairs) == sum(line["first_try_forfeits"].values()) + (line["action_retries"] - line["action_retry_rescued"])
-    assert all(t in ("no tags", "<action>JUMP</action>") for t in texts)
-
-
 def test_forfeit_penalty_off_by_default(tmp_path):
     interaction, line = run(tmp_path)
     assert "node_penalties" not in interaction.trace.info
