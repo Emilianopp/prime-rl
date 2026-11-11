@@ -453,3 +453,20 @@ def test_puct_world_scope_checkpoint_round_trip(tmp_path):
     restored = world_sampler(tmp_path)
     restored.load_state_dict(sampler.state_dict())
     assert restored.worlds == sampler.worlds and set(restored.archive) == set(sampler.archive)
+
+
+def test_puct_counts_picks_that_go_back_above_the_deepest_node(tmp_path):
+    sampler = puct_sampler(tmp_path, puct_c=0.0)
+    root = next(sampler)
+    sampler.observe([valued(root, tmp_path, value=v) for v in (5.0, 3.0)])
+    best = next(sampler)  # depth 1, the deepest: not a step back
+    assert (sampler.puct_picks, sampler.backtracks) == (1, 0)
+    sampler.observe([valued(best, tmp_path, value=v) for v in (1.0, 0.5)])  # lost everything
+    again = next(sampler)  # a depth-1 node although depth 2 exists
+    assert again.data.info["node"]["depth"] == 1
+    assert (sampler.puct_picks, sampler.backtracks, sampler.backtrack_layers) == (2, 1, 1)
+    metrics = sampler.metrics()
+    assert metrics["backtrack_share"] == 0.5 and metrics["backtrack_mean_layers"] == 1.0
+    restored = puct_sampler(tmp_path, puct_c=0.0)
+    restored.load_state_dict(sampler.state_dict())
+    assert (restored.puct_picks, restored.backtracks, restored.backtrack_layers) == (2, 1, 1)

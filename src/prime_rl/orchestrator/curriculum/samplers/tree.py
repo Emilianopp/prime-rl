@@ -108,6 +108,8 @@ class TreeSampler(TaskSampler):
         # puct_scope = "world": root id -> {"n" expansions, "best" value, "stale" expansions without a new best}
         self.worlds: dict[str, dict[str, Any]] = {}
         self.worlds_retired = 0
+        # archive picks, and those that went back: the node is above the deepest node of its world that could be picked
+        self.puct_picks, self.backtracks, self.backtrack_layers = 0, 0, 0
 
     # --- tasks out ---------------------------------------------------------------
     def __next__(self) -> vf.Task | None:
@@ -139,6 +141,10 @@ class TreeSampler(TaskSampler):
         else:
             self.puct_inflight[node["id"]] = {"lineage": list(node.get("lineage", [node["id"]])), "sent_at": now, "root": node["root"]}
             self.reexpansions += node["n"] > 0
+            deepest = max(n["depth"] for n in self.archive.values() if n["root"] == node["root"] and n["depth"] < self._cap(n))
+            self.puct_picks += 1
+            self.backtracks += node["depth"] < deepest
+            self.backtrack_layers += deepest - node["depth"]
         self.expansions += 1
         return self._task_for(node)
 
@@ -478,7 +484,8 @@ class TreeSampler(TaskSampler):
             "segments_per_depth": dict(self.segments_per_depth),
             "puct": {"archive": list(self.archive.values()), "expansions": self.puct_expansions, "fresh_issued": self.fresh_issued,
                      "reexpansions": self.reexpansions, "evicted": self.archive_evicted,
-                     "worlds": self.worlds, "worlds_retired": self.worlds_retired},
+                     "worlds": self.worlds, "worlds_retired": self.worlds_retired,
+                     "picks": [self.puct_picks, self.backtracks, self.backtrack_layers]},
         }
 
     def _root_index(self, root_id: str) -> int:
@@ -523,6 +530,7 @@ class TreeSampler(TaskSampler):
         self.puct_expansions, self.fresh_issued = int(puct.get("expansions", 0)), int(puct.get("fresh_issued", 0))
         self.reexpansions, self.archive_evicted = int(puct.get("reexpansions", 0)), int(puct.get("evicted", 0))
         self.worlds, self.worlds_retired = dict(puct.get("worlds", {})), int(puct.get("worlds_retired", 0))
+        self.puct_picks, self.backtracks, self.backtrack_layers = (int(x) for x in puct.get("picks", (0, 0, 0)))
 
     def metrics(self) -> dict[str, float]:
         puct = {}
@@ -535,6 +543,10 @@ class TreeSampler(TaskSampler):
                 "archive_unvisited": float(sum(n["n"] == 0 for n in nodes)),
                 "archive_worlds": float(len({n["root"] for n in nodes})),
                 "archive_evicted": float(self.archive_evicted),
+                "puct_picks": float(self.puct_picks),
+                "backtracks": float(self.backtracks),  # picks above the deepest pickable node of their world
+                "backtrack_share": self.backtracks / max(1, self.puct_picks),
+                "backtrack_mean_layers": self.backtrack_layers / max(1, self.backtracks),
                 "worlds_active": float(len(self.worlds)),
                 "worlds_retired": float(self.worlds_retired),
                 "world_expansions_max_share": max((w["n"] for w in self.worlds.values()), default=0) / max(1, sum(w["n"] for w in self.worlds.values())),
