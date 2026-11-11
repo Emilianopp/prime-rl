@@ -288,6 +288,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         why = "no <action> tag" if failure == "no_action_tag" else "an unknown action name"
                         game.message = f"Your last reply had {why}, so the turn was forfeited: the world did not move."
                 else:
+                    forfeited = None if indices else failure
                     indices = indices or [glyph.NOOP]
                     lines, reward_sum, unlocked, played, pickups = [], 0.0, [], 0, []
                     for index in indices:
@@ -321,6 +322,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                         body = " ".join(f"{k + 1}. {line}" for k, line in enumerate(lines)) if feedback else (
                             "Actions: " + ", ".join(glyph.ACTION_NAMES[i] for i in indices[:played]) + ".")
                         game.message = " ".join(filter(None, [
+                            (f"Your last reply had {'no <action> tag' if forfeited == 'no_action_tag' else 'an unknown action name'}, "
+                             "so the turn was forfeited: NOOP was played and the world moved on.") if forfeited else "",
                             head, body,
                             f"New achievements: {', '.join(unlocked)}." if unlocked else "",
                             " ".join(pickups),

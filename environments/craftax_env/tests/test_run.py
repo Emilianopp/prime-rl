@@ -218,6 +218,27 @@ def test_multi_actions_and_feedback_in_a_run(tmp_path, monkeypatch):
     assert "then end with 1 to 3 <action> tags" in after_multi
 
 
+def test_noop_forfeit_moves_the_world_and_says_so(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "REPLIES", ["<action>DO</action>", "no tags"])
+    task = next(iter(CraftaxTaskset(CraftaxConfig(num_examples=1, forfeit_mode="noop")).load()))
+    interaction = ScriptedInteraction(turns=4)
+
+    @asynccontextmanager
+    async def open_interaction(_task):
+        yield interaction
+
+    log = tmp_path / "episodes.jsonl"
+    env = SimpleNamespace(config=CraftaxEnvConfig(episode_log=str(log), max_episode_steps=0, action_feedback=True,
+                                                  forfeit_mode="noop"))
+    asyncio.run(CraftaxEnv.run(env, task, SimpleNamespace(player=SimpleNamespace(interaction=open_interaction))))
+    line = json.loads(log.read_text())
+    assert line["forfeits"] == {"no_action_tag": 2}
+    assert line["actions_played"] == line["turns"] == 4  # the two forfeits played NOOP
+    after_forfeit = interaction.received[2]
+    assert "no <action> tag, so the turn was forfeited: NOOP was played and the world moved on." in after_forfeit
+    assert "1. NOOP: " in after_forfeit
+
+
 def test_a_game_resumes_from_its_saved_state(tmp_path, monkeypatch):
     """Two jobs of a chain: the first stops at its time limit after asking for a handoff
     summary and saves the game; the second opens with that summary and plays on."""
