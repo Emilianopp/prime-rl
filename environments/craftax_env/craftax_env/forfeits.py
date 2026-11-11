@@ -19,6 +19,7 @@ KINDS = (
     "action_in_reasoning",  # empty content, the <action> tag only inside the reasoning
     "content_no_tag",  # content without any <action> tag (often garbage)
     "malformed_tag",  # an opening <action> without a complete tag
+    "think_tag_in_reply",  # complete <action> tag(s) followed by a stray </think>: the parser reads only what follows it
     "empty",  # no reasoning, no content
     "unknown_name",  # a complete tag with a name that is not an action
 )
@@ -29,6 +30,7 @@ BUCKET = 10
 
 _ACTION = re.compile(r"<\s*action\s*>(.*?)<\s*/\s*action\s*>", re.DOTALL | re.IGNORECASE)
 _OPEN = re.compile(r"<\s*action\s*>", re.IGNORECASE)
+_THINK_CLOSE = re.compile(r"<\s*/\s*think\s*>", re.IGNORECASE)
 
 
 def classify(content: str | None, reasoning: str | None, finish_reason: str | None, failure: str | None) -> str:
@@ -42,6 +44,9 @@ def classify(content: str | None, reasoning: str | None, finish_reason: str | No
         if _ACTION.search(reasoning):
             return "action_in_reasoning"
         return "reasoning_only" if reasoning else "empty"
+    closes = list(_THINK_CLOSE.finditer(content))
+    if closes and _ACTION.search(content[: closes[-1].start()]) and not _OPEN.search(content[closes[-1].end() :]):
+        return "think_tag_in_reply"  # upstream main's turn_rewards name for this shape
     if _OPEN.search(content):
         return "malformed_tag"
     return "content_no_tag"

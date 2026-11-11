@@ -6,7 +6,7 @@ import verifiers.v1 as vf
 
 from prime_rl.configs.algorithm import GRPOAlgoConfig
 from prime_rl.orchestrator.algo.base import Algorithm, iter_trainable_traces
-from prime_rl.orchestrator.algo.routing import apply_node_penalties, assign_advantages, trainable_nodes
+from prime_rl.orchestrator.algo.routing import apply_node_bonuses, apply_node_penalties, assign_advantages, trainable_nodes
 
 if TYPE_CHECKING:
     from prime_rl.orchestrator.clients import InferenceClient
@@ -75,6 +75,7 @@ class GRPOAlgorithm(Algorithm):
         if self.advantage_mode == "per_term":
             for trace, contribution in zip(traces, self.per_term_contributions(traces), strict=True):
                 assign_advantages(trace, self.route_terms(trace, contribution))
+                apply_node_bonuses(trace)
                 apply_node_penalties(trace)
             self._apply_loss_aggregation(traces)
             return
@@ -103,6 +104,7 @@ class GRPOAlgorithm(Algorithm):
         advantages = shaped_rewards - baseline
         for trace, advantage in zip(traces, advantages.tolist(), strict=True):
             assign_advantages(trace, advantage)
+            apply_node_bonuses(trace)
             apply_node_penalties(trace)
         self._apply_loss_aggregation(traces)
 

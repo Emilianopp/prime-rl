@@ -620,31 +620,49 @@ async def group_verdicts(
     costs: list | None = None,
 ) -> tuple[list[dict[str, Any]] | None, float, str | None]:
     """One comparative call over the branches of one node: a verdict per branch in order
-    (None on failure), the call's latency and the error."""
+    (None on failure), the call's latency and the error. A call that fails or returns a verdict
+    that does not parse or does not cover the branches (CAPI: "invalid JSON verdict", 5 of 34
+    groups in smoke 11649729) is asked again, up to GROUP_JUDGE_RETRIES times; only then do the
+    branches fall back to being graded alone."""
     t0 = time.time()
-    try:
-        async with gate or _null():
-            messages = judge.build_messages(infos=infos)
-            response = await judge.complete(messages, trace=trace, schema=judge.schema, parse=judge.parse)
-        if costs is not None:
-            costs.append(usage_cost(getattr(response, "usage", None), judge.config.model, price,
-                                    backend=getattr(judge.config, "backend", "openai")))
-        parsed: GroupNotesVerdict | None = response.parsed
-        by_branch = {v.branch: v for v in (parsed.verdicts if parsed else [])}
-        if sorted(by_branch) != list(range(len(infos))):
-            raise RuntimeError(f"group verdict covers branches {sorted(by_branch)}, expected 0..{len(infos) - 1}")
-        if isinstance(parsed, CFRankVerdict):
-            if sorted(v.rank for v in parsed.verdicts) != list(range(1, len(infos) + 1)):
-                raise RuntimeError(f"rank verdict ranks {[v.rank for v in parsed.verdicts]} are not 1..{len(infos)}")
-            out = [rank_verdict(infos[i], by_branch[i], len(infos), rationale=parsed.rationale) for i in range(len(infos))]
-            return out, time.time() - t0, None
-        out = [cf_verdict(infos[i], by_branch[i], comparison=parsed.comparison) if infos[i].get("code_facts") else
-               _verdict(infos[i], by_branch[i].findings, by_branch[i].plan, by_branch[i].rationale, False,
-                        comparison=parsed.comparison) for i in range(len(infos))]
+    error = ""
+    for attempt in range(GROUP_JUDGE_RETRIES + 1):
+        if attempt:
+            await asyncio.sleep(2.0 * attempt)
+        try:
+            return await _group_verdicts_once(judge, infos, trace=trace, gate=gate, price=price, costs=costs, t0=t0)
+        except Exception as exc:
+            error = str(exc)
+            logger.warning("group notes judge failed (%s), attempt %d of %d", exc, attempt + 1, GROUP_JUDGE_RETRIES + 1)
+    return None, time.time() - t0, error
+
+
+GROUP_JUDGE_RETRIES = 2
+"""Extra calls after a failed group judge call before the group falls back."""
+
+
+async def _group_verdicts_once(judge: Any, infos: list[dict[str, Any]], *, trace: Any, gate: asyncio.Semaphore | None,
+                               price: tuple[float, float, float] | None, costs: list | None,
+                               t0: float) -> tuple[list[dict[str, Any]], float, None]:
+    async with gate or _null():
+        messages = judge.build_messages(infos=infos)
+        response = await judge.complete(messages, trace=trace, schema=judge.schema, parse=judge.parse)
+    if costs is not None:
+        costs.append(usage_cost(getattr(response, "usage", None), judge.config.model, price,
+                                backend=getattr(judge.config, "backend", "openai")))
+    parsed: GroupNotesVerdict | None = response.parsed
+    by_branch = {v.branch: v for v in (parsed.verdicts if parsed else [])}
+    if sorted(by_branch) != list(range(len(infos))):
+        raise RuntimeError(f"group verdict covers branches {sorted(by_branch)}, expected 0..{len(infos) - 1}")
+    if isinstance(parsed, CFRankVerdict):
+        if sorted(v.rank for v in parsed.verdicts) != list(range(1, len(infos) + 1)):
+            raise RuntimeError(f"rank verdict ranks {[v.rank for v in parsed.verdicts]} are not 1..{len(infos)}")
+        out = [rank_verdict(infos[i], by_branch[i], len(infos), rationale=parsed.rationale) for i in range(len(infos))]
         return out, time.time() - t0, None
-    except Exception as exc:
-        logger.warning("group notes judge failed (%s)", exc)
-        return None, time.time() - t0, str(exc)
+    out = [cf_verdict(infos[i], by_branch[i], comparison=parsed.comparison) if infos[i].get("code_facts") else
+           _verdict(infos[i], by_branch[i].findings, by_branch[i].plan, by_branch[i].rationale, False,
+                    comparison=parsed.comparison) for i in range(len(infos))]
+    return out, time.time() - t0, None
 
 
 async def judge_notes_group(

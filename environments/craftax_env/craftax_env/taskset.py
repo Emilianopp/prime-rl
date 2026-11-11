@@ -238,6 +238,23 @@ class CraftaxEnvConfig(vf.EnvConfig):
     (prime_rl ``node_penalties``, applied after the group's advantages), so a forfeit is never
     reinforced, however good its segment. Not normalized within the group; the other terms are
     untouched. Logged as ``forfeit_penalized``. 0: off."""
+    valid_action_bonus: float = Field(0.0, ge=0.0)
+    """Per-reply credit for a game turn that played at least one action: its tokens get
+    ``advantage + valid_action_bonus`` (prime_rl ``node_bonuses``; upstream main's turn_rewards
+    ``valid_action``, 0.25 in its format run). With ``forfeit_penalty`` alone the format is only
+    pushed away from the failures seen; this pulls every game turn toward a reply that plays.
+    Not normalized within the group. Logged as ``valid_action_rewarded``. 0: off."""
+    missing_notes_penalty: float = Field(0.0, ge=0.0)
+    """Segments: per-reply credit for a notes reply that the notes check refuses (an action tag, no
+    <notes> tag, under 80 characters), the retry's reply too: ``min(advantage, 0) -
+    missing_notes_penalty`` on its tokens, as ``forfeit_penalty`` (upstream main's turn_rewards
+    ``missing_summary``). Only bites when the notes turn is trained. Logged as ``notes_penalized``. 0: off."""
+    death_weight: float = Field(0.0, ge=0.0)
+    """Segments: weight of a ``deaths`` reward term = minus the deaths in this segment, so under
+    per-term GRPO a branch that died ranks below its siblings that did not, whatever the tools it
+    lost (the ``state`` term only sees those). 0.25 makes one death cost a quarter of a tier-1
+    achievement in the trace reward, upstream main's 0.05 on its points/5 scale. 0: off
+    (``death_penalty`` is not used in segments)."""
     exploration_aid: bool = False
     """Show GlyphBench's [Exploration Aid] (navigation.py: visits, recent route, frontiers, last-seen
     features on this floor, computed from the observations) after every observation, as its Pro harness
@@ -367,23 +384,34 @@ class CraftaxEnvConfig(vf.EnvConfig):
         return self
 
 
-def request_node_penalties(trace: Any, ordinals: list[int], penalty: float) -> int:
-    """Ask the orchestrator to penalize these sampled replies (1-based ordinals among the trace's
-    sampled nodes, counted when each reply came back): ``trace.info["node_penalties"] = [[node
-    index, penalty], ...]`` (prime_rl.orchestrator.algo.routing.apply_node_penalties). Returns how
-    many nodes it named."""
+def request_node_credits(trace: Any, key: str, ordinals: list[int], value: float) -> int:
+    """Name these sampled replies (1-based ordinals among the trace's sampled nodes, counted when
+    each reply came back) under ``trace.info[key]`` as ``[[node index, value], ...]``, added to what
+    the key already lists. Returns how many nodes it named."""
     info = getattr(trace, "info", None)
-    if not isinstance(info, dict) or penalty <= 0:
+    if not isinstance(info, dict) or value <= 0:
         return 0
     wanted, out, k = set(ordinals), [], 0
     for index, n in enumerate(getattr(trace, "nodes", None) or []):
         if getattr(n, "sampled", False):
             k += 1
             if k in wanted:
-                out.append([index, float(penalty)])
+                out.append([index, float(value)])
     if out:
-        info["node_penalties"] = out
+        info[key] = [*(info.get(key) or []), *out]
     return len(out)
+
+
+def request_node_penalties(trace: Any, ordinals: list[int], penalty: float) -> int:
+    """Ask the orchestrator to penalize these sampled replies: ``trace.info["node_penalties"]``
+    (prime_rl.orchestrator.algo.routing.apply_node_penalties)."""
+    return request_node_credits(trace, "node_penalties", ordinals, penalty)
+
+
+def request_node_bonuses(trace: Any, ordinals: list[int], bonus: float) -> int:
+    """Ask the orchestrator to add ``bonus`` to these sampled replies' advantages:
+    ``trace.info["node_bonuses"]`` (prime_rl.orchestrator.algo.routing.apply_node_bonuses)."""
+    return request_node_credits(trace, "node_bonuses", ordinals, bonus)
 
 
 def _new_game(seed: int, max_turns: int | None) -> glyph.CraftaxGame:
@@ -878,6 +906,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         wasted = TurnsLost() if segmented and cfg.code_facts else None  # code_facts: turns that changed nothing
         sampled_before_notes = None  # sampled nodes before the notes request (train_on_notes = False)
         failed_replies: list[int] = []  # forfeit_penalty: ordinals (1-based, among sampled nodes) of replies with no valid action
+        played_replies: list[int] = []  # valid_action_bonus: ordinals of the replies whose action(s) were played
+        bad_notes_replies: list[int] = []  # missing_notes_penalty: ordinals of notes replies the notes check refused
 
         def last_sampled() -> int:
             return sum(1 for n in (getattr(interaction.trace, "nodes", None) or []) if getattr(n, "sampled", False))
@@ -961,6 +991,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                             game.message += f" End your reply with one line such as <action>{glyph.EXAMPLE_ACTION}</action>."
                 else:
                     counted = bool(indices)  # a forfeit's NOOP is already counted as a forfeit
+                    if counted and cfg.valid_action_bonus > 0:
+                        played_replies.append(last_sampled())
                     indices = indices or [glyph.NOOP]
                     lines, reward_sum, unlocked, played = [], 0.0, [], 0
                     for index in indices:
@@ -1127,6 +1159,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     content, thinking, _ = reply_parts(reply, interaction.trace)
                     notes = extract_notes(content, thinking)
                     retry_reason = notes_problem(content, thinking, notes)
+                    if retry_reason is not None and cfg.missing_notes_penalty > 0:
+                        bad_notes_replies.append(last_sampled())
                     cap = notes_cap()
                     if cfg.summary_retry and retry_reason is not None and (cap is None or cap >= 256):
                         notes_retried = True
@@ -1137,7 +1171,10 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                             if logging_turns:
                                 notes_rows.append({"obs": (PLAN_RETRY if cfg.notes_findings else PLAN_RETRY_NO_FINDINGS) if cfg.code_facts else SUMMARY_RETRY,
                                                    "reasoning": thinking, "content": content})
-                            notes = extract_notes(content, thinking) or notes
+                            again = extract_notes(content, thinking)
+                            if cfg.missing_notes_penalty > 0 and notes_problem(content, thinking, again) is not None:
+                                bad_notes_replies.append(last_sampled())
+                            notes = again or notes
                 if reply.terminated:
                     end = "terminated_at_summary"
         trace = interaction.trace
@@ -1150,6 +1187,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         elif segmented:  # per-term routing: the notes term trains the notes turn, the others the action turns
             request_term_routing(trace, {"notes": notes_node_indexes(trace, sampled_before_notes if sampled_before_notes is not None else 10**9)})
         forfeit_penalized = request_node_penalties(trace, failed_replies, cfg.forfeit_penalty) if failed_replies else 0
+        notes_penalized = request_node_penalties(trace, bad_notes_replies, cfg.missing_notes_penalty) if bad_notes_replies else 0
+        valid_action_rewarded = request_node_bonuses(trace, played_replies, cfg.valid_action_bonus) if played_replies else 0
         trace_id = getattr(trace, "id", None) or uuid.uuid4().hex
         depth = int(node.get("depth", 0)) + 1 if segmented else 0
         record = summary = state_path = state_sha = None
@@ -1196,6 +1235,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
             trace.record_reward("progress", reward, cfg.progress_weight)
             if cfg.state_weight > 0:
                 trace.record_reward("state", state_points, cfg.state_weight)
+            if cfg.death_weight > 0:
+                trace.record_reward("deaths", -float(len(deaths)), cfg.death_weight)
         else:
             reward = score / glyph.MAX_RETURN - cfg.death_penalty * len(deaths)
             trace.record_reward(f"craftax_{cfg.reward}", reward, 1.0)
@@ -1208,6 +1249,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "forfeits": float(sum(forfeits.values())),
                 "first_try_forfeits": float(sum(first_try.values())),
                 "forfeit_penalized": float(forfeit_penalized),
+                "notes_penalized": float(notes_penalized),
+                "valid_action_rewarded": float(valid_action_rewarded),
                 "action_retries": float(retries),
                 "action_retry_rescued": float(retry_saved),
                 "actions_from_reasoning": float(from_reasoning),

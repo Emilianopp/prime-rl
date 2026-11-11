@@ -84,6 +84,31 @@ def apply_node_penalties(trace: vf.Trace) -> int:
     return changed
 
 
+def apply_node_bonuses(trace: vf.Trace) -> int:
+    """Honour an env's per-reply bonuses: ``trace.info["node_bonuses"] = [[node index, b], ...]``
+    (b >= 0). Each listed sampled node's tokens get ``advantage + b`` after the group's advantages
+    are assigned (e.g. craftax ``env.valid_action_bonus``: a reply that played an action; upstream
+    main's turn_rewards ``valid_action``). With ``node_penalties`` on the replies that played
+    nothing, the format is pulled toward as well as pushed away from. Not normalized within the
+    group; a node that is also penalized keeps its penalty only. Returns how many nodes it changed."""
+    info = trace.info if isinstance(trace.info, dict) else {}
+    request = info.get("node_bonuses")
+    if not request:
+        return 0
+    penalized = {int(pair[0]) for pair in info.get("node_penalties") or []}
+    changed = 0
+    for pair in request:
+        index, bonus = int(pair[0]), float(pair[1])
+        if not 0 <= index < len(trace.nodes):
+            raise ValueError(f"node_bonuses of trace {trace.id!r} names node {index}; the trace has {len(trace.nodes)} nodes")
+        node = trace.nodes[index]
+        if index in penalized or not any(node.mask) or node.advantages is None:
+            continue
+        node.advantages = [a + bonus for a in node.advantages]
+        changed += 1
+    return changed
+
+
 def assign_reference_logprobs(branch: vf.Branch, values: list[float]) -> None:
     """Project branch-aligned reference logprobs onto sampled graph nodes."""
     if len(values) != len(branch.token_ids):

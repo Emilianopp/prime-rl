@@ -421,3 +421,29 @@ def test_node_penalties_rejects_a_bad_index():
     trace.info = {"node_penalties": [[99, 1.0]]}
     with pytest.raises(ValueError):
         apply_node_penalties(trace)
+
+
+def test_node_bonuses_add_to_the_advantage_and_leave_penalized_nodes_alone():
+    """``trace.info["node_bonuses"] = [[node index, b]]`` (craftax env.valid_action_bonus): that reply's
+    tokens get advantage + b after per-term routing; a node that is also penalized keeps the penalty only."""
+    from prime_rl.orchestrator.algo.routing import apply_node_bonuses
+
+    group = _termed_group([{"progress": (0.0, 1.0)}, {"progress": (2.0, 1.0)}])
+    for episode in group:  # a second sampled reply: a forfeit, penalized and (wrongly) also named for the bonus
+        trace = episode.traces[0]
+        first = next(i for i, node in enumerate(trace.nodes) if any(node.mask))
+        trace.nodes.append(vf.MessageNode(message=vf.UserMessage(content="obs"), token_ids=[900],
+                                          mask=[False], logprobs=[0.0], sampled=False, parent=len(trace.nodes) - 1))
+        trace.nodes.append(vf.MessageNode(message=vf.AssistantMessage(content="no tag"), token_ids=[901, 902],
+                                          mask=[True, True], logprobs=[0.0, 0.0], sampled=True, parent=len(trace.nodes) - 1))
+        last = len(trace.nodes) - 1
+        trace.info = {"node_bonuses": [[first, 0.25], [last, 0.25]], "node_penalties": [[last, 0.5]]}
+    algo = GRPOAlgorithm(GRPOAlgoConfig(advantage_mode="per_term", term_std_floor={"progress": 0.5}), clients=None)
+    asyncio.run(algo.score_group(group))
+    low = [node for node in group[0].traces[0].nodes if any(node.mask)]
+    high = [node for node in group[1].traces[0].nodes if any(node.mask)]
+    assert low[0].advantages == pytest.approx([-0.75, -0.75]) and low[-1].advantages == pytest.approx([-1.5, -1.5])
+    assert high[0].advantages == pytest.approx([1.25, 1.25]) and high[-1].advantages == pytest.approx([-0.5, -0.5])
+    group[0].traces[0].info = {"node_bonuses": [[99, 0.25]]}
+    with pytest.raises(ValueError):
+        apply_node_bonuses(group[0].traces[0])
