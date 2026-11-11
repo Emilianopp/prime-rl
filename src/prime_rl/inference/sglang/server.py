@@ -369,7 +369,13 @@ class SessionTable:
         self.weight_version += 1
         if self.replay:
             live = sum(trace.engine_session is not None for trace in self._traces.values())
-            logger.info("weights updated (version %d): %d sessions replay at their next call", self.weight_version, live)
+            done = {k: self.stats[k] for k in ("replays", "replay_calls", "replay_tokens", "replays_failed")}
+            logger.info(
+                "weights updated (version %d): %d sessions replay at their next call; so far %s",
+                self.weight_version,
+                live,
+                done,
+            )
 
     async def generate(
         self,

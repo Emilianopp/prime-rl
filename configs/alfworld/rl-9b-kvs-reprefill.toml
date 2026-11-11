@@ -1,0 +1,81 @@
+# RL on ALFWorld (train split, admissible commands, up to 150 actions) with Qwen3.5-9B,
+# KV-Streams r10-1 (past 10 complete turns, evict the oldest each turn) and every live
+# session's KV re-prefilled under the new weights after each weight update. 3 trainer + 1
+# inference GPUs (A100-80GB), one node, adaptive concurrency.
+#
+#   CONFIG=configs/alfworld/rl-9b-kvs-reprefill.toml ENVS=alfworld_env sbatch scripts/kv_streams/rl.sbatch
+#
+# Drop compaction.reprefill_on_weight_update for the plain KV-Streams arm (sessions keep the
+# KV their earlier policies computed).
+
+max_steps = 200
+seq_len = 32768  # the whole episode is one sample; matches the trace cap below
+
+[deployment]
+num_train_gpus = 3
+num_infer_gpus = 1
+
+[weight_broadcast]
+type = "filesystem"  # the SGLang backend supports filesystem weight updates only
+
+[model]
+name = "Qwen/Qwen3.5-9B"
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.01
+max_norm = 1.0
+
+[orchestrator]
+batch_size = 64
+
+[orchestrator.train]
+group_size = 8
+
+[orchestrator.concurrency]
+# Adaptive: no initial value (the controller derives a pessimistic start and grows
+# with the engine's KV headroom), bounded below and above.
+min_inflight = 4
+max_inflight = 96
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 1024
+temperature = 1.0
+
+[[orchestrator.train.source]]
+name = "alfworld"
+env.taskset.id = "alfworld-env"
+env.taskset.dataset_path = "/network/scratch/e/emiliano.penaloza/kv-race/alfworld_data"
+env.taskset.split = "train"
+env.max_episode_steps = 150
+env.player.max_total_tokens = 32768
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16
+
+[inference]
+backend = "sglang"
+
+[inference.vllm]  # engine-agnostic fields, translated for SGLang
+# KV-Streams survivors keep their positions: this bounds the whole episode (trace cap + one reply).
+max_model_len = 33792
+gpu_memory_utilization = 0.9
+
+[inference.sglang]
+max_mamba_cache_size = 300  # DeltaNet state slots (~25 MB each at bf16 for 9B): ~3 x max_inflight
+mamba_ssm_dtype = "bfloat16"
+
+[compaction]
+max_turns = 10
+stride = 1
+reprefill_on_weight_update = true
+
+[monitors.wandb]
+project = "alfworld-eviction-race"
+name = "alf-9b-kvs-r10s1-reprefill-3p1-bs64g8"
