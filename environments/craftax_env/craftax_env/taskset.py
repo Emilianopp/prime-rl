@@ -95,17 +95,6 @@ from crafter_env.taskset import (_read_beam, _turn_sampling, _write_beam, mask_n
 logger = logging.getLogger(__name__)
 
 
-ACTION_RETRY = ("Your last reply had {why}, so no action was played and the world has not moved. "
-                "Reply now with only the action, on one line: <action>NAME</action>, with NAME from the action list.")
-"""action_retry's follow-up request; {why} names what the reply lacked."""
-
-
-def _retry_why(failure: str | None, finish: str | None) -> str:
-    if failure == "unknown_name":
-        return "an action name that is not in the action list"
-    return "no <action> tag before the output limit" if finish == "length" else "no <action> tag"
-
-
 def _target_progress(start: dict[str, Any] | None, game: Any, explored: Any, before: list[str]) -> dict[str, Any] | None:
     """adherence_mode = "target": the parent target's pieces at the start and the end of the segment, and the score."""
     if start is None:
@@ -223,18 +212,9 @@ class CraftaxEnvConfig(vf.EnvConfig):
     """Play the action tag(s) a reply's reasoning ends with when its content holds no tag (the
     model closed its thinking on the final tag). False: such a turn is forfeited (GlyphBench reads
     the content only). Counted as `actions_from_reasoning`."""
-    action_retry: int = Field(0, ge=0, le=3)
-    """Re-ask after a reply with no valid action (no <action> tag, an unknown name, or a reply cut at
-    the output cap): up to this many short follow-up requests (ACTION_RETRY) in the same trace, each
-    capped at `action_retry_tokens`, before the turn is forfeited per `forfeit_mode`. The world does
-    not move during a retry; the failed reply stays in the context and is trained like any other.
-    Counted as `action_retries` / `action_retry_rescued`; `first_try_forfeits` keeps the kinds of
-    the replies as first written. 0: off (forfeit at once, as before)."""
-    action_retry_tokens: int = Field(64, ge=8)
-    """Output cap of each action_retry request."""
     forfeit_penalty: float = Field(0.0, ge=0.0)
     """Per-reply credit for a reply with no valid action (no <action> tag, an unknown name, or cut at the
-    output cap; a failed action_retry reply too): its tokens get ``min(advantage, 0) - forfeit_penalty``
+    output cap): its tokens get ``min(advantage, 0) - forfeit_penalty``
     (prime_rl ``node_penalties``, applied after the group's advantages), so a forfeit is never
     reinforced, however good its segment. Not normalized within the group; the other terms are
     untouched. Logged as ``forfeit_penalized``. 0: off."""
@@ -862,8 +842,6 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         opening = await asyncio.to_thread(glyph.user_turn, game, reasoning, max_actions, True, example, aid(), show_visible)
         total, done, end = 0.0, False, "terminated"  # terminated: the run stopped answering
         forfeits: Counter[str] = Counter()
-        first_try: Counter[str] = Counter()  # forfeit kinds of the replies as first written (before action_retry)
-        retries = retry_saved = 0  # action_retry requests sent / turns they saved
         from_reasoning = 0  # action_from_reasoning: turns played from the tag the reasoning ended with
         actions: Counter[str] = Counter()
         turns = 0  # model replies; each plays up to max_actions actions (game steps)
@@ -905,34 +883,8 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                             indices, failure, dropped = rescued
                             from_reasoning += 1
                 first = reply_parts(segment, interaction.trace)  # the reply as first written: logs, adherence
-                retry_rows: list[dict[str, Any]] = []
-                if not indices:
-                    first_try[classify(*first, failure)] += 1
-                    if cfg.forfeit_penalty > 0:
-                        failed_replies.append(last_sampled())
-                    limit = cfg.player.max_total_tokens
-                    for _ in range(cfg.action_retry):
-                        cap = cfg.action_retry_tokens
-                        if limit is not None:
-                            cap = min(cap, limit - interaction.trace.num_total_tokens - 256)
-                        if cap < 8:
-                            break
-                        why = _retry_why(failure, reply_parts(segment, interaction.trace)[2])
-                        async with _turn_sampling(interaction, cap):
-                            segment = await interaction.turn(ACTION_RETRY.format(why=why))
-                        retries += 1
-                        if segment.terminated:
-                            break
-                        indices, failure, dropped = glyph.parse_actions(segment.last_reply, max_actions)
-                        retry_rows.append({"content": segment.last_reply, "finish": reply_parts(segment, interaction.trace)[2],
-                                           "ok": bool(indices)})
-                        if indices:
-                            retry_saved += 1
-                            break
-                        if cfg.forfeit_penalty > 0:
-                            failed_replies.append(last_sampled())
-                    if segment.terminated:
-                        break  # the player stopped answering during a retry (end stays "terminated")
+                if not indices and cfg.forfeit_penalty > 0:
+                    failed_replies.append(last_sampled())
                 if adherence is not None:
                     adherence.reply(*first[:2])
                 row: dict[str, Any] | None = None
@@ -940,8 +892,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     content, thinking, finish = first
                     row = {"i": turns, "turn": game.turn, "obs": observation, "reasoning": thinking,
                            "content": content if content is not None else segment.last_reply, "finish": finish,
-                           "acts": [], "forfeit": None if indices else failure, "_before": set(game.achievements),
-                           **({"retry": retry_rows} if retry_rows else {})}
+                           "acts": [], "forfeit": None if indices else failure, "_before": set(game.achievements)}
                 if not indices:
                     forfeits[failure] += 1
                     tracker.update(classify(*reply_parts(segment, interaction.trace), failure))
@@ -1206,10 +1157,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "achievement_score": game.achievement_score,
                 "deaths": float(len(deaths)),
                 "forfeits": float(sum(forfeits.values())),
-                "first_try_forfeits": float(sum(first_try.values())),
                 "forfeit_penalized": float(forfeit_penalized),
-                "action_retries": float(retries),
-                "action_retry_rescued": float(retry_saved),
                 "actions_from_reasoning": float(from_reasoning),
                 "survived": 1.0 if game.health > 0 else 0.0,
                 "max_floor": float(max_floor),
@@ -1285,7 +1233,6 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 "actions_played": sum(actions.values()),
                 "actions_per_turn": {str(k): v for k, v in sorted(per_turn.items())},
                 "forfeits": dict(forfeits),
-                "first_try_forfeits": dict(first_try), "action_retries": retries, "action_retry_rescued": retry_saved,
                 "actions_from_reasoning": from_reasoning,
                 **tracker.log(),
                 "actions": dict(actions),
