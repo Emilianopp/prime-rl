@@ -244,8 +244,9 @@ class TreeSamplerConfig(BaseConfig):
     value that only adds up along a lineage it puts every pick into the deepest world). `world`: at most
     `max_roots` worlds are in the archive, the next expansion goes to the world with the fewest
     expansions so far (at most `world_inflight` at a time per world), and the PUCT score picks the node
-    inside that world. A world leaves after `world_patience` expansions in a row without a new best
-    value, which frees its place for a new world; while all places are taken, new worlds are still
+    inside that world. A world leaves when a branch reaches its depth cap (as under
+    the beam, so `max_depth_schedule` turns worlds over) or after `world_patience` expansions in a row
+    without a new best value; either frees its place for a new world; while all places are taken, new worlds are still
     played (`fresh_root_share`) but not archived."""
 
     world_inflight: int = Field(1, ge=1)

@@ -108,6 +108,7 @@ class TreeSampler(TaskSampler):
         # puct_scope = "world": root id -> {"n" expansions, "best" value, "stale" expansions without a new best}
         self.worlds: dict[str, dict[str, Any]] = {}
         self.worlds_retired = 0
+        self.worlds_capped = 0  # expansions that reached their world's depth cap
         # archive picks, and those that went back: the node is above the deepest node of its world that could be picked
         self.puct_picks, self.backtracks, self.backtrack_layers = 0, 0, 0
 
@@ -194,7 +195,7 @@ class TreeSampler(TaskSampler):
             by_world.setdefault(node["root"], []).append(node)
         order = sorted(self.worlds, key=lambda r: (self.worlds[r]["n"] + flying.get(r, 0), -self.worlds[r]["best"]))
         for root in order:
-            if flying.get(root, 0) >= self.config.world_inflight:
+            if flying.get(root, 0) >= self.config.world_inflight or self.worlds[root].get("retire"):
                 continue
             node = self._best_free(self._puct_scores(by_world.get(root, []), self.worlds[root]["n"]))
             if node is not None:
@@ -405,7 +406,11 @@ class TreeSampler(TaskSampler):
         else:
             world["stale"] += 1
         still_flying = any(sent.get("root") == root for sent in self.puct_inflight.values())
-        if world["stale"] >= self.config.world_patience and not still_flying:
+        # the world is over at its depth cap, as under the beam: its place goes to a new world (on the schedule's cap of now)
+        at_cap = bool(values) and node["depth"] + 1 >= self._cap(node)
+        world["retire"] = bool(world.get("retire")) or at_cap or world["stale"] >= self.config.world_patience
+        self.worlds_capped += at_cap
+        if world["retire"] and not still_flying:
             for child in branches:
                 self._delete_state(child)
             for old in [n for n in self.archive.values() if n["root"] == root]:
@@ -549,6 +554,7 @@ class TreeSampler(TaskSampler):
                 "backtrack_mean_layers": self.backtrack_layers / max(1, self.backtracks),
                 "worlds_active": float(len(self.worlds)),
                 "worlds_retired": float(self.worlds_retired),
+                "worlds_capped": float(self.worlds_capped),
                 "world_expansions_max_share": max((w["n"] for w in self.worlds.values()), default=0) / max(1, sum(w["n"] for w in self.worlds.values())),
                 "puct_expansions": float(self.puct_expansions),
                 "puct_inflight": float(len(self.puct_inflight)),

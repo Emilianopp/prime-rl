@@ -470,3 +470,17 @@ def test_puct_counts_picks_that_go_back_above_the_deepest_node(tmp_path):
     restored = puct_sampler(tmp_path, puct_c=0.0)
     restored.load_state_dict(sampler.state_dict())
     assert (restored.puct_picks, restored.backtracks, restored.backtrack_layers) == (2, 1, 1)
+
+
+def test_puct_world_scope_a_world_ends_at_its_depth_cap_and_a_new_one_takes_its_place(tmp_path):
+    sampler = world_sampler(tmp_path, fresh_root_share=0.0, max_roots=1, max_depth=3, world_patience=1000)
+    root = next(sampler)
+    first = root.data.info["node"]["root"]
+    sampler.observe([valued(root, tmp_path, value=v) for v in (1.0, 0.5)])
+    for depth in (1, 2):
+        task = next(sampler)
+        assert task.data.info["node"]["root"] == first and task.data.info["node"]["depth"] == depth
+        sampler.observe([valued(task, tmp_path, value=v) for v in (depth + 1.0, depth + 0.5)])
+    assert first not in sampler.worlds and not sampler.archive and sampler.worlds_retired == 1
+    task = next(sampler)
+    assert task.data.info["node"]["depth"] == 0 and task.data.info["node"]["root"] != first
