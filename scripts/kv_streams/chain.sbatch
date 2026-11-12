@@ -17,7 +17,8 @@
 #     CONFIG=configs/alfworld/rl-9b-kvs-reprefill.toml ENVS=alfworld_env sbatch chain.sbatch
 #
 # Env: CHAIN, REPO, CONFIG (relative to REPO), ENVS (environments/ packages, as in rl.sbatch),
-# BLOCKS (default 8), WEIGHTS (a new chain's start: an HF dir with config.json; default the
+# BLOCKS (default 8; a max_blocks file in the chain dir overrides), TOTAL_STEPS (optional
+# trainer-step target across blocks; a total_steps file in the chain dir works too), WEIGHTS (a new chain's start: an HF dir with config.json; default the
 # Qwen3.5-9B snapshot in the HF cache), VENV (default REPO/.venv, else prime-rl-kvs's),
 # SGLANG_VENV, OUT_ROOT (passed to rl.sbatch).
 #
@@ -48,6 +49,15 @@ if [ ! -e "$C/latest" ]; then
 fi
 
 latest=$(readlink -f "$C/latest"); step=$(cat "$latest/.global_step")
+# Optional total-step target (env TOTAL_STEPS, or a total_steps file in the chain dir so a
+# running chain can be retargeted): the chain stops there and the last block runs only
+# the steps left. Each block counts its steps from 0.
+TOTAL_STEPS=${TOTAL_STEPS:-$(cat "$C/total_steps" 2>/dev/null)}
+[ -f "$C/max_blocks" ] && BLOCKS=$(cat "$C/max_blocks")
+if [ -n "$TOTAL_STEPS" ]; then
+  [ "$step" -ge "$TOTAL_STEPS" ] && { echo "chain done: $TOTAL_STEPS steps (at w$step)" | tee -a "$C/chain.log"; exit 0; }
+  export STEPS=$(( TOTAL_STEPS - step ))
+fi
 if [ -f "$C/last_start_step" ] && [ "$(cat "$C/last_start_step")" = "$step" ]; then
   echo $(( $(cat "$C/fails") + 1 )) > "$C/fails"
 else
