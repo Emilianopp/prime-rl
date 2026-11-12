@@ -39,8 +39,12 @@ batch_size = 128
 group_size = 8  # 16 games x 8 per step; base pass rate on this set is ~15%
 
 [orchestrator.concurrency]
-# Adaptive: no initial value (the controller derives a start and grows with the engine's
-# KV headroom), up to the engine's running-request cap (900 slots / 3).
+# Adaptive, started near the target: the derived start (KV pool / a full 33.8k-token
+# episode = 30) only grows as episodes complete, which on long expert games takes most of
+# a 3-hour block. An r10-1 session holds ~4k live tokens, so 224 fills ~85-90% of the
+# ~1.0M-token pool; the controller trims if usage overshoots. Max = the engine's
+# running-request cap (900 slots / 3) less a margin.
+initial_inflight = 224
 min_inflight = 16
 max_inflight = 288
 
