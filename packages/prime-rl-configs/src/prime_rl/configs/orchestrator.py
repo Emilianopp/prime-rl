@@ -468,8 +468,20 @@ class ConcurrencyConfig(BaseConfig):
     max_inflight: int | None = Field(1024, ge=1)
     """Maximum number of in-flight episodes. Set it to avoid runaway concurrency, especially to limit other external resources (e.g. sandboxes). None removes the ceiling."""
 
+    kv_usage_target: float = Field(0.7, gt=0, lt=1)
+    """GPU-KV usage a trim resizes to. Raise it (with the caps) when sessions stop growing
+    in place, e.g. KV-Streams eviction bounds each session's live KV."""
+
+    kv_usage_soft_cap: float = Field(0.8, gt=0, lt=1)
+    """Above this GPU-KV usage, soft-trim the cap and let completions drain the pool."""
+
+    kv_usage_hard_cap: float = Field(0.9, gt=0, le=1)
+    """Above this GPU-KV usage, hard-trim: also cancel the excess, youngest first."""
+
     @model_validator(mode="after")
     def validate_bounds(self):
+        if not self.kv_usage_target < self.kv_usage_soft_cap < self.kv_usage_hard_cap:
+            raise ValueError("concurrency needs kv_usage_target < kv_usage_soft_cap < kv_usage_hard_cap")
         if self.max_inflight is not None:
             if self.initial_inflight is not None and self.initial_inflight > self.max_inflight:
                 raise ValueError("concurrency.initial_inflight must not exceed concurrency.max_inflight")

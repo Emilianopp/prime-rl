@@ -8,9 +8,10 @@ pressure off the engines and reacts at the pipeline's own pace (AIMD):
   advances the turnover by ``1/inflight``) while the engines are clear and
   the cap binds admission. The multiplier tapers linearly with GPU-KV usage
   until the soft-cap boundary.
-- **Trim** above ``KV_USAGE_SOFT_CAP``: lower the cap to what the engines
-  hold at ``KV_USAGE_TARGET`` and let completions drain the pool (soft). If
-  usage still climbs past ``KV_USAGE_HARD_CAP`` — units maturing in place
+- **Trim** above ``config.kv_usage_soft_cap`` (default 0.8): lower the cap to
+  what the engines hold at ``config.kv_usage_target`` (0.7) and let completions
+  drain the pool (soft). If usage still climbs past ``config.kv_usage_hard_cap``
+  (0.9) — units maturing in place
   outpace completions — also cancel the excess, youngest first (hard).
 - **Cut** on overload: preemptions (single-shot loads) or a persistent
   capacity queue (agentic loads never preempt — admission control parks
@@ -45,18 +46,6 @@ TURNOVER_GROWTH_MAX = 1.2
 BINDING_FRACTION = 0.9
 """The cap counts as binding when inflight reaches this fraction of it."""
 
-
-KV_USAGE_SOFT_CAP = 0.8
-"""Above this usage, soft-trim: lower the cap and let completions drain the
-pool naturally — no work is cancelled."""
-
-KV_USAGE_HARD_CAP = 0.9
-"""Above this usage, hard-trim: in-place context growth is outpacing
-completions despite the closed gate, so also cancel the pool excess before
-thrash onset (a cliff, not a slope)."""
-
-KV_USAGE_TARGET = 0.7
-"""A trim resizes to inflight * target / usage — below the trigger, so pool growth has headroom before the next trim."""
 
 KV_TRIM_COOLDOWN_POLLS = 6
 """Polls between kv-headroom trims, letting each trim propagate before the next is sized."""
@@ -225,7 +214,7 @@ class ConcurrencyController:
         queue_overload = self.queue_overload_polls >= QUEUE_PERSISTENCE_POLLS
         if queue_overload:
             worst = max(worst, "hard", key=SEVERITY.__getitem__)
-        elif max_usage > KV_USAGE_SOFT_CAP:
+        elif max_usage > self.config.kv_usage_soft_cap:
             worst = max(worst, "soft", key=SEVERITY.__getitem__)
         self.signal = worst
 
@@ -249,7 +238,7 @@ class ConcurrencyController:
                 self.escalated = False
         self.trim_cooldown = max(0, self.trim_cooldown - 1)
         self.can_grow = worst == "clear" and total_queued == 0 and not self.draining
-        self.growth_multiplier = 1.0 + (TURNOVER_GROWTH_MAX - 1.0) * max(0.0, 1.0 - max_usage / KV_USAGE_SOFT_CAP)
+        self.growth_multiplier = 1.0 + (TURNOVER_GROWTH_MAX - 1.0) * max(0.0, 1.0 - max_usage / self.config.kv_usage_soft_cap)
         self.can_grow_until = time.monotonic() + GROWTH_GATE_TTL_S
 
         # First capacity observation without a user-set start: derive the
@@ -281,9 +270,9 @@ class ConcurrencyController:
             self.escalated = True
             return
 
-        if max_usage > KV_USAGE_SOFT_CAP and inflight > 0 and self.trim_cooldown == 0:
-            hard = max_usage > KV_USAGE_HARD_CAP
-            target = int(self.clamp(inflight * KV_USAGE_TARGET / max_usage))
+        if max_usage > self.config.kv_usage_soft_cap and inflight > 0 and self.trim_cooldown == 0:
+            hard = max_usage > self.config.kv_usage_hard_cap
+            target = int(self.clamp(inflight * self.config.kv_usage_target / max_usage))
             self.resize_down(
                 target,
                 inflight,

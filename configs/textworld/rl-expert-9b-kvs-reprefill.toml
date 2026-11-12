@@ -1,8 +1,8 @@
 # RL on the expert TextWorld set (25k expert cooking + 25k expert coin_collector) with
 # Qwen3.5-9B, KV-Streams r10-1 (past 10 complete turns, evict the oldest each turn) and
 # every live session's KV re-prefilled under the new weights after each weight update.
-# 3 trainer + 1 inference GPUs (A100-80GB), one node, adaptive concurrency sized to fill
-# the KV pool.
+# 2 trainer + 2 inference GPUs (A100-80GB), one node, adaptive concurrency sized to fill
+# the KV pools. (3+1 was inference-bound: ~25 min to generate a batch vs ~12 min to train it.)
 #
 #   CONFIG=configs/textworld/rl-expert-9b-kvs-reprefill.toml ENVS=textworld_env sbatch scripts/kv_streams/rl.sbatch
 #
@@ -18,8 +18,8 @@ max_steps = 400
 seq_len = 32768  # the whole episode is one sample; matches the trace cap below
 
 [deployment]
-num_train_gpus = 3
-num_infer_gpus = 1
+num_train_gpus = 2
+num_infer_gpus = 2
 
 [weight_broadcast]
 type = "filesystem"  # the SGLang backend supports filesystem weight updates only
@@ -39,14 +39,18 @@ batch_size = 128
 group_size = 8  # 16 games x 8 per step; base pass rate on this set is ~15%
 
 [orchestrator.concurrency]
-# Adaptive, started near the target: the derived start (KV pool / a full 33.8k-token
-# episode = 30) only grows as episodes complete, which on long expert games takes most of
-# a 3-hour block. An r10-1 session holds ~4k live tokens, so 224 fills ~85-90% of the
-# ~1.0M-token pool; the controller trims if usage overshoots. Max = the engine's
-# running-request cap (900 slots / 3) less a margin.
-initial_inflight = 224
-min_inflight = 16
-max_inflight = 288
+# Adaptive, started near the target, across both engines. The derived start (KV pool / a
+# full 33.8k-token episode = 30 per engine) only grows as episodes complete, which on long
+# expert games takes most of a 3-hour block. An r10-1 session holds ~3.6-4k live tokens,
+# and eviction stops it growing past its window, so the pools can run fuller than the
+# controller's defaults (target 0.7, soft 0.8, hard 0.9): 0.85 of a ~1.0M-token pool is
+# ~230 sessions per engine. Max = the engines' running-request caps (2 x 900 slots / 3).
+initial_inflight = 440
+min_inflight = 32
+max_inflight = 576
+kv_usage_target = 0.85
+kv_usage_soft_cap = 0.9
+kv_usage_hard_cap = 0.95
 
 [orchestrator.renderer]
 name = "qwen3.5"
@@ -78,7 +82,7 @@ max_model_len = 33792
 gpu_memory_utilization = 0.9
 
 [inference.sglang]
-max_mamba_cache_size = 900  # DeltaNet state slots (~25 MB each at bf16 for 9B): 3 per running request
+max_mamba_cache_size = 900  # DeltaNet state slots per engine (~25 MB each at bf16 for 9B): 3 per running request
 mamba_ssm_dtype = "bfloat16"
 
 [compaction]
@@ -88,4 +92,4 @@ reprefill_on_weight_update = true
 
 [monitors.wandb]
 project = "textworld-eviction-race"
-name = "tw-expert-9b-kvs-r10s1-reprefill-3p1-bs128g8"
+name = "tw-expert-9b-kvs-r10s1-reprefill-2p2-bs128g8"
