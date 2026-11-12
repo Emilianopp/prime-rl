@@ -186,6 +186,19 @@ def test_beam_score_in_play_segment(tmp_path):
     assert env._beam_score(out) == pytest.approx(out["reward"])
 
 
+def test_explore_term_is_the_new_cells_share(tmp_path):
+    """explore_weight > 0: the `explore` term = cells first seen in this segment / one floor's cells; off by default."""
+    task, env = make(tmp_path, segment_turns=4, code_facts=True)
+    out = asyncio.run(env.play_segment(task, SegmentPlayer(first_notes=PLAN_NOTES)))
+    info = out["trace"].info["craftax"]
+    assert "explore" not in out["trace"].rewards and info["new_cells"] >= 0  # logged either way
+    task, env = make(tmp_path / "on", segment_turns=4, code_facts=True, explore_weight=0.5)
+    out = asyncio.run(env.play_segment(task, SegmentPlayer(first_notes=PLAN_NOTES)))
+    trace, info = out["trace"], out["trace"].info["craftax"]
+    assert trace.weights["explore"] == 0.5 and trace.rewards["explore"] == pytest.approx(info["new_cells"] / (48 * 48))
+    assert 0 <= info["new_cells"] < out["trace"].metrics["explored_cells"]  # the first view is not counted as new
+
+
 def test_notes_only_beam_score(tmp_path):
     """progress_weight 0, state_weight 0, beam_cumulative false: the beam score is the notes term alone."""
     task, env = make(tmp_path, segment_turns=4, code_facts=True, progress_weight=0.0, state_weight=0.0, beam_cumulative=False)

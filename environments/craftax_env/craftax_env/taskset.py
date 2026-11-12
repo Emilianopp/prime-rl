@@ -252,6 +252,13 @@ class CraftaxEnvConfig(vf.EnvConfig):
     drop-everything respawn it tells a lineage that kept its tools from one that died (progress alone
     cannot, and in the 2026-11-04 judged beam held tools predicted the children's progress where the
     judge did not). 0: off. In RL (`advantage_mode = "per_term"`) give it a std floor like progress."""
+    explore_weight: float = Field(0.0, ge=0.0)
+    """Segments: weight of the `explore` reward, the cells this segment saw for the first time in its
+    lineage as a fraction of one floor's map (48 x 48). The branches of a node start from the same
+    explored map, so per-term GRPO (`advantage_mode = "per_term"`) turns it into "saw more new ground than
+    its siblings"; the fraction keeps it small in the trace reward the search ranks by. Give it a std floor
+    (algo.term_std_floor.explore, about 12 cells = 0.005) so siblings that all stayed put are not told
+    apart by one or two cells. 0: off (the count is still logged as `new_cells`)."""
     beam_cumulative: bool = True
     """The in-env beam ranks branches by the lineage's total achievement score (progress so far) plus the
     segment's other terms, so a lineage ahead on achievements is never dropped for a lower notes or
@@ -810,6 +817,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 explored = np.zeros(np.asarray(game.state.map).shape, dtype=bool)
             floor, mask = game.visible()
             explored[floor] |= mask
+        explored_start = int(explored.sum()) if segmented else 0  # the first view included: the same for every sibling
         if segmented and (cfg.code_facts or cfg.exploration_aid):  # the route and visits carry across segments
             nav = nav or ExplorationTracker()
             await asyncio.to_thread(observe_game, nav, game)
@@ -1142,11 +1150,14 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
         delta = game.achievement_score - score_before  # Craftax's 1/3/5/8 reward of this segment's unlocks
         score = total if cfg.reward == "return" else game.achievement_score
         state_points, state_parts = (world.state_value(game, explored) if segmented else (0.0, {}))
+        new_cells = int(explored.sum()) - explored_start if segmented else 0
         if segmented:
             reward = delta
             trace.record_reward("progress", reward, cfg.progress_weight)
             if cfg.state_weight > 0:
                 trace.record_reward("state", state_points, cfg.state_weight)
+            if cfg.explore_weight > 0:
+                trace.record_reward("explore", new_cells / float(explored.shape[-2] * explored.shape[-1]), cfg.explore_weight)
         else:
             reward = score / glyph.MAX_RETURN - cfg.death_penalty * len(deaths)
             trace.record_reward(f"craftax_{cfg.reward}", reward, 1.0)
@@ -1179,6 +1190,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     **{f"notes_retry_{r}": float(notes_retried and retry_reason == r) for r in NOTES_RETRY_REASONS},
                     "notes_format": notes_format(sections, PLAN_SECTIONS if cfg.code_facts else SECTIONS),
                     "explored_cells": float(explored.sum()),
+                    "new_cells": float(new_cells),
                     "map_check": float(judge_inputs.get("map_check", 0.0)),
                     "map_claims_correct": float(judge_inputs["map_claim_counts"]["correct"]),
                     "map_claims_invented": float(judge_inputs["map_claim_counts"]["invented"]),
@@ -1209,7 +1221,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                 # what the judges compare against (docs/craftax-segments-judge.md)
                 "first_turn": first_turn, "achievements_before": achievements_before,
                 "achievement_reward_delta": delta, "achievement_score_before": float(score_before),
-                "state_value": float(state_points), "state_parts": state_parts,
+                "state_value": float(state_points), "state_parts": state_parts, "new_cells": new_cells,
                 "events": events[:80], "stations": stations,
                 "floor": game.floor, "position": list(game.position), "actions_hist": dict(actions),
                 "forfeit_kinds": dict(tracker.kinds), "ended_at": time.time(), **judge_inputs,
@@ -1251,7 +1263,7 @@ class CraftaxEnv(vf.Env[CraftaxEnvConfig]):
                     "map_claims", "map_check", "map_claim_counts", "actions_hist", "forfeit_kinds", "adherence_digest",
                     "parent_plan_score", "code_facts", "facts", "plan_feasible", "plan_on_path", "plan_on_track",
                     "plan_target", "critical_path", "plan_check", "findings_count", "turns_lost", "turns_lost_total",
-                    "achievement_score_before", "state_value", "state_parts", "target_progress") if k in info}
+                    "achievement_score_before", "state_value", "state_parts", "new_cells", "target_progress") if k in info}
                     | {"state_bytes": state_bytes, "explored_cells": int(explored.sum())})
             with open(cfg.episode_log, "a") as f:
                 f.write(json.dumps(line) + "\n")
