@@ -18,7 +18,8 @@
 #
 # Env: CHAIN, REPO, CONFIG (relative to REPO), ENVS (environments/ packages, as in rl.sbatch),
 # BLOCKS (default 8), WEIGHTS (a new chain's start: an HF dir with config.json; default the
-# Qwen3.5-9B snapshot in the HF cache), VENV, SGLANG_VENV, OUT_ROOT (passed to rl.sbatch).
+# Qwen3.5-9B snapshot in the HF cache), VENV (default REPO/.venv, else prime-rl-kvs's),
+# SGLANG_VENV, OUT_ROOT (passed to rl.sbatch).
 #
 # Chain dir: base/ (config + tokenizer files), weights/wNNNN (the latest weights, NNNN =
 # trainer updates since the start), latest -> weights/wNNNN, blocks (blocks started),
@@ -28,6 +29,9 @@ C=${CHAIN:?set CHAIN} REPO=${REPO:?set REPO} CONFIG=${CONFIG:?set CONFIG}
 BLOCKS=${BLOCKS:-8}
 HERE=$REPO/scripts/kv_streams
 NAME=$(basename "$CONFIG" .toml)
+# A worktree has no venv of its own: use the main checkout's (rl.sbatch puts REPO's src first
+# on PYTHONPATH, so the code is still REPO's).
+[ -d "$REPO/.venv" ] || export VENV=${VENV:-$SCRATCH/kv-race/prime-rl-kvs/.venv}
 
 if [ ! -e "$C/latest" ]; then
   W=${WEIGHTS:-$(ls -d "$HOME"/.cache/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/* | head -1)}
