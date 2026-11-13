@@ -75,5 +75,5 @@ export CHAIN REPO CONFIG ENVS BLOCKS
 sbatch --dependency=afterany:$SLURM_JOB_ID --export=ALL --job-name="$SLURM_JOB_NAME" \
   --output="$(dirname "$C")/%x-%j.out" "$HERE/chain.sbatch"
 
-export STEP0=$step WANDB_MODE=${WANDB_MODE:-online}
+export STEP0=$step KEEP_WEIGHTS=$latest WANDB_MODE=${WANDB_MODE:-online}
 ARGS="--model.name $latest ${ARGS:-}" WATCH="bash $HERE/qv/save_weights.sh" bash "$HERE/rl.sbatch"
