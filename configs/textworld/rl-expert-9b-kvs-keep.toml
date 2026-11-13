@@ -1,0 +1,95 @@
+# RL on the expert TextWorld set (25k expert cooking + 25k expert coin_collector) with
+# Qwen3.5-9B, KV-Streams r10-1 (past 10 complete turns, evict the oldest each turn). Control
+# arm for rl-expert-9b-kvs-reprefill.toml: identical except live sessions KEEP the KV their
+# earlier policies computed across weight updates (no re-prefill).
+# 2 trainer + 2 inference GPUs (A100-80GB), one node, adaptive concurrency sized to fill
+# the KV pools. (3+1 was inference-bound: ~25 min to generate a batch vs ~12 min to train it.)
+#
+#   CONFIG=configs/textworld/rl-expert-9b-kvs-keep.toml ENVS=textworld_env sbatch scripts/kv_streams/rl.sbatch
+#
+# Engine sizing. A running request holds ~3 DeltaNet state slots (the engine caps running
+# requests at max_mamba_cache_size / 3), and an r10-1 session holds only ~3-4k live tokens.
+# With 300 slots (the ALFWorld test) the engine capped at 100 requests and used ~18% of a
+# 1.5M-token KV pool. 900 slots (~22 GB) leave a ~1.0M-token pool for ~300 requests, so
+# ~300 sessions x ~3.5k tokens fill it; the adaptive controller trims if it overflows.
+#
+
+max_steps = 400
+seq_len = 32768  # the whole episode is one sample; matches the trace cap below
+
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 2
+
+[weight_broadcast]
+type = "filesystem"  # the SGLang backend supports filesystem weight updates only
+
+[model]
+name = "Qwen/Qwen3.5-9B"
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.01
+max_norm = 1.0
+
+[orchestrator]
+batch_size = 128
+
+[orchestrator.train]
+group_size = 8  # 16 games x 8 per step; base pass rate on this set is ~15%
+
+[orchestrator.concurrency]
+# Adaptive, started near the target, across both engines. The derived start (KV pool / a
+# full 33.8k-token episode = 30 per engine) only grows as episodes complete, which on long
+# expert games takes most of a 3-hour block. An r10-1 session holds ~3.6-4k live tokens,
+# and eviction stops it growing past its window, so the pools can run fuller than the
+# controller's defaults (target 0.7, soft 0.8, hard 0.9): 0.85 of a ~1.0M-token pool is
+# ~230 sessions per engine. Max = the engines' running-request caps (2 x 900 slots / 3).
+initial_inflight = 440
+min_inflight = 32
+max_inflight = 576
+kv_usage_target = 0.85
+kv_usage_soft_cap = 0.9
+kv_usage_hard_cap = 0.95
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = false
+thinking_retention = "all"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 1024
+temperature = 1.0
+
+[[orchestrator.train.source]]
+name = "textworld-expert"
+env.taskset.id = "textworld-env"
+env.taskset.dataset_path = "/network/scratch/e/emiliano.penaloza/kv-race/data/textworld_expert_cooking5x12_coin221-233_total50256_train50000_eval256_seed20261026"
+env.taskset.split = "train"
+env.max_episode_steps = 200
+env.player.max_total_tokens = 32768
+env.player.harness.id = "inline-chat"
+env.player.runtime.type = "subprocess"
+serve.pool.type = "elastic"
+serve.pool.multiplex = 16
+
+[inference]
+backend = "sglang"
+
+[inference.vllm]  # engine-agnostic fields, translated for SGLang
+# KV-Streams survivors keep their positions: this bounds the whole episode (trace cap + one reply).
+max_model_len = 33792
+gpu_memory_utilization = 0.9
+
+[inference.sglang]
+max_mamba_cache_size = 900  # DeltaNet state slots per engine (~25 MB each at bf16 for 9B): 3 per running request
+mamba_ssm_dtype = "bfloat16"
+
+[compaction]
+max_turns = 10
+stride = 1
+reprefill_on_weight_update = false  # the control: stale KV is kept
+
+[monitors.wandb]
+project = "textworld-eviction-race"
+name = "tw-expert-9b-kvs-r10s1-keep-2p2-bs128g8"
